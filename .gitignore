@@ -1,0 +1,80 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# PyInstaller output
+build/
+dist/
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets and environment
+.env
+.env.local
+.env.*.local
+
+# Runtime databases and data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# SCM
+.plastic/
+
+# Node.js
+node_modules/
+package-lock.json
+
+# Archive files
+*.zip
+
+# Legacy/unused files
+app.py
+api_seeds.py
+contract_engine.py
+docker-compose.yml
+Dockerfile
+.dockerignore
+fork_manager.py
+hardhat.config.js
+ledger.py
+main_backup_original.py
+main_podt_integrated.py
+main_with_torrent.py
+oracle_app.py
+package.json
+patch_all.sh
+patch_main.py
+patch_seeds.sh
+podt_api.py
+self_healing_debugger.py
+server.js
+server.py
+Start-Subvertio-AI-Debugger.bat
+test_podt_system.py
+tiny_api.py
+torrent.py
+torrent_podt.py
+wallet.py
+wallet_verifier.py
+__mw_patch.py
+__routes_patch.py
