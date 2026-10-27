@@ -120,7 +120,7 @@ cmd_check() {
     fi
     if [[ -n "$(env_value GFC_TURNSTILE_SECRET)" ]]; then line ok "Turnstile configured"; else line -- "Turnstile not configured - bot check skipped (gfc config)"; fi
     if command -v ffmpeg >/dev/null 2>&1; then
-        line ok "audio streaming copies on ($(ls "$DATA_DIR/seeds/streams" 2>/dev/null | grep -c '\.m4a$') made)"
+        line ok "media streaming copies on ($(ls "$DATA_DIR/seeds/streams" 2>/dev/null | grep -c '\.m4a$') audio, $(ls "$DATA_DIR/seeds/streams" 2>/dev/null | grep -c '\.mp4$') video)"
     else
         line --  "ffmpeg missing - big audio is served as uploaded (gfc update installs it)"
     fi
@@ -250,6 +250,9 @@ cmd_grant() {
     [[ ${#args[@]} -ge 4 ]] || die 'usage: gfc grant WALLET AMOUNT PURPOSE "MEMO" [--yes]  (find wallets with: gfc wallets NAME)'
     # Everything after PURPOSE is the memo: ssh drops the quotes around it on the way here
     local wallet="${args[0]}" amount="${args[1]}" purpose="${args[2]}" memo="${args[*]:3}"
+    # Check every rule first (wallet, purpose, amount, memo, treasury key and balance), so a
+    # grant that would fail never gets as far as "Grant it?"
+    as_gfc "$VENV/bin/python" treasury_grants.py check "$wallet" "$amount" "$purpose" "$memo" || return 1
     echo "About to grant $amount GFC from the treasury"
     echo "  to:      $wallet"
     echo "  purpose: $purpose"

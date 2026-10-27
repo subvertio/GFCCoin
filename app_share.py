@@ -160,7 +160,8 @@ def load_seed(seed_id: str) -> dict:
         seed["owner_avatar"] = public_user.get("avatar_filename") or ""
         seed["reward_wallet"] = signing.seed_reward_wallet(conn, seed_id) or ""
         seed["repost_of"] = reposts.public_info(reposts.repost_of(conn, seed_id))
-        seed["stream"] = audio_stream.stream_url(seed_id) if seed["content_type"] == "audio" else None
+        seed["stream"] = (audio_stream.stream_url(seed_id, seed["content_type"])
+                          if seed["content_type"] in audio_stream.STREAM_KINDS else None)
         return seed
     finally:
         conn.close()
@@ -207,7 +208,8 @@ def share_page(seed_id: str, request: Request):
     if ctype == "image" and media_path:
         media = f'<img class="hero" src="{e(media_path)}" alt="{e(title)}">'
     elif ctype == "video" and media_path:
-        media = f'<video class="hero" controls preload="metadata"{poster} src="{e(media_path)}"></video>'
+        video_path = seed["stream"] or media_path  # the upright 720p copy plays everywhere
+        media = f'<video class="hero" controls playsinline preload="metadata"{poster} src="{e(video_path)}"></video>'
     elif ctype == "audio" and media_path:
         cover = f'<img class="hero" src="{e(thumb_path)}" alt="{e(title)}">' if thumb_path else ""
         play_path = seed["stream"] or media_path  # prefer the compressed streaming copy

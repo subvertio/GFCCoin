@@ -675,14 +675,14 @@ class SyncEngine:
                 reposts.process_seed(DB_PATH, seed_id)
             except Exception as e:
                 logger.warning(f"Repost check failed for seed {seed_id}: {e}")
-            try:  # synced audio gets the same compressed streaming copy as uploads
+            try:  # synced audio/video gets the same streaming copy as uploads
                 conn = sqlite3.connect(DB_PATH)
                 row = conn.execute("SELECT content_type FROM seeds WHERE id = ?", (seed_id,)).fetchone()
                 conn.close()
                 if row:
                     audio_stream.enqueue(seed_id, filename, row[0], len(file_data))
             except Exception as e:
-                logger.warning(f"Audio stream queueing failed for seed {seed_id}: {e}")
+                logger.warning(f"Media stream queueing failed for seed {seed_id}: {e}")
         if file_type != "thumbnail" and len(file_data) >= 1024:
             self._award_podt_credits(seed_id, filename, len(file_data), pending)
 

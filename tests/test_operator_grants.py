@@ -118,6 +118,15 @@ class OperatorGrantTests(unittest.TestCase):
         self.assertGreaterEqual(data["summary"]["by_purpose"]["hackathon"], 1234.5)
         self.assertEqual(data["summary"]["max_per_grant"], 10_000.0)
 
+    def test_check_is_a_dry_run(self):
+        w = wallet()
+        with as_treasury_node():
+            self.assertEqual(treasury_grants._cli(["check", w, "42", "other", "dry run memo"]), 0)
+            self.assertEqual(treasury_grants._cli(["check", w, "5000", "node-host", "wrong amount"]), 1)
+            self.assertEqual(treasury_grants._cli(["check", "nope", "42", "other", "bad wallet"]), 1)
+        self.assertEqual(treasury_grants._cli(["check", w, "42", "other", "no treasury key"]), 1)
+        self.assertEqual(self.balance(w), 0)  # nothing minted
+
     def test_cli(self):
         w = wallet()
         with as_treasury_node():

@@ -159,7 +159,7 @@ editor:
 | Update to the latest `master` (backs up first) | `ssh gfc-node gfc update` |
 | Back up now | `ssh gfc-node gfc backup` |
 | Restart | `ssh gfc-node gfc restart` |
-| Grant GFC (hackathon prize, node host, other); asks to confirm, public | `ssh -t gfc-node gfc grant WALLET AMOUNT PURPOSE "MEMO"` |
+| Grant GFC (hackathon prize, node host, other); checks every rule, then asks to confirm; public | `ssh -t gfc-node gfc grant WALLET AMOUNT PURPOSE "MEMO"` |
 | List every operator grant (also public at `/treasury/grants`) | `ssh gfc-node gfc grants` |
 
 To copy the newest backup to your PC (PowerShell, from the repo folder):
