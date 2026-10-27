@@ -23,18 +23,24 @@ def redact(text: str) -> str:
     return _LINK_CODE.sub(lambda m: m.group(1) + "<hidden>", text)
 
 
+def _clean(value):
+    return redact(value) if isinstance(value, str) else value
+
+
 class RedactFilter(logging.Filter):
-    """Rewrites a record's message with redact(); never drops a record."""
+    """
+    Redacts a record's message and each of its arguments in place; never drops a record.
+    The arguments keep their shape, because some formatters read them directly (uvicorn's
+    access log formats client, method, path and status from record.args).
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-        except Exception:
-            return True
-        cleaned = redact(message)
-        if cleaned != message:
-            record.msg = cleaned
-            record.args = None
+        if isinstance(record.msg, str):
+            record.msg = redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_clean(a) for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: _clean(v) for k, v in record.args.items()}
         return True
 
 
