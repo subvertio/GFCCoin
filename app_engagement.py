@@ -11,6 +11,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, Form, Query, Depends
 
 import echohunt
+import moderation
 import referrals
 import reposts
 import signing
@@ -86,6 +87,8 @@ def get_feed_items(owner: str = "anonymous") -> Dict[str, Any]:
                 item["liked"] = item["id"] in liked_set
                 item["bookmarked"] = item["id"] in bookmarked_set
 
+        # Hidden after reports, or from an account this viewer blocked
+        items = moderation.visible_items(conn, items, owner)
         conn.close()
     except Exception:
         items = []
