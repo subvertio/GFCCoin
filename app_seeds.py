@@ -10,6 +10,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 import first_post
 import moderation
 import reposts
+import audio_stream
 import signing
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH, SEEDS_ORIG_DIR as ORIG_DIR, SEEDS_THUMB_DIR as THUMB_DIR
@@ -258,6 +259,14 @@ async def seeds_upload(
     except Exception as ex:
         print(f"Warning: repost check failed for seed {sid}: {ex}")
 
+    # Big or lossless audio gets a compressed streaming copy in the background (audio_stream.py)
+    stream_pending = False
+    if stored:
+        try:
+            stream_pending = audio_stream.enqueue(sid, orig_safe, content_type, file_size)
+        except Exception as ex:
+            print(f"Warning: audio stream queueing failed for seed {sid}: {ex}")
+
     bonus = None
     if stored:
         try:
@@ -273,6 +282,7 @@ async def seeds_upload(
         "tags": [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else [],
         "thumb": thumb_url,
         "full":  f"/originals/{orig_safe}",
+        "stream_pending": stream_pending,
         "owner": owner,
         "content_type": content_type,
         "file_size": file_size,

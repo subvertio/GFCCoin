@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, Form, Query, Depends
 
+import audio_stream
 import echohunt
 import moderation
 import referrals
@@ -44,6 +45,9 @@ def seed_row_to_dict(row, owner_for_engagement: str = "") -> Dict[str, Any]:
         "views": row[11], "created_at": row[12], "owner": row[13],
         "owner_avatar": owner_avatar,
     }
+    # Compressed streaming copy of big/lossless audio, when the node has made one;
+    # players should prefer it over "full" (the untouched original)
+    d["stream"] = audio_stream.stream_url(row[0]) if row[6] == "audio" else None
     # Per-user engagement state defaults
     d["liked"] = False
     d["bookmarked"] = False

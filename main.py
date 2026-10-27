@@ -31,6 +31,7 @@ from app_tokens import router as tokens_router
 from app_web import router as web_router, feed_html_response, wants_html
 from app_moderation import router as moderation_router
 from app_webverify import router as webverify_router
+import audio_stream
 import blockchain
 import logredact
 import moderation
@@ -80,6 +81,8 @@ app.include_router(webverify_router)
 app.mount("/originals", StaticFiles(directory=str(SEEDS_ORIG_DIR), follow_symlink=True), name="originals")
 app.mount("/thumbs", StaticFiles(directory=str(SEEDS_THUMB_DIR), follow_symlink=True), name="thumbs")
 app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR), follow_symlink=True), name="avatars")
+# Compressed streaming copies of big/lossless audio (audio_stream.py)
+app.mount("/streams", StaticFiles(directory=str(audio_stream.STREAMS_DIR), follow_symlink=True), name="streams")
 
 # ============================================================================
 # MODELS
@@ -666,6 +669,12 @@ def _backfill_fingerprints():
             print(f"[Reposts] Fingerprinted {done} existing seeds")
     except Exception as e:
         print(f"[Reposts] Backfill failed: {e}")
+    try:
+        queued = audio_stream.backfill(DB_PATH)
+        if queued:
+            print(f"[AudioStream] Queued streaming copies for {queued} existing audio seeds")
+    except Exception as e:
+        print(f"[AudioStream] Backfill failed: {e}")
 
 
 def _ensure_firewall_rules():
