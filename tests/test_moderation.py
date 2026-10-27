@@ -88,6 +88,9 @@ class ModerationTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/p/{seed}").status_code, 410)
         self.assertNotIn(seed, {s["id"] for s in self.client.get("/seeds").json()["items"]})
         self.assertNotIn(seed, {s["id"] for s in self.client.get("/search", params={"q": "reported"}).json()["seeds"]})
+        web = self.client.get("/web")  # the public web feed
+        self.assertEqual(web.status_code, 200)
+        self.assertNotIn(seed, web.text)
 
         conn = sqlite3.connect(main.DB_PATH)
         try:
