@@ -4,6 +4,8 @@ GFC Web Feed - the whole feed as a public web page, for visitors to the node's d
 - GET /  (browsers, i.e. Accept: text/html)  the feed page; API clients still get JSON (main.py)
 - GET /web, /explore                         the feed page, ?page=N for older posts
 - GET /web/cards?page=N                      just the cards of page N (the page's infinite scroll)
+- GET /p/{id} (app_share.py)                 the shared post, focused on top, then this feed below
+
 
 Cards look like the app's: letter avatar, name @handle · time, title, text, media,
 views / likes / comments, each linking to its /p/{id} share page. Order is the feed's
@@ -195,13 +197,16 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
             f'&middot; {int(seed.get("comments") or 0)} comments</p></div></article>')
 
 
-def render_cards(page: int):
+def render_cards(page: int, exclude: str = ""):
     """The cards of a page followed by the link to the next one (if any)."""
     seeds, more = feed_page(page)
+    if exclude:  # the post a share page is focused on is already shown above the feed
+        seeds = [s for s in seeds if s["id"] != exclude]
     now = datetime.datetime.now(datetime.timezone.utc)
     cards = "\n".join(render_card(s, now) for s in seeds)
     if more:
-        cards += (f'\n<a class="more" href="/web?page={page + 1}" data-next="/web/cards?page={page + 1}">'
+        skip = f"&amp;exclude={quote(exclude, safe='')}" if exclude else ""
+        cards += (f'\n<a class="more" href="/web?page={page + 1}" data-next="/web/cards?page={page + 1}{skip}">'
                   'Older posts</a>')
     elif page > 1 or seeds:
         cards += '\n<p class="end">You\'re all caught up.</p>'
@@ -312,17 +317,36 @@ def _security_headers(nonce: str) -> dict:
     }
 
 
-def feed_html_response(request: Request, page: int = 1) -> HTMLResponse:
-    """The full feed page (also served at / to browsers)."""
+def feed_html_response(request: Request, page: int = 1, featured: dict = None) -> HTMLResponse:
+    """
+    The full feed page (also served at / to browsers). With `featured` (from the
+    /p/{id} share page) the shared post comes first, focused, and the feed follows
+    below without it; the page's title, description, link and X card are the post's.
+    featured: {"id", "html", "title", "description", "url", "image", "app_link", "head"}.
+    """
     page = max(1, page)
     e = lambda s: html.escape(s, quote=True)  # noqa: E731
     base = public_base_url()
     url = f"{base}/" if page == 1 else f"{base}/web?page={page}"
     ref = clean_ref(request.query_params.get("ref"))
     app_link = _app_link(_with_ref("feed", ref), url, request.headers.get("user-agent", ""))
-    cards, any_cards = render_cards(page)
+    cards, any_cards = render_cards(page, exclude=featured["id"] if featured else "")
     if not any_cards:
         cards = '<p class="end">No posts here yet.</p>'
+    title = page_title = FEED_TITLE
+    description = FEED_DESCRIPTION
+    card_type, image_tags, extra_head, top = "summary", "", "", ""
+    if featured:
+        title, description, url = featured["title"], featured["description"], featured["url"]
+        page_title = featured.get("page_title", title)
+        app_link = featured["app_link"]
+        extra_head = featured.get("head", "")
+        if featured.get("image"):
+            card_type = "summary_large_image"
+            image_tags = (f'<meta property="og:image" content="{e(featured["image"])}">\n'
+                          f'<meta name="twitter:image" content="{e(featured["image"])}">\n')
+        top = (f'<section class="featured" aria-label="Shared post">{featured["html"]}</section>\n'
+               '<h2 class="more-head">Latest on GFC</h2>\n')
     nonce = secrets.token_urlsafe(16)
     script = SCRIPT % {"src": json.dumps(MODEL_VIEWER_SRC), "sri": json.dumps(MODEL_VIEWER_SRI)}
     body = f"""<!doctype html>
@@ -330,18 +354,18 @@ def feed_html_response(request: Request, page: int = 1) -> HTMLResponse:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{e(FEED_TITLE)}</title>
-<meta name="description" content="{e(FEED_DESCRIPTION)}">
+<title>{e(page_title)}</title>
+<meta name="description" content="{e(description)}">
 <link rel="canonical" href="{e(url)}">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GFC">
-<meta property="og:title" content="{e(FEED_TITLE)}">
-<meta property="og:description" content="{e(FEED_DESCRIPTION)}">
+<meta property="og:title" content="{e(title)}">
+<meta property="og:description" content="{e(description)}">
 <meta property="og:url" content="{e(url)}">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="{e(FEED_TITLE)}">
-<meta name="twitter:description" content="{e(FEED_DESCRIPTION)}">
-<style nonce="{nonce}">
+<meta name="twitter:card" content="{card_type}">
+<meta name="twitter:title" content="{e(title)}">
+<meta name="twitter:description" content="{e(description)}">
+{image_tags}{extra_head}<style nonce="{nonce}">
 *{{box-sizing:border-box}}
 html{{background:#000}}
 body{{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#000;color:#e7e9ea;overflow-x:hidden}}
@@ -377,12 +401,28 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 .placeholder{{padding:48px 0;text-align:center;color:#9aa}}
 .stats{{margin:8px 0 0;font-size:.9rem}}
 .more,.end{{display:block;padding:20px 16px;text-align:center;color:#71767b}}
+.featured{{padding:12px 16px 16px;border-bottom:1px solid #2f3336}}
+.featured .hero{{display:block;width:100%;max-height:70vh;object-fit:contain;background:#000;border:1px solid #2f3336;border-radius:16px}}
+.featured model-viewer.hero{{height:70vh;--poster-color:#000}}
+.featured audio{{display:block;width:100%;margin-top:8px}}
+.featured h1{{margin:12px 0 4px;font-size:1.4rem}}
+.featured .creator{{display:flex;align-items:center;gap:8px;margin:0;color:#71767b}}
+.featured .creator img{{width:28px;height:28px;border-radius:50%}}
+.featured .badge{{display:inline-block;margin:8px 0 0;padding:2px 8px;border-radius:12px;background:#0f3d2e;color:#00ba7c;font-size:.85rem}}
+.featured .repost{{display:block;margin:8px 0 0;padding:8px 12px;border-radius:8px;background:#1d1f23}}
+.featured .desc{{white-space:pre-wrap;line-height:1.5}}
+.featured .actions a{{display:inline-block;margin:8px 8px 0 0;padding:10px 16px;border-radius:999px;background:#3b4cca;color:#fff;text-decoration:none;font-weight:600}}
+.featured .actions a.secondary{{background:transparent;border:1px solid #536471}}
+.featured .placeholder{{padding:64px 0;text-align:center;color:#9aa}}
+.more-head{{margin:0;padding:12px 16px;font-size:1rem;color:#71767b;border-bottom:1px solid #2f3336}}
 </style>
 </head>
 <body>
 <header class="top"><h1>GFC</h1><a class="open" href="{e(app_link)}">Open in GFC</a></header>
-<main id="feed">
+<main>
+{top}<div id="feed">
 {cards}
+</div>
 </main>
 <script nonce="{nonce}">{script}</script>
 </body>
@@ -406,8 +446,8 @@ def explore(request: Request, page: int = 1):
 
 
 @router.get("/web/cards", response_class=HTMLResponse)
-def web_cards(page: int = 1):
+def web_cards(page: int = 1, exclude: str = ""):
     """The cards of one page, for the feed page's infinite scroll."""
-    cards, _ = render_cards(max(1, page))
+    cards, _ = render_cards(max(1, page), exclude=exclude)
     headers = _security_headers(secrets.token_urlsafe(16))
     return HTMLResponse(cards, headers=headers)
