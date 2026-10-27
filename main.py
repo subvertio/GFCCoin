@@ -23,6 +23,7 @@ from app_seeds import router as seeds_router
 from app_engagement import router as engagement_router
 from app_profile import router as profile_router
 from app_podt import podt_router
+from app_verify import router as verify_router
 import blockchain
 import keystore
 import signing
@@ -55,6 +56,7 @@ app.include_router(seeds_router)
 app.include_router(engagement_router)
 app.include_router(profile_router)
 app.include_router(podt_router)
+app.include_router(verify_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
@@ -312,7 +314,8 @@ async def create_wallet(name: str = Form("Default Wallet"), api_token: str = For
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-    # Process first-wallet grant (100 GFC from Treasury)
+    # First-wallet grant (100 GFC from Treasury), only once the owner's phone is verified.
+    # Unverified owners get it from POST /verify/phone/check instead.
     grant_balance = 0.0
     if owner:
         grant_result = blockchain.process_user_grant(DB_PATH, owner, wallet_id)

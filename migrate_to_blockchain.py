@@ -161,7 +161,7 @@ def migrate():
         else:
             grants_skipped += 1
 
-    print(f"  Grants created: {grants_created}, Skipped (already granted): {grants_skipped}")
+    print(f"  Grants created: {grants_created}, Skipped (already granted or phone not verified): {grants_skipped}")
 
     # Step 5: Recalculate wallet balances
     print("\n[5/5] Recalculating wallet balances from blockchain...")

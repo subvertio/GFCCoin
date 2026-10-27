@@ -31,6 +31,8 @@ NO_KEY_FILE = Path(_TMP) / "no_treasury_key.hex"  # never created: nodes without
 os.environ["GFC_DATA_DIR"] = _TMP
 os.environ["GFC_TREASURY_PUBKEYS"] = TREASURY_PUB
 os.environ["GFC_TREASURY_KEY_FILE"] = str(NO_KEY_FILE)
+for _var in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_VERIFY_SERVICE_SID", "GFC_TURNSTILE_SECRET"):
+    os.environ.pop(_var, None)  # tests never reach real Twilio or Cloudflare
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -38,6 +40,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import blockchain  # noqa: E402
 import main  # noqa: E402
 import keystore  # noqa: E402
+import phone_verify  # noqa: E402
 import signing  # noqa: E402
 from sync_ingest import TABLE_COLUMNS, ingest_rows, select_rows_since  # noqa: E402
 
@@ -55,6 +58,33 @@ def new_node(name: str) -> str:
     finally:
         main.DB_PATH = saved
     return path
+
+
+FAKE_SMS = phone_verify.FakeVerifier()
+phone_verify.set_verifier(FAKE_SMS)
+
+
+def unique_phone() -> str:
+    return "+1555" + str(uuid.uuid4().int)[:7]
+
+
+def mark_verified(db: str, username: str) -> str:
+    """Record username as phone-verified on node `db` (as /verify/phone/check would)."""
+    hashed = phone_verify.phone_hash(unique_phone())
+    conn = sqlite3.connect(db)
+    phone_verify.record_verified(conn, username, hashed)
+    conn.commit()
+    conn.close()
+    return hashed
+
+
+def backdate_user(db: str, username: str, hours: int = 48):
+    """Make an account old enough for its plays to earn the creator credit."""
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE users SET created_at = ? WHERE username = ?",
+                 ((datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(), username))
+    conn.commit()
+    conn.close()
 
 
 def new_wallet(db: str, owner: str) -> str:
@@ -123,6 +153,11 @@ class RestTransferTests(unittest.TestCase):
         r = self.client.post("/auth/register", data={"username": username, "password": "pw-" + username})
         self.assertEqual(r.status_code, 200, r.text)
         token = r.json()["token"]
+        phone = unique_phone()
+        self.assertEqual(self.client.post("/verify/phone/start", data={"api_token": token, "phone": phone})
+                         .status_code, 200)
+        self.assertTrue(self.client.post("/verify/phone/check", data={
+            "api_token": token, "phone": phone, "code": FAKE_SMS.sent[phone]}).json()["verified"])
         w = self.client.post("/wallets/create", data={"name": "main", "api_token": token})
         self.assertEqual(w.status_code, 200, w.text)
         return token, w.json()
@@ -175,6 +210,7 @@ class RestTransferTests(unittest.TestCase):
     def test_seed_upload_signed_and_play_pays_signer(self):
         fay_token, fay = self.register("fay")
         gus_token, gus = self.register("gus")
+        backdate_user(main.DB_PATH, "gus")
         r = self.upload(fay_token, title="ship")
         self.assertEqual(r.status_code, 200, r.text)
         seed = r.json()
@@ -214,6 +250,7 @@ class SyncValidationTests(unittest.TestCase):
         self.t = new_node(f"treasury_{tag}")
         self.b = new_node(f"peer_{tag}")
         self.alice = new_wallet(self.t, "alice")
+        mark_verified(self.t, "alice")
         with as_treasury_node():
             self.grant = blockchain.process_user_grant(self.t, "alice", self.alice)
         self.alice_priv = signing.get_wallet_private_key(self.t, self.alice)
@@ -445,6 +482,9 @@ class KeystoreTests(unittest.TestCase):
         r = self.client.post("/auth/register", data={"username": username, "password": password})
         self.assertEqual(r.status_code, 200, r.text)
         token = r.json()["token"]
+        phone = unique_phone()  # verified first, so the wallet gets its grant
+        self.client.post("/verify/phone/start", data={"api_token": token, "phone": phone})
+        self.client.post("/verify/phone/check", data={"api_token": token, "phone": phone, "code": FAKE_SMS.sent[phone]})
         w = self.client.post("/wallets/create", data={"name": "main", "api_token": token}).json()
         return token, w["id"], password
 

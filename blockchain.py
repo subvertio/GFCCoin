@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from config import DB_PATH
+import phone_verify
 import signing
 
 # ============================================================================
@@ -44,6 +45,10 @@ MAX_REWARD_CENTS = 100_000              # 1,000 GFC per reward tx (~10 GB of PoD
 MAX_CLOCK_SKEW = timedelta(hours=1)     # reject rows timestamped further in the future
 PENDING_TTL = timedelta(days=7)         # unfunded synced transfers are retried this long
 MAX_PENDING = 5_000
+
+# Play rewards (Sybil friction; enforced by the node that issues the reward)
+MIN_VIEWER_ACCOUNT_AGE = timedelta(hours=24)  # viewer accounts younger than this earn nobody credit
+PLAY_REWARDS_PER_CREATOR_PER_DAY = 1          # per viewer, per creator wallet, per UTC day
 
 TX_INSERT_COLUMNS = ("id", "sender", "recipient", "amount", "reason", "timestamp",
                      "amount_cents", "tx_hash", "tx_type", "signature", "signer")
@@ -137,7 +142,18 @@ def init_blockchain_tables(db_path: str = DB_PATH):
         received_at TEXT NOT NULL
     )''')
 
+    # Paid play rewards per (viewer, creator wallet, UTC day), for the daily cap. Local only.
+    conn.execute('''CREATE TABLE IF NOT EXISTS play_reward_slots (
+        viewer TEXT NOT NULL,
+        seeder_wallet TEXT NOT NULL,
+        day TEXT NOT NULL,
+        slot INTEGER NOT NULL,
+        proof_id TEXT NOT NULL,
+        PRIMARY KEY (viewer, seeder_wallet, day, slot)
+    )''')
+
     signing.init_wallet_keys_table(conn)
+    phone_verify.init_phone_tables(conn)
 
     conn.commit()
     conn.close()
@@ -387,11 +403,16 @@ def get_balance(db_path: str, wallet_id: str) -> float:
 
 def process_user_grant(db_path: str, username: str, wallet_id: str) -> Optional[dict]:
     """
-    Grant 100 GFC to a user's first wallet.
-    Returns the transaction dict if grant was issued, None if user already received grant.
+    Grant 100 GFC to a user's first wallet, once their phone is verified.
+    Returns the transaction dict if grant was issued, None if the user is not
+    phone-verified or already received the grant.
     Thread-safe via SQLite's built-in locking.
     """
     conn = sqlite3.connect(db_path)
+
+    if not phone_verify.is_verified(conn, username):
+        conn.close()
+        return None  # Grants need a verified phone (one per number), see phone_verify.py
 
     # Check if this username already received a grant
     existing = conn.execute(
@@ -580,6 +601,43 @@ def process_podt_reward(db_path: str, seeder_wallet: str, proof_id: str,
     print(f"[Blockchain] PoDT: {reward_cents / 100:.2f} GFC -> {seeder_wallet} "
           f"({bytes_transferred} bytes, block: {block['block_index']})")
     return tx
+
+
+def play_reward_block_reason(conn: sqlite3.Connection, viewer: str) -> Optional[str]:
+    """Why `viewer`'s plays can't earn credit for anyone (None if they can)."""
+    if not phone_verify.is_verified(conn, viewer):
+        return "viewer phone not verified"
+    row = conn.execute("SELECT created_at FROM users WHERE username = ?", (viewer,)).fetchone()
+    created = _parse_timestamp(row[0]) if row else None
+    if created is None or datetime.now(timezone.utc) - created < MIN_VIEWER_ACCOUNT_AGE:
+        return "viewer account too new"
+    return None
+
+
+def claim_play_slot(db_path: str, viewer: str, seeder_wallet: str, proof_id: str) -> bool:
+    """Reserve one of today's play rewards from viewer to this creator wallet. False if all are used."""
+    day = datetime.now(timezone.utc).date().isoformat()
+    conn = sqlite3.connect(db_path)
+    try:
+        for slot in range(PLAY_REWARDS_PER_CREATOR_PER_DAY):
+            try:
+                conn.execute("INSERT INTO play_reward_slots (viewer, seeder_wallet, day, slot, proof_id) "
+                             "VALUES (?, ?, ?, ?, ?)", (viewer, seeder_wallet, day, slot, proof_id))
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                continue
+        return False
+    finally:
+        conn.close()
+
+
+def release_play_slot(db_path: str, proof_id: str):
+    """Give back a slot whose reward was not paid."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM play_reward_slots WHERE proof_id = ?", (proof_id,))
+    conn.commit()
+    conn.close()
 
 
 # ============================================================================
