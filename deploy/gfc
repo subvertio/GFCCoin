@@ -3,11 +3,12 @@
 # from Windows:  ssh gfc-node gfc check   (add -t for commands that prompt)
 set -euo pipefail
 
-APP_DIR=/opt/gfc/app
-VENV=/opt/gfc/venv
-ENV_FILE=/etc/gfc/gfc.env
-DATA_DIR=/var/lib/gfc
-BACKUP_DIR=/var/backups/gfc
+# Paths can be overridden (GFC_*) to test the helper against a scratch setup
+APP_DIR="${GFC_APP_DIR:-/opt/gfc/app}"
+VENV="${GFC_VENV:-/opt/gfc/venv}"
+ENV_FILE="${GFC_ENV_FILE:-/etc/gfc/gfc.env}"
+DATA_DIR="${GFC_DATA_ROOT:-/var/lib/gfc}"
+BACKUP_DIR="${GFC_BACKUP_DIR:-/var/backups/gfc}"
 
 usage() {
     cat <<'EOF'
@@ -21,7 +22,8 @@ usage: gfc <command>
   backup                back up now
   restore-treasury [F]  restore the treasury key from an encrypted backup
                         (default F: /var/lib/gfc/treasury.backup; needs ssh -t)
-  encrypt-treasury      encrypt the treasury key file (needs ssh -t)
+  encrypt-treasury      encrypt the treasury key file with the passphrase saved
+                        in the settings (set GFC_TREASURY_PASSPHRASE via gfc config first)
 EOF
 }
 
@@ -30,7 +32,25 @@ need_root() { [[ $EUID -eq 0 ]] || die "run as root"; }
 
 # Run a command as the gfc user with the node's settings loaded
 as_gfc() {
-    runuser -u gfc -- bash -c 'set -a; . "$0"; set +a; cd /opt/gfc/app; exec "$@"' "$ENV_FILE" "$@"
+    runuser -u gfc -- env GFC_APP_DIR="$APP_DIR" \
+        bash -c 'set -a; . "$0"; set +a; cd "$GFC_APP_DIR"; exec "$@"' "$ENV_FILE" "$@"
+}
+
+# Wait (up to 60s) for the node to answer after a restart, so checks don't race it
+wait_for_node() {
+    local i
+    for i in $(seq 1 60); do
+        curl -fsS --max-time 2 http://127.0.0.1:8000/health >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    echo "warning: node still not answering after 60s (gfc logs)" >&2
+    return 1
+}
+
+restart_node() {
+    systemctl restart gfc-node
+    echo -n "restarting node... "
+    if wait_for_node; then echo "up"; fi
 }
 
 env_value() {
@@ -94,34 +114,52 @@ cmd_restore_treasury() {
     chown gfc:gfc "$src"
     as_gfc "$VENV/bin/python" signing.py restore "$src"
     rm -f "$src"
-    systemctl restart gfc-node
-    sleep 2
+    restart_node
     if treasury_loaded; then echo "Treasury key restored and loaded. The uploaded backup copy was deleted from the server."
     else echo "Key restored, but the node can't use it yet - run: gfc check" >&2; fi
 }
 
 cmd_encrypt_treasury() {
+    # Uses the passphrase already saved in the settings, so there is nothing to
+    # mistype, and rolls back if the node can't unlock the result.
     need_root
-    [[ -t 0 ]] || die "this asks for a passphrase: run it with  ssh -t gfc-node gfc encrypt-treasury"
-    as_gfc "$VENV/bin/python" signing.py encrypt
-    echo
-    echo "Now put that passphrase in the settings as GFC_TREASURY_PASSPHRASE=...  (gfc config),"
-    echo "or the node will stop signing grants and rewards after its next restart."
+    local keyfile; keyfile="$(env_value GFC_TREASURY_KEY_FILE)"; keyfile="${keyfile:-$DATA_DIR/treasury_key.hex}"
+    [[ -f "$keyfile" ]] || die "no treasury key installed (gfc restore-treasury first)"
+    grep -q '^{' "$keyfile" && die "the treasury key is already encrypted ('gfc check' shows whether it unlocks)"
+    [[ -n "$(env_value GFC_TREASURY_PASSPHRASE)" ]] || die "set the passphrase first: run  ssh -t gfc-node gfc config  and fill in GFC_TREASURY_PASSPHRASE= (12+ characters; keep a copy in your password manager)"
+    as_gfc bash -c '[[ ${#GFC_TREASURY_PASSPHRASE} -ge 12 ]]' \
+        || die "GFC_TREASURY_PASSPHRASE must be at least 12 characters (gfc config)"
+    treasury_loaded || die "the node can't use the current key file, so it won't be encrypted (gfc check)"
+
+    local safety="$keyfile.pre-encrypt"
+    install -o gfc -g gfc -m 600 "$keyfile" "$safety"
+    # Pass the saved passphrase to signing.py as the "typed" one (no prompt)
+    if ! as_gfc bash -c 'GFC_BACKUP_PASSPHRASE="$GFC_TREASURY_PASSPHRASE" exec "$0" signing.py encrypt' "$VENV/bin/python" >/dev/null; then
+        install -o gfc -g gfc -m 600 "$safety" "$keyfile"; rm -f "$safety"
+        die "encryption failed; the key file is unchanged (is the passphrase at least 12 characters?)"
+    fi
+    if treasury_loaded; then
+        rm -f "$safety"
+        echo "Treasury key encrypted with the passphrase in the settings, and the node can unlock it."
+    else
+        install -o gfc -g gfc -m 600 "$safety" "$keyfile"; rm -f "$safety"
+        die "the node couldn't unlock the encrypted key, so the change was rolled back (key file unchanged)"
+    fi
 }
 
 cmd_config() {
     need_root
     [[ -t 0 ]] || die "this opens an editor: run it with  ssh -t gfc-node gfc config"
     "${EDITOR:-nano}" "$ENV_FILE"
-    systemctl restart gfc-node
-    echo "Saved and restarted. Status:"
+    restart_node
+    echo "Saved. Status:"
     cmd_check
 }
 
 case "${1:-}" in
     check)            cmd_check ;;
     logs)             journalctl -u gfc-node -n "${2:-50}" --no-pager ;;
-    restart)          need_root; systemctl restart gfc-node; echo "restarted" ;;
+    restart)          need_root; restart_node ;;
     config)           cmd_config ;;
     update)           need_root; /usr/local/sbin/gfc-update ;;
     backup)           need_root; /usr/local/sbin/gfc-backup ;;

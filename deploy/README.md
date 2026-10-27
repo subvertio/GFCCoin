@@ -102,17 +102,31 @@ restarts the node and confirms the key is loaded:
 ssh -t gfc-node gfc restore-treasury
 ```
 
-Optionally, encrypt the key file on disk. The command tells you to add the
-passphrase to the settings with `gfc config` (as `GFC_TREASURY_PASSPHRASE=...`):
+Optionally, encrypt the key file on disk. First save a passphrase of at least
+12 characters in the settings as `GFC_TREASURY_PASSPHRASE=...`, pasted from your
+password manager. Wrap it in single quotes if it has spaces or symbols like `$`.
 
 ```powershell
-ssh -t gfc-node gfc encrypt-treasury
+ssh -t gfc-node gfc config
 ```
 
-Encrypting means a leaked disk snapshot or backup doesn't expose the key. It
-doesn't protect against someone who gets root on the running server, because
-the passphrase sits in the env file. The treasury limits (fixed grant size,
-capped rewards) bound the damage, and you can rotate to a new key.
+Then encrypt. It uses the saved passphrase, so there's nothing to retype. It
+keeps a safety copy, and rolls back if the node can't unlock the result:
+
+```powershell
+ssh gfc-node gfc encrypt-treasury
+```
+
+**What encrypting protects:** the GFC backup files (`gfc backup`, and the
+copies you pull to your PC) then hold only the encrypted key. The passphrase
+lives in `/etc/gfc/gfc.env`, which isn't backed up.
+
+**What it doesn't protect:** anyone with root on the server, and DigitalOcean's
+own droplet backups or snapshots. Those copy the whole disk, so they contain
+both the key file and the passphrase. Two-factor login on your DigitalOcean
+account and your SSH key's passphrase are what guard those. If the worst
+happens, the treasury limits (fixed grant size, capped rewards) bound the
+damage, and you can rotate to a new key.
 
 ## 5. Add the Twilio and Turnstile secrets
 
