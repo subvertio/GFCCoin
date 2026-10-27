@@ -157,7 +157,8 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
                  'loading="lazy"></a>')
     elif ctype == "video" and media_path:
         poster = f'<img src="{e(thumb_path)}" alt="" loading="lazy">' if thumb_path else ""
-        media = (f'<button type="button" class="media video" data-video="{e(media_path)}" '
+        play_path = seed.get("stream") or media_path  # the upright 720p copy when it's ready
+        media = (f'<button type="button" class="media video" data-video="{e(play_path)}" '
                  f'data-poster="{e(thumb_path)}" aria-label="Play {e(title or "video")} (muted)">'
                  f'{poster}<span class="play" aria-hidden="true">&#9654;</span></button>')
     elif ctype == "audio" and media_path:

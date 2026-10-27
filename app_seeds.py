@@ -259,13 +259,13 @@ async def seeds_upload(
     except Exception as ex:
         print(f"Warning: repost check failed for seed {sid}: {ex}")
 
-    # Big or lossless audio gets a compressed streaming copy in the background (audio_stream.py)
+    # Big or lossless audio, and every video, gets a streaming copy in the background (audio_stream.py)
     stream_pending = False
     if stored:
         try:
             stream_pending = audio_stream.enqueue(sid, orig_safe, content_type, file_size)
         except Exception as ex:
-            print(f"Warning: audio stream queueing failed for seed {sid}: {ex}")
+            print(f"Warning: media stream queueing failed for seed {sid}: {ex}")
 
     bonus = None
     if stored:

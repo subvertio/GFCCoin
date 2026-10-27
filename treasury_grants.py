@@ -16,6 +16,7 @@ leaked treasury key can't mint more than 10,000 per transaction this way.
 Grants are listed publicly at /treasury/grants (from the ledger itself).
 
 Run on the treasury node (normally through the `gfc grant` helper):
+    python treasury_grants.py check <wallet> <amount GFC> <purpose> "<memo>"   (dry run)
     python treasury_grants.py grant <wallet> <amount GFC> <purpose> "<memo>"
     python treasury_grants.py list
 """
@@ -35,8 +36,8 @@ class GrantError(ValueError):
     pass
 
 
-def grant(wallet_id: str, amount_gfc: float, purpose: str, memo: str, db_path: str = DB_PATH) -> Dict:
-    """Mint an operator grant. Raises GrantError when a rule isn't met."""
+def validate(wallet_id: str, amount_gfc: float, purpose: str, memo: str, db_path: str = DB_PATH) -> Dict:
+    """Check every rule for a grant without minting anything. Raises GrantError when one isn't met."""
     purpose = (purpose or "").strip().lower()
     memo = " ".join((memo or "").split())  # one line
     if not signing.is_public_key(wallet_id):
@@ -67,7 +68,16 @@ def grant(wallet_id: str, amount_gfc: float, purpose: str, memo: str, db_path: s
                 raise GrantError("this wallet already received its node-host grant")
         finally:
             conn.close()
-    tx = blockchain.process_operator_mint(db_path, wallet_id, cents, reason)
+    if blockchain.get_balance_cents(db_path, blockchain.TREASURY_WALLET_ID) < cents:
+        raise GrantError("the treasury can't pay this grant (balance too low)")
+    return {"wallet": wallet_id, "cents": cents, "purpose": purpose, "memo": memo, "reason": reason}
+
+
+def grant(wallet_id: str, amount_gfc: float, purpose: str, memo: str, db_path: str = DB_PATH) -> Dict:
+    """Mint an operator grant. Raises GrantError when a rule isn't met."""
+    v = validate(wallet_id, amount_gfc, purpose, memo, db_path)
+    wallet_id, cents, purpose, memo = v["wallet"], v["cents"], v["purpose"], v["memo"]
+    tx = blockchain.process_operator_mint(db_path, wallet_id, cents, v["reason"])
     if not tx:
         raise GrantError("the treasury couldn't pay this grant")
     return {"tx_id": tx["id"], "wallet": wallet_id, "amount": cents / 100.0,
@@ -95,6 +105,14 @@ def list_grants(db_path: str = DB_PATH) -> List[Dict]:
 
 
 def _cli(argv: List[str]) -> int:
+    if len(argv) == 5 and argv[0] == "check":
+        try:
+            v = validate(argv[1], argv[2], argv[3], argv[4])
+        except GrantError as ex:
+            print(f"error: {ex}")
+            return 1
+        print(f"OK: {v['cents'] / 100:,.2f} GFC ({v['purpose']}) can be granted to {v['wallet']}")
+        return 0
     if len(argv) == 5 and argv[0] == "grant":
         try:
             g = grant(argv[1], argv[2], argv[3], argv[4])
