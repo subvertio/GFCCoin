@@ -1,0 +1,23 @@
+# GFC public node. __DOMAIN__ is filled in by setup.sh.
+# Caddy obtains and renews the HTTPS certificate automatically.
+__DOMAIN__ {
+	encode gzip
+
+	# Largest accepted upload (seeds, avatars)
+	request_body {
+		max_size 200MB
+	}
+
+	# Operator/debug endpoints: reachable only on the server itself (curl 127.0.0.1:8000/...)
+	@operator path /p2p/add_peer* /p2p/force_sync* /p2p/sync_debug* /p2p/diagnose* /podt/report_transfer*
+	respond @operator 404
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:8000
+}
