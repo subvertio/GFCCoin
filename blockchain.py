@@ -10,6 +10,7 @@ All financial amounts are stored as INTEGER cents (100 = 1.00 GFC).
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -40,7 +41,9 @@ TX_TYPE_REWARD   = "REWARD"    # Treasury -> Seeder (PoDT)
 TX_TYPE_REFERRAL = "REFERRAL"  # Treasury -> inviter (friend became active) or invited friend (bonus)
 TX_TYPE_REPOST   = "REPOST"    # Treasury -> original creator (a verified user reposted their content)
 TX_TYPE_FIRST_POST = "FIRST_POST"  # Treasury -> creator's first original post (see first_post.py)
-MINT_TX_TYPES = (TX_TYPE_GRANT, TX_TYPE_REWARD, TX_TYPE_REFERRAL, TX_TYPE_REPOST, TX_TYPE_FIRST_POST)
+TX_TYPE_OPERATOR = "OPERATOR"      # Treasury -> hackathon prizes, node hosts, ... (see treasury_grants.py)
+MINT_TX_TYPES = (TX_TYPE_GRANT, TX_TYPE_REWARD, TX_TYPE_REFERRAL, TX_TYPE_REPOST, TX_TYPE_FIRST_POST,
+                 TX_TYPE_OPERATOR)
 
 # Invite rewards: the only two amounts a REFERRAL mint may carry (see referrals.py)
 REFERRAL_REWARD_CENTS = 100_000         # 1,000 GFC to the inviter per friend who becomes active
@@ -52,6 +55,13 @@ REPOST_CREDIT_CENTS = 1_500             # 15 GFC to the original creator per ver
 # First post bonus: the amount is node config (first_post.py), but a FIRST_POST mint may
 # carry at most this, and each wallet may receive only one
 FIRST_POST_BONUS_MAX_CENTS = 100_000    # 1,000 GFC
+
+# Operator grants (treasury_grants.py): every node checks the cap and the purpose/memo
+# format, so even a leaked treasury key can't mint more than this per transaction.
+OPERATOR_GRANT_MAX_CENTS = 1_000_000    # 10,000 GFC
+NODE_HOST_GRANT_CENTS = 1_000_000       # a node host's one-time grant: exactly 10,000 GFC
+OPERATOR_PURPOSES = ("hackathon", "node-host", "other")
+OPERATOR_REASON_RE = re.compile(r"^Operator grant \((hackathon|node-host|other)\): \S.{2,}$", re.S)
 
 # Limits applied to transactions received from peers
 MAX_REASON_LEN = 500
@@ -708,6 +718,39 @@ def process_first_post_mint(db_path: str, wallet_id: str, amount_cents: int, rea
     return tx
 
 
+def process_operator_mint(db_path: str, wallet_id: str, amount_cents: int, reason: str) -> Optional[dict]:
+    """
+    Mint an operator grant (OPERATOR, at most OPERATOR_GRANT_MAX_CENTS) from the treasury.
+    treasury_grants.py builds the reason ("Operator grant (<purpose>): <memo>") and checks
+    the rules first. None if the treasury is short.
+    """
+    if not 0 < amount_cents <= OPERATOR_GRANT_MAX_CENTS:
+        raise ValueError("operator grants are 1..OPERATOR_GRANT_MAX_CENTS")
+    if len(reason) > MAX_REASON_LEN or not OPERATOR_REASON_RE.match(reason):
+        raise ValueError("operator grant reason must be 'Operator grant (<purpose>): <memo>'")
+    if get_balance_cents(db_path, TREASURY_WALLET_ID) < amount_cents:
+        print(f"[Blockchain] WARNING: Treasury depleted, cannot pay operator grant {amount_cents / 100:.2f} GFC")
+        return None
+    tx = {
+        "id": str(uuid.uuid4()),
+        "sender": TREASURY_WALLET_ID,
+        "recipient": wallet_id,
+        "amount": amount_cents / 100.0,
+        "amount_cents": amount_cents,
+        "reason": reason,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tx_type": TX_TYPE_OPERATOR,
+    }
+    tx["tx_hash"] = compute_tx_hash(tx)
+    _sign_mint(tx)
+    conn = sqlite3.connect(db_path)
+    _insert_tx(conn, tx)
+    conn.commit()
+    conn.close()
+    tx["block_index"] = create_block(db_path, [tx["id"]])["block_index"]
+    return tx
+
+
 def play_reward_block_reason(conn: sqlite3.Connection, viewer: str) -> Optional[str]:
     """Why `viewer`'s plays can't earn credit for anyone (None if they can)."""
     if not phone_verify.is_verified(conn, viewer):
@@ -832,6 +875,14 @@ def check_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
             return REJECTED, "wrong repost credit amount"
         if tx_type == TX_TYPE_FIRST_POST and amount_cents > FIRST_POST_BONUS_MAX_CENTS:
             return REJECTED, "first post bonus too large"
+        if tx_type == TX_TYPE_OPERATOR:
+            if amount_cents > OPERATOR_GRANT_MAX_CENTS:
+                return REJECTED, "operator grant too large"
+            m = OPERATOR_REASON_RE.match(reason)
+            if not m:
+                return REJECTED, "operator grant needs a purpose and memo"
+            if m.group(1) == "node-host" and amount_cents != NODE_HOST_GRANT_CENTS:
+                return REJECTED, "wrong node host grant amount"
     if not signing.verify_tx_signature(signer, tx_hash, signature):
         return REJECTED, "bad signature"
 
@@ -849,6 +900,11 @@ def check_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
                 "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ?",
                 (TX_TYPE_FIRST_POST, recipient)).fetchone():
             return REJECTED, "wallet already received a first post bonus"
+        if (tx_type == TX_TYPE_OPERATOR and reason.startswith("Operator grant (node-host)")
+                and conn.execute("SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ? "
+                                 "AND reason LIKE 'Operator grant (node-host)%'",
+                                 (TX_TYPE_OPERATOR, recipient)).fetchone()):
+            return REJECTED, "wallet already received a node host grant"
     finally:
         conn.close()
 
@@ -1015,8 +1071,8 @@ def get_blockchain_stats(db_path: str = DB_PATH) -> dict:
 
     rewarded = conn.execute(
         "SELECT COALESCE(SUM(amount_cents), 0) FROM transactions "
-        "WHERE tx_type IN (?, ?, ?, ?) AND block_index IS NOT NULL",
-        (TX_TYPE_REWARD, TX_TYPE_REFERRAL, TX_TYPE_REPOST, TX_TYPE_FIRST_POST)
+        "WHERE tx_type IN (?, ?, ?, ?, ?) AND block_index IS NOT NULL",
+        (TX_TYPE_REWARD, TX_TYPE_REFERRAL, TX_TYPE_REPOST, TX_TYPE_FIRST_POST, TX_TYPE_OPERATOR)
     ).fetchone()[0]
 
     circulation_cents = granted + rewarded

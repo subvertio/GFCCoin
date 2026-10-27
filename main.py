@@ -31,6 +31,7 @@ from app_tokens import router as tokens_router
 from app_web import router as web_router, feed_html_response, wants_html
 from app_moderation import router as moderation_router
 from app_webverify import router as webverify_router
+from app_treasury import router as treasury_router
 import audio_stream
 import blockchain
 import logredact
@@ -72,6 +73,7 @@ app.include_router(tokens_router)
 app.include_router(web_router)
 app.include_router(moderation_router)
 app.include_router(webverify_router)
+app.include_router(treasury_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
