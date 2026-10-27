@@ -71,7 +71,10 @@ class WebVerifyTests(unittest.TestCase):
         os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_PASS_SECRET
         os.environ["GFC_TURNSTILE_SITEKEY"] = "1x00000000000000000000AA"
         name, token = self.register()
-        self.assertEqual(self.client.get("/verify/status", headers=bearer(token)).json(), {"verified": False})
+        before = self.client.get("/verify/status", headers=bearer(token)).json()
+        self.assertFalse(before["verified"])
+        self.assertEqual(before["rewards"], {"grant": 0.0, "first_post_bonus": 0.0})
+        self.assertEqual(len(before["wallets"]), 1)  # the wallet register() made
         code = self.link_code(token)
 
         page = self.client.get("/verify", params={"c": code})
@@ -104,7 +107,10 @@ class WebVerifyTests(unittest.TestCase):
         self.assertIn("You're verified", r.text)
         self.assertIn("welcome grant", r.text)
         self.assertIn("gfc://verified", r.text)
-        self.assertEqual(self.client.get("/verify/status", headers=bearer(token)).json(), {"verified": True})
+        after = self.client.get("/verify/status", headers=bearer(token)).json()
+        self.assertTrue(after["verified"])
+        self.assertEqual(after["rewards"]["grant"], 100.0)  # what verifying paid, for the app's coin burst
+        self.assertEqual(after["wallets"], before["wallets"])
 
         # The link is used up, and a new one isn't needed
         self.assertIn("expired", self.client.get("/verify", params={"c": code}).text)

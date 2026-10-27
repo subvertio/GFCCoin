@@ -37,13 +37,27 @@ def pay_on_verified(username: str) -> dict:
 
 @router.get("/verify/status")
 def verify_status(caller: Caller = Depends(caller_from_query)):
-    """Whether the caller's account is phone-verified (rewards need it)."""
+    """
+    Whether the caller's account is phone-verified (rewards need it), what verifying has paid
+    (the welcome grant and first post bonus, in GFC), and the account's wallets on this node,
+    so an app can celebrate the rewards and show the balance on a new device.
+    """
     username = caller.require("read")
     conn = sqlite3.connect(DB_PATH)
-    phone_verify.init_phone_tables(conn)
-    verified = phone_verify.is_verified(conn, username)
-    conn.close()
-    return {"verified": verified}
+    try:
+        phone_verify.init_phone_tables(conn)
+        verified = phone_verify.is_verified(conn, username)
+        wallets = [r[0] for r in conn.execute(
+            "SELECT id FROM wallets WHERE LOWER(owner) = LOWER(?) ORDER BY rowid", (username,))]
+        paid = {}
+        for key, tx_type in (("grant", blockchain.TX_TYPE_GRANT), ("first_post_bonus", blockchain.TX_TYPE_FIRST_POST)):
+            cents = conn.execute(
+                "SELECT COALESCE(SUM(t.amount_cents), 0) FROM transactions t JOIN wallets w ON w.id = t.recipient "
+                "WHERE t.tx_type = ? AND LOWER(w.owner) = LOWER(?)", (tx_type, username)).fetchone()[0]
+            paid[key] = cents / 100.0
+    finally:
+        conn.close()
+    return {"verified": verified, "rewards": paid, "wallets": wallets}
 
 
 @router.post("/verify/phone/start")
