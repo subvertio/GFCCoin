@@ -1,0 +1,7 @@
+[Unit]
+Description=GFC nightly backup (ledger database and node secrets)
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/gfc/gfc.env
+ExecStart=/usr/local/sbin/gfc-backup

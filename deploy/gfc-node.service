@@ -1,0 +1,33 @@
+[Unit]
+Description=GFC node (API on 127.0.0.1:8000, P2P sync on TCP 6881)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=gfc
+Group=gfc
+WorkingDirectory=/opt/gfc/app
+EnvironmentFile=/etc/gfc/gfc.env
+# One worker only: the P2P sync engine starts inside the app process.
+# Proxy headers let Turnstile and rate limits see the real client IP behind Caddy.
+ExecStart=/opt/gfc/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=5
+
+# Hardening: the node can only write its data directory
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/gfc
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
