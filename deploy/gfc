@@ -104,6 +104,14 @@ cmd_check() {
         line --  "Twilio not configured - using the fake test provider (gfc config)"
     fi
     if [[ -n "$(env_value GFC_TURNSTILE_SECRET)" ]]; then line ok "Turnstile configured"; else line -- "Turnstile not configured - bot check skipped (gfc config)"; fi
+    local sa_file; sa_file="$(env_value GFC_PLAY_INTEGRITY_SA_FILE)"
+    if [[ -n "$sa_file" && -n "$(env_value GFC_ANDROID_PACKAGE)" ]]; then
+        if [[ -r "$sa_file" ]]; then line ok "Play Integrity configured for $(env_value GFC_ANDROID_PACKAGE)"
+        else line FAIL "Play Integrity service-account file missing: $sa_file"; fi
+    else
+        line --  "Play Integrity not configured - Echo Hunt skips the genuine-app check (gfc config)"
+    fi
+    if [[ "$(env_value GFC_REQUIRE_ECHOHUNT)" == "1" ]]; then line ok "Echo Hunt required for rewarded plays"; else line --  "Echo Hunt not required for rewarded plays (GFC_REQUIRE_ECHOHUNT)"; fi
 
     local last; last="$(ls -1t "$BACKUP_DIR"/gfc-*.tar.gz 2>/dev/null | head -n 1 || true)"
     if [[ -n "$last" ]]; then line ok "last backup: $(date -u -r "$last" '+%Y-%m-%d %H:%M UTC')"; else line --  "no backups yet (first runs 03:30 UTC, or: gfc backup)"; fi

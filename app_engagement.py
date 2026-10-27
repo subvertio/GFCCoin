@@ -1,6 +1,7 @@
 """
 GFC Engagement API - Comments, Likes, Bookmarks, Rich Feed, PoDT Playback
 """
+import os
 import uuid
 import hashlib
 import sqlite3
@@ -9,6 +10,7 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, Form, Query, Depends
 
+import echohunt
 import signing
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH
@@ -269,7 +271,8 @@ async def record_played(seed_id: str, caller: Caller = Depends(caller_from_form)
     """Award PoDT credits to the seed owner when another user plays the media.
     One payout per (seed, requesting_user) pair — duplicates are rejected by proof_id.
     The viewer must be phone-verified with an account at least 24h old, and pays
-    a given creator wallet at most once per day.
+    a given creator wallet at most once per day. With GFC_REQUIRE_ECHOHUNT=1 the
+    viewer also needs an Echo Hunt pass from the last 24h.
     """
     requester = caller.owner("post")
     if requester == "anonymous":
@@ -315,6 +318,11 @@ async def record_played(seed_id: str, caller: Caller = Depends(caller_from_form)
         if blocked:
             conn.close()
             return {"ok": True, "credited": False, "reason": blocked}
+
+        # Anti-bot game: once the Android app ships, rewarded plays need a recent Echo Hunt pass
+        if os.environ.get("GFC_REQUIRE_ECHOHUNT") == "1" and not echohunt.has_recent_pass(conn, requester):
+            conn.close()
+            return {"ok": True, "credited": False, "reason": "echo hunt not passed in the last 24h"}
 
         # One payout per (seed, user) pair
         proof_string = f"play:{seed_id}:{requester}"

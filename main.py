@@ -24,6 +24,7 @@ from app_profile import router as profile_router
 from app_podt import podt_router
 from app_verify import router as verify_router
 from app_share import router as share_router
+from app_echohunt import router as echohunt_router
 from app_tokens import router as tokens_router
 import blockchain
 import keystore
@@ -54,6 +55,7 @@ app.include_router(profile_router)
 app.include_router(podt_router)
 app.include_router(verify_router)
 app.include_router(share_router)
+app.include_router(echohunt_router)
 app.include_router(tokens_router)
 
 # Static file serving (using absolute paths from config)
