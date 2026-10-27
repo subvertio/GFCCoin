@@ -27,6 +27,12 @@ usage: gfc <command>
   rotate-treasury       step 1 of replacing the treasury key: create the new key
                         (encrypted with the saved passphrase) and print its public
                         key to pin in config.py
+  grant WALLET AMOUNT PURPOSE "MEMO" [--yes]
+                        grant GFC from the treasury: PURPOSE is hackathon (up to
+                        10,000), node-host (exactly 10,000, once per wallet) or
+                        other (up to 10,000). Public, permanent: listed at
+                        /treasury/grants. Asks to confirm unless --yes.
+  grants                list every operator grant
   rotate-treasury --activate
                         step 2, after the pin is merged and 'gfc update' has run:
                         switch the node to the new key (rolls back on failure)
@@ -236,6 +242,25 @@ cmd_rotate_treasury() {
     fi
 }
 
+cmd_grant() {
+    need_root
+    local yes=0 args=()
+    for a in "$@"; do if [[ "$a" == "--yes" ]]; then yes=1; else args+=("$a"); fi; done
+    [[ ${#args[@]} -eq 4 ]] || die 'usage: gfc grant WALLET AMOUNT PURPOSE "MEMO" [--yes]'
+    local wallet="${args[0]}" amount="${args[1]}" purpose="${args[2]}" memo="${args[3]}"
+    echo "About to grant $amount GFC from the treasury"
+    echo "  to:      $wallet"
+    echo "  purpose: $purpose"
+    echo "  memo:    $memo"
+    echo "This is permanent and public (/treasury/grants)."
+    if [[ $yes -ne 1 ]]; then
+        [[ -t 0 ]] || die "confirm with --yes when not running interactively"
+        local answer; read -r -p "Grant it? [y/N] " answer
+        [[ "$answer" =~ ^[Yy]$ ]] || { echo "cancelled"; return 1; }
+    fi
+    as_gfc "$VENV/bin/python" treasury_grants.py grant "$wallet" "$amount" "$purpose" "$memo"
+}
+
 cmd_config() {
     need_root
     [[ -t 0 ]] || die "this opens an editor: run it with  ssh -t gfc-node gfc config"
@@ -255,6 +280,8 @@ case "${1:-}" in
     restore-treasury) shift; cmd_restore_treasury "$@" ;;
     encrypt-treasury) cmd_encrypt_treasury ;;
     rotate-treasury)  shift; cmd_rotate_treasury "$@" ;;
+    grant)            shift; cmd_grant "$@" ;;
+    grants)           need_root; as_gfc "$VENV/bin/python" treasury_grants.py list ;;
     reports)          need_root; as_gfc "$VENV/bin/python" moderation.py list ;;
     moderate)         need_root; [[ $# -eq 3 ]] || { usage; exit 2; }; as_gfc "$VENV/bin/python" moderation.py "$2" "$3" ;;
     ""|-h|--help|help) usage ;;
