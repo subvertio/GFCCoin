@@ -9,9 +9,9 @@ import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
-from security import owner_from_token
+from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH, AVATAR_DIR
 
 router = APIRouter()
@@ -55,11 +55,9 @@ def profile_dict(row) -> dict:
 # otherwise FastAPI will match "me" as a username parameter.
 
 @router.get("/users/me")
-def get_my_profile(api_token: str = ""):
+def get_my_profile(caller: Caller = Depends(caller_from_query)):
     """Return the authenticated user's full profile."""
-    owner = owner_from_token(api_token)
-    if owner == "anonymous":
-        raise HTTPException(status_code=401, detail="authentication required")
+    owner = caller.require("read")
 
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
@@ -77,15 +75,13 @@ def get_my_profile(api_token: str = ""):
 
 @router.post("/users/me")
 async def update_my_profile(
-    api_token: str = Form(""),
     first_name: Optional[str] = Form(None),
     last_name: Optional[str] = Form(None),
     bio: Optional[str] = Form(None),
+    caller: Caller = Depends(caller_from_form),
 ):
     """Update the authenticated user's profile fields."""
-    owner = owner_from_token(api_token)
-    if owner == "anonymous":
-        raise HTTPException(status_code=401, detail="authentication required")
+    owner = caller.require("post")
 
     conn = sqlite3.connect(DB_PATH)
 
@@ -130,12 +126,10 @@ async def update_my_profile(
 @router.post("/users/me/avatar")
 async def upload_avatar(
     avatar: UploadFile = File(...),
-    api_token: str = Form(""),
+    caller: Caller = Depends(caller_from_form),
 ):
     """Upload or replace the user's avatar image."""
-    owner = owner_from_token(api_token)
-    if owner == "anonymous":
-        raise HTTPException(status_code=401, detail="authentication required")
+    owner = caller.require("post")
 
     # Read file
     try:

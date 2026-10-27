@@ -6,9 +6,8 @@ Features: wallets, transactions, seeds, feed, search, profiles, engagement,
           blockchain (hybrid SQLite chain), PoDT rewards, P2P sync.
 """
 
-from fastapi import FastAPI, HTTPException, Form, File, UploadFile
+from fastapi import FastAPI, HTTPException, Form, File, UploadFile, Depends
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
 import sqlite3
@@ -25,12 +24,14 @@ from app_profile import router as profile_router
 from app_podt import podt_router
 from app_verify import router as verify_router
 from app_share import router as share_router
+from app_tokens import router as tokens_router
 import blockchain
 import keystore
 import signing
 from security import (
     hash_password, verify_password, migrate_plaintext_passwords,
-    init_sessions_table, create_session, require_user,
+    init_sessions_table, create_session, Caller, caller_from_form, caller_from_query,
+    bearer_token, resolve_caller, reserve_spend, release_spend, NodeCORSMiddleware,
 )
 
 # ============================================================================
@@ -43,14 +44,8 @@ app = FastAPI(
     version="4.0.0"
 )
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS: only the origins in GFC_CORS_ORIGINS (none by default, i.e. same-origin only)
+app.add_middleware(NodeCORSMiddleware)
 
 # Include routers
 app.include_router(seeds_router)
@@ -59,6 +54,7 @@ app.include_router(profile_router)
 app.include_router(podt_router)
 app.include_router(verify_router)
 app.include_router(share_router)
+app.include_router(tokens_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
@@ -84,7 +80,7 @@ class TransactionRequest(BaseModel):
     recipient: str
     amount: float
     reason: str
-    api_token: str
+    api_token: str = ""  # Legacy: prefer the Authorization: Bearer header
 
 
 # ============================================================================
@@ -299,14 +295,14 @@ def ready():
 # ============================================================================
 
 @app.post("/wallets/create", response_model=WalletCreateResponse)
-async def create_wallet(name: str = Form("Default Wallet"), api_token: str = Form(...)):
+async def create_wallet(name: str = Form("Default Wallet"), caller: Caller = Depends(caller_from_form)):
     """Create a new GFC wallet"""
-    owner = require_user(api_token)
+    owner = caller.require("post")
 
     try:
         conn = sqlite3.connect(DB_PATH)
         # Wallet ID is the Ed25519 public key; the private key stays in this node's wallet_keys
-        wallet_id = signing.create_wallet_key(conn, keystore.data_key_for_token(api_token))
+        wallet_id = signing.create_wallet_key(conn, caller.data_key())
         conn.execute(
             "INSERT INTO wallets (id, name, owner, gfc_balance, created_at, gfc_balance_cents) VALUES (?, ?, ?, ?, ?, ?)",
             (wallet_id, name, owner, 0.0, datetime.datetime.utcnow().isoformat(), 0)
@@ -354,16 +350,16 @@ async def get_wallet(wallet_id: str):
 
 
 @app.post("/wallets/export")
-async def export_wallet_keys(api_token: str = Form(...), password: str = Form(...),
-                             backup_passphrase: str = Form(...)):
+async def export_wallet_keys(password: str = Form(...), backup_passphrase: str = Form(...),
+                             caller: Caller = Depends(caller_from_form)):
     """
     Download an encrypted backup of your wallet keys on this node. Keep it (and
     the passphrase) somewhere safe: it is the only way to recover your wallets
     if this node's data is lost or you forget your password.
     """
-    username = require_user(api_token)
+    username = caller.require("spend")
     _require_password(username, password)
-    data_key = keystore.data_key_for_token(api_token)
+    data_key = caller.data_key()
     if not data_key:
         raise HTTPException(status_code=401, detail="log in again to unlock your keys")
     try:
@@ -373,11 +369,11 @@ async def export_wallet_keys(api_token: str = Form(...), password: str = Form(..
 
 
 @app.post("/wallets/import")
-async def import_wallet_keys(api_token: str = Form(...), backup_passphrase: str = Form(...),
-                             backup: str = Form(...)):
+async def import_wallet_keys(backup_passphrase: str = Form(...), backup: str = Form(...),
+                             caller: Caller = Depends(caller_from_form)):
     """Restore wallet keys from a backup made by /wallets/export (on this or another node)."""
-    username = require_user(api_token)
-    data_key = keystore.data_key_for_token(api_token)
+    username = caller.require("spend")
+    data_key = caller.data_key()
     if not data_key:
         raise HTTPException(status_code=401, detail="log in again to unlock your keys")
     try:
@@ -400,9 +396,10 @@ def _require_password(username: str, password: str):
 # ============================================================================
 
 @app.post("/transactions/create")
-async def create_transaction(transaction: TransactionRequest):
+async def create_transaction(transaction: TransactionRequest, bearer: str = Depends(bearer_token)):
     """Create a blockchain-validated transaction (sender wallet must belong to the caller)"""
-    username = require_user(transaction.api_token)
+    caller = resolve_caller(bearer, transaction.api_token)
+    username = caller.require("spend")
     conn = sqlite3.connect(DB_PATH)
     wallet = conn.execute("SELECT owner FROM wallets WHERE id = ?", (transaction.sender,)).fetchone()
     conn.close()
@@ -415,6 +412,7 @@ async def create_transaction(transaction: TransactionRequest):
     if amount_cents <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
 
+    reserve_spend(caller, amount_cents)  # Per-token daily limit, if the token has one
     try:
         tx = blockchain.process_transfer(
             db_path=DB_PATH,
@@ -422,7 +420,7 @@ async def create_transaction(transaction: TransactionRequest):
             recipient_wallet=transaction.recipient,
             amount_cents=amount_cents,
             reason=transaction.reason,
-            data_key=keystore.data_key_for_token(transaction.api_token),
+            data_key=caller.data_key(),
         )
 
         return {
@@ -441,8 +439,10 @@ async def create_transaction(transaction: TransactionRequest):
         }
     except ValueError as e:
         # Insufficient balance or validation error
+        release_spend(caller, amount_cents)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        release_spend(caller, amount_cents)
         raise HTTPException(status_code=500, detail=f"Transaction error: {str(e)}")
 
 
@@ -489,10 +489,10 @@ async def transaction_history(wallet_id: str = None):
 # ============================================================================
 
 @app.get("/feed")
-def feed(api_token: str = ""):
+def feed(caller: Caller = Depends(caller_from_query)):
     """Get feed - all seeds with per-user engagement state"""
     from app_engagement import get_feed_items
-    return get_feed_items(api_token)
+    return get_feed_items(caller.owner("read"))
 
 
 # ============================================================================
@@ -500,9 +500,9 @@ def feed(api_token: str = ""):
 # ============================================================================
 
 @app.get("/search")
-def search(q: str = "", api_token: str = ""):
+def search(q: str = "", caller: Caller = Depends(caller_from_query)):
     """Search seeds and transactions by keyword."""
-    from app_engagement import SEED_SELECT, seed_row_to_dict, owner_from_token
+    from app_engagement import SEED_SELECT, seed_row_to_dict
 
     result = {"seeds": [], "transactions": [], "seed_count": 0, "transaction_count": 0}
 
@@ -510,7 +510,7 @@ def search(q: str = "", api_token: str = ""):
         return result
 
     keywords = q.strip().split()
-    owner = owner_from_token(api_token)
+    owner = caller.owner("read")
 
     conn = sqlite3.connect(DB_PATH)
 

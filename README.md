@@ -81,6 +81,7 @@ python -m unittest discover -s tests -v
 - Data is stored in `./data` by default. Set `GFC_DATA_DIR` to use another location.
 - To sync with peers, TCP port 6881 and UDP port 6882 must be reachable.
 - `gfc_backend.spec` builds a single-file Windows executable with PyInstaller.
+- Building your own front end (web, mobile, bots)? See [docs/build-your-own-frontend.md](docs/build-your-own-frontend.md): Bearer auth, scoped tokens with spend limits, CORS (`GFC_CORS_ORIGINS`), and how wallets, uploads, sharing and phone verification work.
 
 ## Sharing posts (gateway node and share pages)
 
