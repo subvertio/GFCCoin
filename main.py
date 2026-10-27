@@ -32,6 +32,7 @@ from app_web import router as web_router, feed_html_response, wants_html
 from app_moderation import router as moderation_router
 from app_webverify import router as webverify_router
 import blockchain
+import logredact
 import moderation
 import keystore
 import first_post
@@ -643,6 +644,7 @@ from p2p_service import start_p2p, stop_p2p, p2p_status
 @app.on_event("startup")
 async def startup_event():
     """Start P2P services when the server starts."""
+    logredact.install()  # no phone numbers or verify link codes in the logs
     # Ensure firewall rules exist for P2P ports (best-effort, requires admin)
     _ensure_firewall_rules()
     # Fingerprint seeds stored before the repost check existed (a treasury node also
