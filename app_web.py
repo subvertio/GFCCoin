@@ -226,7 +226,7 @@ SCRIPT = """
   }
   // Same settings as the share page and the app's viewer: slow turntable that resumes
   // after the user lets go, orbit/pinch zoom, neutral lighting, first animation looping.
-  const MODEL_ATTRS = {loading: 'lazy', reveal: 'auto', 'camera-controls': '', 'touch-action': 'pan-y',
+  const MODEL_ATTRS = {loading: 'lazy', reveal: 'auto', 'camera-controls': '', 'disable-zoom': '', 'touch-action': 'pan-y',
     'auto-rotate': '', 'auto-rotate-delay': '3000', 'rotation-per-second': '14deg',
     'environment-image': 'neutral', exposure: '1', 'shadow-intensity': '0.5', autoplay: ''};
   function showModel(slot) {
@@ -402,8 +402,10 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 .stats{{margin:8px 0 0;font-size:.9rem}}
 .more,.end{{display:block;padding:20px 16px;text-align:center;color:#71767b}}
 .featured{{padding:12px 16px 16px;border-bottom:1px solid #2f3336}}
-.featured .hero{{display:block;width:100%;max-height:70vh;object-fit:contain;background:#000;border:1px solid #2f3336;border-radius:16px}}
-.featured model-viewer.hero{{height:70vh;--poster-color:#000}}
+.featured .hero{{display:block;width:100%;max-height:min(55vh,480px);object-fit:contain;background:#000;border:1px solid #2f3336;border-radius:16px}}
+.featured model-viewer.hero{{height:min(55vh,480px);--poster-color:#000}}
+.featured .next{{display:block;margin:16px 0 0;padding:10px;border-radius:999px;text-align:center;color:#71767b;text-decoration:none;border:1px solid #2f3336}}
+.featured .next:hover{{color:#e7e9ea}}
 .featured audio{{display:block;width:100%;margin-top:8px}}
 .featured h1{{margin:12px 0 4px;font-size:1.4rem}}
 .featured .creator{{display:flex;align-items:center;gap:8px;margin:0;color:#71767b}}
@@ -420,7 +422,7 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 <body>
 <header class="top"><h1>GFC</h1><a class="open" href="{e(app_link)}">Open in GFC</a></header>
 <main>
-{top}<div id="feed">
+{top}<div id="feed" tabindex="-1">
 {cards}
 </div>
 </main>
