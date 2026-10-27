@@ -23,6 +23,10 @@ from app_engagement import router as engagement_router
 from app_profile import router as profile_router
 from app_podt import podt_router
 import blockchain
+from security import (
+    hash_password, verify_password, migrate_plaintext_passwords,
+    init_sessions_table, create_session, require_user,
+)
 
 # ============================================================================
 # APP INITIALIZATION
@@ -73,6 +77,7 @@ class TransactionRequest(BaseModel):
     recipient: str
     amount: float
     reason: str
+    api_token: str
 
 
 # ============================================================================
@@ -155,6 +160,9 @@ def init_db():
     except Exception:
         pass  # column already exists
 
+    init_sessions_table(conn)
+    migrate_plaintext_passwords(conn)
+
     conn.commit()
     conn.close()
 
@@ -187,7 +195,7 @@ async def auth_register(
     try:
         conn.execute(
             "INSERT INTO users (id, username, password, first_name, last_name, email, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), username, password, first_name.strip(), last_name.strip(), email.strip(), phone.strip(),
+            (str(uuid.uuid4()), username, hash_password(password), first_name.strip(), last_name.strip(), email.strip(), phone.strip(),
              datetime.datetime.utcnow().isoformat())
         )
         conn.commit()
@@ -196,7 +204,7 @@ async def auth_register(
     finally:
         conn.close()
 
-    token = f"local-{username}-token"
+    token = create_session(username)
     return {"ok": True, "token": token, "user": username}
 
 
@@ -217,12 +225,12 @@ async def auth_login(
     ).fetchone()
     conn.close()
 
-    if not row or row[1] != password:
+    if not row or not verify_password(password, row[1]):
         raise HTTPException(status_code=401, detail="invalid credentials")
 
     # Return the canonical username from the database, not the user input
     canonical_username = row[0]
-    token = f"local-{canonical_username}-token"
+    token = create_session(canonical_username)
     return {"ok": True, "token": token, "user": canonical_username}
 
 
@@ -277,19 +285,11 @@ def ready():
 @app.post("/wallets/create", response_model=WalletCreateResponse)
 async def create_wallet(name: str = Form("Default Wallet"), api_token: str = Form(...)):
     """Create a new GFC wallet"""
-    dev_secret = os.getenv("API_TOKEN", "dev-secret")
-    is_valid = (api_token == dev_secret) or (api_token.startswith("local-") and api_token.endswith("-token"))
-    if not is_valid:
-        raise HTTPException(status_code=401, detail="Invalid API token")
+    owner = require_user(api_token)
 
     # Generate wallet ID
     wallet_uuid = str(uuid.uuid4())
     wallet_id = hashlib.sha256(wallet_uuid.encode()).hexdigest()[:64]
-
-    # Extract owner from token
-    owner = ""
-    if api_token.startswith("local-") and api_token.endswith("-token"):
-        owner = api_token[len("local-"):-len("-token")]
 
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -344,7 +344,14 @@ async def get_wallet(wallet_id: str):
 
 @app.post("/transactions/create")
 async def create_transaction(transaction: TransactionRequest):
-    """Create a blockchain-validated transaction"""
+    """Create a blockchain-validated transaction (sender wallet must belong to the caller)"""
+    username = require_user(transaction.api_token)
+    conn = sqlite3.connect(DB_PATH)
+    wallet = conn.execute("SELECT owner FROM wallets WHERE id = ?", (transaction.sender,)).fetchone()
+    conn.close()
+    if not wallet or not wallet[0] or wallet[0].lower() != username.lower():
+        raise HTTPException(status_code=403, detail="sender wallet does not belong to this user")
+
     # Convert amount to cents
     amount_cents = int(transaction.amount * 100)
 

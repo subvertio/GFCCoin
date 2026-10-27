@@ -24,6 +24,7 @@ import logging
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
 from pathlib import Path
 
+from security import PUBLIC_USER_COLUMNS, sanitize_incoming_rows
 from config import DB_PATH, DATA_DIR, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ SYNCABLE_TABLES = ["users", "seeds", "transactions", "likes", "comments", "bookm
 
 # Columns for each table (used for INSERT OR IGNORE)
 TABLE_COLUMNS = {
-    "users": "id, username, password, first_name, last_name, email, phone, created_at, bio, avatar_filename",
+    "users": PUBLIC_USER_COLUMNS,  # never share passwords, email, phone or names
     "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet",
     "transactions": "id, sender, recipient, amount, reason, timestamp, amount_cents, tx_hash, block_index, tx_type",
     "likes": "id, seed_id, owner, created_at",
@@ -447,6 +448,11 @@ class SyncEngine:
             logger.debug(f"Sync response for {table} from {peer.peer_address}: 0 rows (up to date)")
             return
 
+        received_count = len(rows)
+        columns, rows = sanitize_incoming_rows(table, columns, rows, TABLE_COLUMNS)
+        if not columns:
+            return
+
         col_names = ", ".join(columns)
         placeholders = ", ".join(["?"] * len(columns))
         ts_col = TABLE_TIMESTAMP_COL.get(table, "created_at")
@@ -484,7 +490,7 @@ class SyncEngine:
         except Exception as e:
             logger.warning(f"Sync DB error for {table}: {e}")
 
-        logger.info(f"Sync {table} from {peer.peer_address}: {len(rows)} received, {inserted} inserted, {len(rows) - inserted - skipped - errors} duplicates, {errors} errors")
+        logger.info(f"Sync {table} from {peer.peer_address}: {received_count} received, {inserted} inserted, {len(rows) - inserted - skipped - errors} duplicates, {errors} errors")
 
         # Update sync timestamps (both global for display and per-peer for queries)
         if rows:

@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, Form, Query
 
+from security import owner_from_token
 from config import DB_PATH
 from blockchain import process_podt_reward
 
@@ -17,11 +18,6 @@ router = APIRouter()
 
 # ---------- helpers ----------
 
-def owner_from_token(token: str) -> str:
-    """Extract username from API token format 'local-{username}-token'."""
-    if token and token.startswith("local-") and token.endswith("-token"):
-        return token[6:-6]
-    return "anonymous"
 
 
 def seed_row_to_dict(row, owner_for_engagement: str = "") -> Dict[str, Any]:
