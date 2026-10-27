@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
 import first_post
+import moderation
 import reposts
 import signing
 from security import Caller, caller_from_form, caller_from_query
@@ -333,12 +334,23 @@ def my_seeds(caller: Caller = Depends(caller_from_query)):
 
 @router.get("/seeds")
 def list_seeds():
-    """Return all seeds in feed-friendly shape."""
-    return {"items": list_rows()}
+    """Return all seeds in feed-friendly shape (without posts hidden after reports)."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        return {"items": moderation.visible_items(conn, list_rows())}
+    finally:
+        conn.close()
 
 @router.get("/seeds/{sid}")
 def get_seed(sid: str):
-    """Return a single seed by id."""
+    """Return a single seed by id (410 if it was hidden after reports)."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        hidden = moderation.is_hidden(conn, sid)
+    finally:
+        conn.close()
+    if hidden:
+        raise HTTPException(status_code=410, detail="This post was hidden after reports.")
     # Try DB first
     try:
         conn = sqlite3.connect(DB_PATH)

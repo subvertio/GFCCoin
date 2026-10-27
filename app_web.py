@@ -26,6 +26,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
+import moderation
 import reposts
 from app_engagement import SEED_SELECT, seed_row_to_dict
 from app_share import (MODEL_VIEWER_EXTENSIONS, MODEL_VIEWER_SRC, MODEL_VIEWER_SRI,
@@ -77,7 +78,7 @@ def feed_page(page: int, page_size: int = PAGE_SIZE):
     try:
         order = [{"id": r[0], "owner": r[1]} for r in
                  conn.execute("SELECT id, owner FROM seeds ORDER BY created_at DESC").fetchall()]
-        order = mix_creators(order)
+        order = mix_creators(moderation.visible_items(conn, order))  # no posts hidden after reports
         start = (page - 1) * page_size
         ids = [s["id"] for s in order[start:start + page_size]]
         if not ids:

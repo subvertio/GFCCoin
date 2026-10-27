@@ -43,6 +43,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+import moderation
 import reposts
 import signing
 from config import DB_PATH
@@ -145,6 +146,8 @@ def load_seed(seed_id: str) -> dict:
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="seed not found")
+        if moderation.is_hidden(conn, seed_id):
+            raise HTTPException(status_code=410, detail="This post was hidden after reports.")
         seed = dict(zip(("id", "owner", "title", "description", "filename", "thumb_filename",
                          "content_type", "created_at"), row))
         seed = {k: ("" if v is None else str(v)) for k, v in seed.items()}

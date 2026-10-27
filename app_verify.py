@@ -1,6 +1,9 @@
 """
 GFC Phone Verification API - verify a phone number to unlock the new-user grant
 and play rewards. See phone_verify.py for storage and limits.
+
+Apps that can't run Cloudflare Turnstile themselves (the phone app) verify in a
+browser instead: see app_webverify.py.
 """
 import sqlite3
 
@@ -11,9 +14,36 @@ import first_post
 import phone_verify
 import signing
 from config import DB_PATH
-from security import Caller, caller_from_form
+from security import Caller, caller_from_form, caller_from_query
 
 router = APIRouter()
+
+
+def pay_on_verified(username: str) -> dict:
+    """After a successful check: the new-user grant and any pending first post bonus, if there's a wallet."""
+    paid = {"grant": 0.0}
+    conn = sqlite3.connect(DB_PATH)
+    wallet_id = signing.local_wallet_for(conn, username)
+    conn.close()
+    if wallet_id:
+        grant = blockchain.process_user_grant(DB_PATH, username, wallet_id)
+        if grant:
+            paid["grant"] = grant["amount"]
+        bonus = first_post.pay_pending(DB_PATH, username)
+        if bonus:
+            paid["first_post_bonus"] = bonus["amount"]
+    return paid
+
+
+@router.get("/verify/status")
+def verify_status(caller: Caller = Depends(caller_from_query)):
+    """Whether the caller's account is phone-verified (rewards need it)."""
+    username = caller.require("read")
+    conn = sqlite3.connect(DB_PATH)
+    phone_verify.init_phone_tables(conn)
+    verified = phone_verify.is_verified(conn, username)
+    conn.close()
+    return {"verified": verified}
 
 
 @router.post("/verify/phone/start")
@@ -42,14 +72,5 @@ async def verify_phone_check(phone: str = Form(...), code: str = Form(...),
 
     result["grant"] = 0.0
     if result["verified"]:
-        conn = sqlite3.connect(DB_PATH)
-        wallet_id = signing.local_wallet_for(conn, username)
-        conn.close()
-        if wallet_id:
-            grant = blockchain.process_user_grant(DB_PATH, username, wallet_id)
-            if grant:
-                result["grant"] = grant["amount"]
-            bonus = first_post.pay_pending(DB_PATH, username)
-            if bonus:
-                result["first_post_bonus"] = bonus["amount"]
+        result.update(pay_on_verified(username))
     return result

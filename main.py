@@ -29,7 +29,10 @@ from app_referrals import router as referrals_router
 from app_echohunt import router as echohunt_router
 from app_tokens import router as tokens_router
 from app_web import router as web_router, feed_html_response, wants_html
+from app_moderation import router as moderation_router
+from app_webverify import router as webverify_router
 import blockchain
+import moderation
 import keystore
 import first_post
 import referrals
@@ -65,6 +68,8 @@ app.include_router(referrals_router)
 app.include_router(echohunt_router)
 app.include_router(tokens_router)
 app.include_router(web_router)
+app.include_router(moderation_router)
+app.include_router(webverify_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
@@ -563,6 +568,7 @@ def search(q: str = "", caller: Caller = Depends(caller_from_query)):
             item["liked"] = item["id"] in liked_set
             item["bookmarked"] = item["id"] in bookmarked_set
 
+    seed_items = moderation.visible_items(conn, seed_items, owner)
     result["seeds"] = seed_items
     result["seed_count"] = len(seed_items)
 

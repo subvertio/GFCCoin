@@ -30,6 +30,11 @@ usage: gfc <command>
   rotate-treasury --activate
                         step 2, after the pin is merged and 'gfc update' has run:
                         switch the node to the new key (rolls back on failure)
+  reports               posts people reported, most reported first (hidden = auto-hidden,
+                        waiting for you)
+  moderate SEED remove|restore|hide
+                        remove: keep it hidden for good; restore: show it again and
+                        forget its reports; hide: hide it now without reports
 EOF
 }
 
@@ -39,7 +44,7 @@ need_root() { [[ $EUID -eq 0 ]] || die "run as root"; }
 # Run a command as the gfc user with the node's settings loaded
 as_gfc() {
     runuser -u gfc -- env GFC_APP_DIR="$APP_DIR" \
-        bash -c 'set -a; . "$0"; set +a; cd "$GFC_APP_DIR"; exec "$@"' "$ENV_FILE" "$@"
+        bash -c 'set -a; . "$0" 2>/dev/null; set +a; cd "$GFC_APP_DIR"; exec "$@"' "$ENV_FILE" "$@"
 }
 
 # Wait (up to 60s) for the node to answer after a restart, so checks don't race it
@@ -245,6 +250,8 @@ case "${1:-}" in
     restore-treasury) shift; cmd_restore_treasury "$@" ;;
     encrypt-treasury) cmd_encrypt_treasury ;;
     rotate-treasury)  shift; cmd_rotate_treasury "$@" ;;
+    reports)          need_root; as_gfc "$VENV/bin/python" moderation.py list ;;
+    moderate)         need_root; [[ $# -eq 3 ]] || { usage; exit 2; }; as_gfc "$VENV/bin/python" moderation.py "$2" "$3" ;;
     ""|-h|--help|help) usage ;;
     *) usage; exit 2 ;;
 esac
