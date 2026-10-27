@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GFC public node setup for a fresh Ubuntu 24.04 server (DigitalOcean droplet, Hetzner, ...).
+# GFC public node setup for a fresh Debian 13/12 or Ubuntu 24.04 server (DigitalOcean droplet, Hetzner, ...).
 #
 # Usage (as root, on the server):
 #   curl -fsSL https://raw.githubusercontent.com/subvertio/GFCCoin/master/deploy/setup.sh -o setup.sh
@@ -26,14 +26,25 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 . /etc/os-release
-if [[ "${ID:-}" != "ubuntu" ]]; then
-    echo "warning: tested on Ubuntu 24.04, this is ${PRETTY_NAME:-unknown}" >&2
-fi
+case "${ID:-}" in
+    debian|ubuntu) ;;
+    *) echo "warning: written for Debian 13/12 and Ubuntu 24.04, this is ${PRETTY_NAME:-unknown}" >&2 ;;
+esac
 
 echo "==> Installing packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q python3 python3-venv python3-pip git sqlite3 ufw caddy unattended-upgrades
+apt-get install -y -q python3 python3-venv python3-pip git sqlite3 ufw caddy curl ca-certificates unattended-upgrades
+if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+    echo "Python 3.11+ required, found $(python3 --version)" >&2
+    exit 1
+fi
+
+# Automatic security updates (on by default in Ubuntu, not in Debian)
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
 
 echo "==> Creating gfc user and directories"
 id gfc &>/dev/null || useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin gfc

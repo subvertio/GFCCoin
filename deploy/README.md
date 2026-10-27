@@ -1,4 +1,4 @@
-# Running the public GFC node (DigitalOcean)
+# Running the public GFC node (DigitalOcean, Debian)
 
 This server is the network's **treasury and gateway node**. It's the always-on
 peer that:
@@ -22,7 +22,8 @@ Ports and paths:
 
 In DigitalOcean, choose **Create → Droplets** and set:
 - **Region:** New York (NYC3) or San Francisco (SFO3)
-- **Image:** Ubuntu 24.04 (LTS) x64
+- **Configuration type:** Bundled
+- **Image:** Debian 13 x64. Debian 12 and Ubuntu 24.04 also work, but Debian 13's Python 3.13 is the version the test suite runs on.
 - **Size:** Basic, Regular, $6/month (1 vCPU, 1 GB). You can resize later.
 - **Authentication:** **SSH key**. If you don't have one, run `ssh-keygen -t ed25519` in PowerShell and paste in the contents of `C:\Users\<you>\.ssh\id_ed25519.pub`.
 - **Backups:** on.
@@ -41,12 +42,13 @@ ssh root@SERVER_IP
 Then, on the server:
 
 ```bash
+apt-get update -q && apt-get install -y -q curl
 curl -fsSL https://raw.githubusercontent.com/subvertio/GFCCoin/master/deploy/setup.sh -o setup.sh
 bash setup.sh node.galacticfederation.tech
 ```
 
 The script does the following:
-- installs Python, Caddy and the firewall;
+- installs Python, Caddy and the firewall, and turns on automatic security updates;
 - creates the unprivileged `gfc` user;
 - clones the code and installs its dependencies;
 - starts the node as a systemd service;
@@ -86,7 +88,7 @@ passphrase.
 ```bash
 chown gfc:gfc /var/lib/gfc/treasury.backup
 cd /opt/gfc/app
-sudo -u gfc GFC_TREASURY_KEY_FILE=/var/lib/gfc/treasury_key.hex /opt/gfc/venv/bin/python signing.py restore /var/lib/gfc/treasury.backup
+runuser -u gfc -- env GFC_TREASURY_KEY_FILE=/var/lib/gfc/treasury_key.hex /opt/gfc/venv/bin/python signing.py restore /var/lib/gfc/treasury.backup
 rm /var/lib/gfc/treasury.backup
 ```
 
@@ -94,7 +96,7 @@ Optionally, encrypt the key file on disk. Then put the passphrase in
 `/etc/gfc/gfc.env` as `GFC_TREASURY_PASSPHRASE=...`:
 
 ```bash
-sudo -u gfc GFC_TREASURY_KEY_FILE=/var/lib/gfc/treasury_key.hex /opt/gfc/venv/bin/python signing.py encrypt
+runuser -u gfc -- env GFC_TREASURY_KEY_FILE=/var/lib/gfc/treasury_key.hex /opt/gfc/venv/bin/python signing.py encrypt
 ```
 
 Encrypting means a leaked disk snapshot or backup doesn't expose the key. It
@@ -106,7 +108,7 @@ Check that the node loaded the key:
 
 ```bash
 systemctl restart gfc-node
-sudo -u gfc bash -c 'set -a; . /etc/gfc/gfc.env; cd /opt/gfc/app; /opt/gfc/venv/bin/python -c "import signing; print(\"treasury key loaded:\", bool(signing.load_treasury_private_key()))"'
+runuser -u gfc -- bash -c 'set -a; . /etc/gfc/gfc.env; cd /opt/gfc/app; /opt/gfc/venv/bin/python -c "import signing; print(\"treasury key loaded:\", bool(signing.load_treasury_private_key()))"'
 ```
 
 ## 5. Add the Twilio and Turnstile secrets
