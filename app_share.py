@@ -214,7 +214,7 @@ def share_page(seed_id: str, request: Request):
         # orbit/pinch zoom, neutral lighting, first animation looping. The poster shows
         # at once; the model only downloads when the viewer scrolls into view.
         media = (f'<model-viewer class="hero" src="{e(media_path)}"{poster} alt="{e(title)}" '
-                 'loading="lazy" reveal="auto" camera-controls touch-action="pan-y" '
+                 'loading="lazy" reveal="auto" camera-controls disable-zoom touch-action="pan-y" '
                  'auto-rotate auto-rotate-delay="3000" rotation-per-second="14deg" '
                  'environment-image="neutral" exposure="1" shadow-intensity="0.5" autoplay>'
                  '</model-viewer>')
@@ -239,7 +239,8 @@ def share_page(seed_id: str, request: Request):
                      f'<p class="creator">{avatar}<span>by {e(seed["owner"])}</span></p>\n'
                      f'{repost}{badge}\n<p class="desc">{e(seed["description"])}</p>\n'
                      f'<p class="actions"><a href="{e(app_link)}">Open in GFC</a>'
-                     f'<a class="secondary" href="{e(intent)}" rel="noopener" target="_blank">Post to X</a></p>')
+                     f'<a class="secondary" href="{e(intent)}" rel="noopener" target="_blank">Post to X</a></p>\n'
+                     '<a class="next" href="#feed">More on GFC <span aria-hidden="true">&#8595;</span></a>')
     image = base + (thumb_path or media_path) if (thumb_path or (ctype == "image" and media_path)) else ""
 
     # The shared post, focused on top, then the whole feed below it (newest first)

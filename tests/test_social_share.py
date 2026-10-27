@@ -141,11 +141,16 @@ class SharePageTests(unittest.TestCase):
         text = self.client.get(f"/p/{shared}").text
         top = self.featured(text)
         self.assertIn("The shared one", top)
-        feed = text[text.index('<div id="feed">'):]
-        self.assertLess(text.index('<section class="featured"'), text.index('<div id="feed">'))
+        feed = text[text.index('<div id="feed"'):]
+        self.assertLess(text.index('<section class="featured"'), text.index('<div id="feed"'))
         self.assertLess(feed.index("Newer post"), feed.index("Older post"))  # newest on top
         self.assertNotIn(f'data-id="{shared}"', feed)  # not repeated below
         self.assertIn(f"exclude={shared}", feed) if 'class="more"' in feed else None
+
+    def test_hint_that_the_feed_continues_below(self):
+        text = self.client.get(f"/p/{self.add_seed()}").text
+        self.assertIn('<a class="next" href="#feed">More on GFC', self.featured(text))
+        self.assertIn('<div id="feed"', text)
 
     def test_page_has_open_graph_and_twitter_tags(self):
         sid = self.add_seed(thumb_filename="ship_thumb.jpg")
@@ -167,7 +172,7 @@ class SharePageTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn('<model-viewer class="hero" src="/originals/walker.glb"', self.featured(r.text))
         self.assertIn('poster="/thumbs/walker_thumb.jpg"', r.text)
-        for attr in ('loading="lazy"', 'reveal="auto"', "camera-controls", "auto-rotate",
+        for attr in ('loading="lazy"', 'reveal="auto"', "camera-controls", "disable-zoom", "auto-rotate",
                      'rotation-per-second="14deg"', 'environment-image="neutral"', "autoplay"):
             self.assertIn(attr, r.text)
         self.assertIn(f'<script type="module" src="{app_share.MODEL_VIEWER_SRC}" '
