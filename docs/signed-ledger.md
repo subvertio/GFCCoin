@@ -140,7 +140,87 @@ a forged wallet row named "bob" could take Bob's rewards.
   Unsigned (legacy or anonymous) seeds are still shared as content, but their
   `reward_wallet` is cleared, so they earn nothing.
 
+## Phone verification and reward rules
+
+Signing proves who issued a mint, not that a real person earned it. One person
+could create many accounts, collect 100 GFC per account and have the accounts
+play each other's seeds. Phone verification makes each such account cost a
+phone number.
+
+**Flow.** `POST /verify/phone/start` (`api_token`, `phone` in E.164) sends an
+SMS code. `POST /verify/phone/check` (`api_token`, `phone`, `code`) marks the
+account verified. Both use `security.require_user`. The provider sits behind a
+small interface in `phone_verify.py` (`start(phone)`, `check(phone, code)`):
+
+- `TwilioVerifier` is used when `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and
+  `TWILIO_VERIFY_SERVICE_SID` are set. With `TWILIO_LOOKUP_LINE_TYPE=1` it
+  first runs a Twilio Lookup line-type check and refuses VoIP numbers (each
+  lookup is billed).
+- Otherwise `FakeVerifier` is used. It sends nothing and prints the code to the
+  node's console, so it is for development and tests only. A treasury node
+  must have Twilio configured, or anyone can verify any number.
+
+**Bot check (Cloudflare Turnstile).** When `GFC_TURNSTILE_SECRET` is set,
+`/verify/phone/start` also needs a `turnstile_token` form field. The node
+checks it with Cloudflare's `siteverify` (secret, token and client IP, 5 s
+timeout) and returns 403 if Cloudflare rejects it or can't be reached (fail
+closed). This runs before rate limiting and before the SMS provider, so a
+failed challenge never costs a text. This guards against SMS pumping (bots
+requesting texts to premium numbers) and scripted signups. If the secret is
+unset, the check is skipped with a one-time warning, so local nodes keep
+working. Turnstile belongs on the hosted treasury/verification endpoint,
+where the secret stays private. An ordinary local node can't keep a secret
+from the person running it, so the check means nothing there. The client
+(the Unreal web view or a website) needs the matching Turnstile **site key**
+to render the widget and get a token.
+
+**Privacy.** The number is normalized to E.164 and only
+`HMAC-SHA256(key, number)` is stored, keyed with a per-node secret in
+`DATA_DIR/phone_hmac_key.hex` (override with `GFC_PHONE_HMAC_KEY_FILE`). The
+raw number is never written to the database. The `phone_*` tables aren't in
+`SYNCABLE_TABLES`, so verification status and hashes never leave the node.
+(The optional `phone` profile field from `/auth/register` is separate and
+unchanged.)
+
+**Limits.** One verified account per phone hash, and one phone per account. At
+most 5 code requests per user and 5 per phone hash per 24 hours (counted
+before the provider is called, so failed sends count too). A code is valid for
+10 minutes and allows 5 wrong guesses.
+
+**Reward rules** (constants in `blockchain.py`):
+
+| Rule | Where |
+|---|---|
+| New-user GRANT only after phone verification (not at wallet creation) | `process_user_grant`; issued by `/verify/phone/check`, or by `/wallets/create` if already verified |
+| Play reward only if the viewer is verified | `play_reward_block_reason` |
+| Viewer account at least 24 hours old (`MIN_VIEWER_ACCOUNT_AGE`) | `play_reward_block_reason` |
+| At most one paid play per viewer, per creator wallet, per UTC day (`PLAY_REWARDS_PER_CREATOR_PER_DAY`) | `claim_play_slot`, table `play_reward_slots` |
+| One payout per (seed, viewer), as before | `podt_proofs.proof_id` |
+
+**Where this is enforced.** Only treasury-signed mints are valid network-wide,
+so these rules matter on the treasury node, which decides what to sign.
+**Non-treasury nodes enforce them locally only**: their grants and rewards are
+local-only anyway, and a modified node can skip the checks for its own local
+ledger, but it can't make other nodes accept the result. Verification status
+isn't synced, so a peer can't claim that its users are verified.
+
+**Next step: a claims service.** Today, only users registered on the treasury
+node can earn network-valid credit. A claims service would let a non-treasury
+node forward a verified claim (a grant request, or a play) to the treasury.
+The treasury would then re-check it and sign the mint. For the treasury to
+trust a claim, it has to verify the phone itself (the user completes the SMS
+flow against the treasury, which keeps the phone hash), and it has to apply the
+viewer and daily-cap rules to its own records of the claimant. That means user
+identities shared between nodes (signed user keys) and a treasury API with
+authentication and rate limits. That is too much to add here, so it is left as
+the next step.
+
 ## Upgrading an existing node
+
+- After the phone-verification change, existing users get no further grants
+  or play rewards until they verify a phone. Users who already received their
+  grant keep it. `migrate_to_blockchain.py` now skips grants for unverified
+  users.
 
 - Wallets created before this change have no key. They can still transfer on
   their home node (`"signed": false` in the response), but peers reject those
@@ -158,13 +238,12 @@ a forged wallet row named "bob" could take Bob's rewards.
   nodes can disagree about which one went through. Fixing that needs a
   consensus protocol, or a sequencer (for example a treasury-signed block
   order).
-- **Sybil-resistant rewards.** The treasury node decides which grants and
-  rewards to sign, and it can still be farmed with fake accounts and fake
-  plays. A real fix needs identity or proof-of-personhood, rate limits and
-  reward rules that hold up against collusion.
+- **Sybil-resistant rewards.** Phone verification (below) makes each farmed
+  account cost a phone number, but cheap SMS numbers exist, so farming is
+  harder, not impossible. A real fix needs proof-of-personhood and reward
+  rules that hold up against collusion.
 - **Issuance is centralized.** Network-wide credit depends on the treasury key
-  holder(s). A claims service, where non-treasury nodes submit mint requests
-  for the treasury to sign, would be the next step.
+  holder(s). A claims service is the next step (see *Phone verification*).
 - **Keys are only as strong as the password.** Someone holding the data
   folder can try to guess a weak password offline (scrypt slows that down but
   can't stop it). Keys are also decrypted in memory while signing, so malware

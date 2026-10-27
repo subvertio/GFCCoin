@@ -34,7 +34,7 @@ TREASURY_WALLET_ID = "GFC-TREASURY-GENESIS-001"
 # To rotate: generate a new key with `python signing.py` and add its public key here.
 # GFC_TREASURY_PUBKEYS (comma-separated) replaces this list, for test networks.
 PINNED_TREASURY_PUBKEYS = (
-    "b615b7fa89de96fa29fe83012959c6cbf5374d6d4f9d4c86a859bfedcdb05d89",
+    "0f19ffe9cfe0bb86a1c5e0a90322b197a4df4de99104790c2997d06dd108ea21",  # rotated 2026-10-27
 )
 _env_treasury = os.environ.get("GFC_TREASURY_PUBKEYS", "")
 TREASURY_PUBKEYS = tuple(
