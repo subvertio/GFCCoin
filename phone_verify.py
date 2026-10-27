@@ -2,7 +2,8 @@
 GFC Phone Verification - makes each rewarded account cost a phone number.
 
 - A verifier sends and checks one-time SMS codes: `start(phone)` / `check(phone, code)`.
-  TwilioVerifier is used when TWILIO_* credentials are set, else FakeVerifier.
+  TwilioVerifier is used when TWILIO_* credentials (an API key, or the account
+  SID and auth token) and the Verify service SID are set, else FakeVerifier.
 - Only an HMAC-SHA256 of the normalized E.164 number is stored, keyed with a
   secret in the data dir (phone_hmac_key.hex). The raw number is never written
   to the database, and none of these tables are synced to peers.
@@ -106,20 +107,26 @@ class FakeVerifier:
 
 class TwilioVerifier:
     """
-    Twilio Verify (SMS). Credentials come from TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
-    and TWILIO_VERIFY_SERVICE_SID. With TWILIO_LOOKUP_LINE_TYPE=1, a Lookup v2
-    line-type check runs first and VoIP numbers are refused (it is billed per lookup).
+    Twilio Verify (SMS) for TWILIO_VERIFY_SERVICE_SID. It authenticates with a
+    restricted API key (TWILIO_API_KEY_SID + TWILIO_API_KEY_SECRET; preferred,
+    since it can be limited to Verify and Lookup) or else the account's
+    TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN. With TWILIO_LOOKUP_LINE_TYPE=1, a
+    Lookup v2 line-type check runs first and VoIP numbers are refused (it is
+    billed per lookup).
     """
     name = "twilio"
     VERIFY_URL = "https://verify.twilio.com/v2/Services/{service}/{path}"
     LOOKUP_URL = "https://lookups.twilio.com/v2/PhoneNumbers/{phone}"
     VOIP_TYPES = {"nonFixedVoip", "fixedVoip"}
 
-    def __init__(self, account_sid: str, auth_token: str, service_sid: str,
+    def __init__(self, auth_user: str, auth_secret: str, service_sid: str,
                  lookup_line_type: bool = False, timeout: float = 10.0):
+        # auth_user is an API key SID (SK...) or the account SID (AC...); the
+        # Verify and Lookup URLs don't contain the account SID, so either works
         self.service_sid = service_sid
         self.lookup_line_type = lookup_line_type
-        self.client = httpx.Client(auth=(account_sid, auth_token), timeout=timeout)
+        self.auth_user = auth_user
+        self.client = httpx.Client(auth=(auth_user, auth_secret), timeout=timeout)
 
     def _post(self, path: str, data: dict) -> dict:
         try:
@@ -156,15 +163,27 @@ class TwilioVerifier:
 _verifier = None
 
 
+def twilio_credentials():
+    """(user, secret) for Twilio: a restricted API key if set, else the account SID and auth token."""
+    key_sid = os.environ.get("TWILIO_API_KEY_SID", "")
+    key_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
+    if key_sid and key_secret:
+        return key_sid, key_secret
+    sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+    if sid and token:
+        return sid, token
+    return None
+
+
 def get_verifier():
     """Twilio when its env vars are set, else the fake provider (logged, since it sends nothing)."""
     global _verifier
     if _verifier is None:
-        sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
-        token = os.environ.get("TWILIO_AUTH_TOKEN", "")
+        creds = twilio_credentials()
         service = os.environ.get("TWILIO_VERIFY_SERVICE_SID", "")
-        if sid and token and service:
-            _verifier = TwilioVerifier(sid, token, service,
+        if creds and service:
+            _verifier = TwilioVerifier(creds[0], creds[1], service,
                                        lookup_line_type=os.environ.get("TWILIO_LOOKUP_LINE_TYPE") == "1")
         else:
             print("[PhoneVerify] No Twilio credentials: using the fake provider (codes go to the console)")
