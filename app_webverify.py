@@ -147,8 +147,8 @@ def _page(request: Request, step: str, code: str = "", username: str = "", phone
 creators you watch, and your first post bonus if one is waiting.</p>
 {err}<form method="post" action="/verify/web/start">
 <input type="hidden" name="c" value="{e(code)}">
-<label for="phone">Mobile number, with your country code</label>
-<input id="phone" name="phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="+1 555 123 4567"
+<label for="phone">Mobile number</label>
+<input id="phone" name="phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="555 123 4567"
  value="{e(phone)}" required>
 {widget}
 <button type="submit">Text me a code</button>
