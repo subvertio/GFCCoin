@@ -277,10 +277,32 @@ _TURNSTILE_MESSAGES = {
 }
 
 
+_NODE_PROBLEM = "Phone verification isn't working on this node right now. Please try again later."
+
+# Twilio error codes (https://www.twilio.com/docs/api/errors) -> what the person can do about it
+_PROVIDER_MESSAGES = {
+    60200: "That number can't receive texts. Check it and try again.",
+    21211: "That number can't receive texts. Check it and try again.",
+    60205: "That looks like a landline. Please use a mobile number.",
+    60203: "Too many codes were sent to this number. Wait 10 minutes, then try again.",
+    60410: "Our SMS provider is blocking texts to this number for now. Please try again later, or use another number.",
+    60605: "We can't text numbers in that country yet.",
+    # The operator's problem (trial account, bad key, missing permission, wrong service): not the person's
+    21608: _NODE_PROBLEM,
+    20003: _NODE_PROBLEM,
+    20404: _NODE_PROBLEM,
+    8021: _NODE_PROBLEM,
+}
+
+
 def _friendly(ex: phone_verify.FlowError) -> str:
     detail = ex.detail or "Something went wrong."
     if ex.status == 403:
         return _TURNSTILE_MESSAGES.get(ex.reason, "Please complete the check above, then try again.")
+    if ex.reason.startswith(phone_verify.PROVIDER_REASON) and "VoIP" not in detail:
+        code = ex.reason.partition(":")[2]
+        return _PROVIDER_MESSAGES.get(int(code) if code else None,
+                                      "We couldn't send the code right now. Please try again later.")
     if ex.status == 429:
         return "Too many attempts today. Please try again tomorrow."
     return detail[0].upper() + detail[1:] + ("" if detail.endswith(".") else ".")

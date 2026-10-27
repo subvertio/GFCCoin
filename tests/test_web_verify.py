@@ -159,6 +159,27 @@ class WebVerifyTests(unittest.TestCase):
                 self.assertIn('class="cf-turnstile"', r.text)  # a fresh widget to try again
                 self.assertNotIn(phone, FAKE_SMS.sent)
 
+    def test_provider_refusal_says_what_to_do(self):
+        class Refusing:
+            def __init__(self, code):
+                self.code = code
+
+            def start(self, phone):
+                raise phone_verify.VerifyError("verification provider error (403)", self.code)
+
+        _, token = self.register(wallet=False)
+        code = self.link_code(token)
+        self.addCleanup(phone_verify.set_verifier, FAKE_SMS)
+        for twilio_code, message in ((60410, "blocking texts to this number"),
+                                     (60605, "in that country"),
+                                     (21608, "working on this node"),  # trial account: the operator's problem
+                                     (None, "send the code right now")):
+            phone_verify.set_verifier(Refusing(twilio_code))
+            with self.subTest(twilio_code=twilio_code):
+                r = self.client.post("/verify/web/start", data={"c": code, "phone": unique_phone()})
+                self.assertIn(message, r.text)
+                self.assertNotIn("provider error", r.text)
+
     def test_link_needs_a_post_token(self):
         self.assertEqual(self.client.post("/verify/link").status_code, 401)
 

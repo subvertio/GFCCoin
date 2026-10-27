@@ -452,6 +452,36 @@ class TwilioAdapterTests(unittest.TestCase):
         with self.assertRaises(phone_verify.VerifyError):
             v.start("+14155550123")
 
+    def test_refusal_logs_twilios_code_and_message(self):
+        body = {"code": 60410, "message": "Verification delivery attempt blocked for +14155550123",
+                "more_info": "https://www.twilio.com/docs/errors/60410", "status": 403}
+        v = self.make(lambda request: httpx.Response(403, json=body))
+        with self.assertLogs("gfc.phone", level="WARNING") as logs:
+            with self.assertRaises(phone_verify.VerifyError) as ctx:
+                v.start("+14155550123")
+        self.assertEqual(ctx.exception.provider_code, 60410)
+        self.assertIn("Twilio 60410", str(ctx.exception))
+        written = "\n".join(logs.output)
+        self.assertIn("60410", written)
+        self.assertIn("delivery attempt blocked", written)
+
+    def test_refusal_without_a_json_body(self):
+        v = self.make(lambda request: httpx.Response(403, text="<html>no</html>"))
+        with self.assertRaises(phone_verify.VerifyError) as ctx:
+            v.start("+14155550123")
+        self.assertIsNone(ctx.exception.provider_code)
+        self.assertEqual(str(ctx.exception), "verification provider error (403)")
+
+    def test_lookup_refusal_has_twilios_code(self):
+        def handler(request):
+            if request.url.host == "lookups.twilio.com":
+                return httpx.Response(401, json={"code": 20003, "message": "Authenticate"})
+            return httpx.Response(201, json={"status": "pending"})
+
+        with self.assertRaises(phone_verify.VerifyError) as ctx:
+            self.make(handler, lookup=True).start("+14155550123")
+        self.assertEqual(ctx.exception.provider_code, 20003)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
