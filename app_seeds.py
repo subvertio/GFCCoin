@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
+from security import owner_from_token
 from config import DB_PATH, SEEDS_ORIG_DIR as ORIG_DIR, SEEDS_THUMB_DIR as THUMB_DIR
 
 router = APIRouter()
@@ -30,11 +31,6 @@ def detect_content_type(filename: str) -> str:
             return ctype
     return "other"
 
-def owner_from_token(token: str) -> str:
-    """Extract username from API token format 'local-{username}-token'."""
-    if token.startswith("local-") and token.endswith("-token"):
-        return token[6:-6]
-    return "anonymous"
 
 def safe_name(name: str) -> str:
     """

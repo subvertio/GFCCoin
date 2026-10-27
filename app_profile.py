@@ -11,6 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
+from security import owner_from_token
 from config import DB_PATH, AVATAR_DIR
 
 router = APIRouter()
@@ -19,11 +20,6 @@ SAFE_RE = re.compile(r"[^A-Za-z0-9._+-]")
 
 # ---------- helpers ----------
 
-def owner_from_token(token: str) -> str:
-    """Extract username from API token format 'local-{username}-token'."""
-    if token.startswith("local-") and token.endswith("-token"):
-        return token[6:-6]
-    return "anonymous"
 
 
 def safe_ext(filename: str) -> str:

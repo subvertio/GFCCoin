@@ -7,6 +7,7 @@ Uses blockchain.process_podt_reward() to create REWARD transactions from Treasur
 """
 
 import hashlib
+import os
 import sqlite3
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -48,7 +49,13 @@ async def report_transfer(request: TransferReportRequest):
 
     Called by the sync engine after a seed file is successfully transferred.
     Creates a REWARD transaction from Treasury to the seeder's wallet.
+
+    Disabled unless GFC_ENABLE_PODT_REPORT=1: the claim is self-reported and
+    unauthenticated, so anyone could mint Treasury rewards. The sync engine
+    awards PoDT credits directly and does not need this endpoint.
     """
+    if os.environ.get("GFC_ENABLE_PODT_REPORT") != "1":
+        raise HTTPException(status_code=403, detail="report_transfer is disabled on this node")
     if not request.seeder_wallet:
         raise HTTPException(status_code=400, detail="seeder_wallet is required")
     if not request.file_hash:

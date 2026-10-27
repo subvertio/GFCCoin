@@ -16,6 +16,8 @@ import logging
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
 
+from security import PUBLIC_USER_COLUMNS, sanitize_incoming_rows
+
 logger = logging.getLogger("gfc.discovery")
 
 # Peer persistence file - stored in DATA_DIR
@@ -55,7 +57,7 @@ TRACKER_SYNC_INTERVAL = 60
 TRACKER_SYNCABLE_TABLES = ["users", "seeds", "transactions", "likes", "comments", "bookmarks", "wallets",
                            "blocks", "user_grants", "podt_proofs"]
 TRACKER_TABLE_COLUMNS = {
-    "users": "id, username, password, first_name, last_name, email, phone, created_at, bio, avatar_filename",
+    "users": PUBLIC_USER_COLUMNS,  # never share passwords, email, phone or names
     "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet",
     "transactions": "id, sender, recipient, amount, reason, timestamp, amount_cents, tx_hash, block_index, tx_type",
     "likes": "id, seed_id, owner, created_at",
@@ -345,6 +347,9 @@ class PeerDiscovery:
                 uploaded_at = bundle.get("uploaded_at", "")
 
                 if table not in TRACKER_SYNCABLE_TABLES or not columns or not rows:
+                    continue
+                columns, rows = sanitize_incoming_rows(table, columns, rows, TRACKER_TABLE_COLUMNS)
+                if not columns:
                     continue
 
                 # Track the latest bundle time for next download
