@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, Form, Query
 
+import signing
 from security import owner_from_token
 from config import DB_PATH
 from blockchain import process_podt_reward
@@ -303,23 +304,16 @@ async def record_played(seed_id: str, api_token: str = Form("")):
             conn.close()
             return {"ok": True, "credited": False, "reason": "file too small"}
 
-        # Resolve seeder wallet: reward_wallet first, then owner's first wallet
-        seeder_wallet = ""
-        if reward_wallet:
-            wallet_exists = conn.execute(
-                "SELECT id FROM wallets WHERE id = ?", (reward_wallet,)
-            ).fetchone()
-            if wallet_exists:
-                seeder_wallet = reward_wallet
-
+        # Pay only the wallet that signed the seed (never a wallet picked by owner name)
+        seeder_wallet = signing.seed_reward_wallet(conn, seed_id)
         if not seeder_wallet:
-            wallet_row = conn.execute(
-                "SELECT id FROM wallets WHERE owner = ? LIMIT 1", (seed_owner,)
-            ).fetchone()
-            if not wallet_row:
-                conn.close()
-                return {"ok": True, "credited": False, "reason": "no wallet"}
-            seeder_wallet = wallet_row[0]
+            conn.close()
+            return {"ok": True, "credited": False, "reason": "seed has no signed reward wallet"}
+
+        # No self-crediting through a wallet the requester owns on this node
+        if signing.local_wallet_for(conn, requester, seeder_wallet):
+            conn.close()
+            return {"ok": True, "credited": False, "reason": "self-play"}
 
         conn.close()
 

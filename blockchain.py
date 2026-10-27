@@ -13,10 +13,11 @@ import json
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from config import DB_PATH
+import signing
 
 # ============================================================================
 # CONSTANTS
@@ -35,6 +36,17 @@ TX_TYPE_PREMINE  = "PREMINE"   # Genesis: SYSTEM -> Treasury
 TX_TYPE_GRANT    = "GRANT"     # Treasury -> new user (first wallet)
 TX_TYPE_TRANSFER = "TRANSFER"  # User -> User
 TX_TYPE_REWARD   = "REWARD"    # Treasury -> Seeder (PoDT)
+MINT_TX_TYPES = (TX_TYPE_GRANT, TX_TYPE_REWARD)
+
+# Limits applied to transactions received from peers
+MAX_REASON_LEN = 500
+MAX_REWARD_CENTS = 100_000              # 1,000 GFC per reward tx (~10 GB of PoDT)
+MAX_CLOCK_SKEW = timedelta(hours=1)     # reject rows timestamped further in the future
+PENDING_TTL = timedelta(days=7)         # unfunded synced transfers are retried this long
+MAX_PENDING = 5_000
+
+TX_INSERT_COLUMNS = ("id", "sender", "recipient", "amount", "reason", "timestamp",
+                     "amount_cents", "tx_hash", "tx_type", "signature", "signer")
 
 
 # ============================================================================
@@ -92,6 +104,8 @@ def init_blockchain_tables(db_path: str = DB_PATH):
         ("tx_hash", "TEXT DEFAULT ''"),
         ("block_index", "INTEGER"),
         ("tx_type", "TEXT DEFAULT 'TRANSFER'"),
+        ("signature", "TEXT DEFAULT ''"),  # Ed25519 signature over tx_hash ('' = local-only)
+        ("signer", "TEXT DEFAULT ''"),     # public key that signed (sender, or treasury for mints)
     ]:
         try:
             conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {coldef}")
@@ -108,8 +122,45 @@ def init_blockchain_tables(db_path: str = DB_PATH):
         except Exception:
             pass
 
+    # A tx_hash may only appear once (blocks replays of a signed transaction under a new id)
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_tx_hash "
+                     "ON transactions(tx_hash) WHERE tx_hash != ''")
+    except sqlite3.Error:
+        pass  # Legacy duplicates; uniqueness is still checked in code for synced rows
+
+    # Synced transfers with a valid signature but not (yet) enough sender balance on
+    # this node, e.g. because the funding transaction hasn't arrived yet. Local only.
+    conn.execute('''CREATE TABLE IF NOT EXISTS pending_sync_tx (
+        id TEXT PRIMARY KEY,
+        tx_json TEXT NOT NULL,
+        received_at TEXT NOT NULL
+    )''')
+
+    signing.init_wallet_keys_table(conn)
+
     conn.commit()
     conn.close()
+
+
+def _insert_tx(conn: sqlite3.Connection, tx: dict):
+    """Insert a transaction dict (block_index is set later by create_block)."""
+    conn.execute(
+        f"INSERT INTO transactions ({', '.join(TX_INSERT_COLUMNS)}) "
+        f"VALUES ({', '.join('?' * len(TX_INSERT_COLUMNS))})",
+        tuple(tx.get(c, "") for c in TX_INSERT_COLUMNS)
+    )
+
+
+def _sign_mint(tx: dict):
+    """Sign a GRANT/REWARD with the treasury key if this node holds it."""
+    treasury_key = signing.load_treasury_private_key()
+    if treasury_key:
+        tx["signer"] = signing.public_key_of(treasury_key)
+        tx["signature"] = signing.sign_tx_hash(treasury_key, tx["tx_hash"])
+    else:
+        tx["signer"] = ""
+        tx["signature"] = ""  # Local-only: peers will not accept this mint
 
 
 # ============================================================================
@@ -364,15 +415,10 @@ def process_user_grant(db_path: str, username: str, wallet_id: str) -> Optional[
         "timestamp": now_iso,
         "tx_type": TX_TYPE_GRANT,
     }
-    tx["tx_hash"] = compute_tx_hash(tx)
 
-    # Insert transaction
-    conn.execute(
-        "INSERT INTO transactions (id, sender, recipient, amount, reason, timestamp, "
-        "amount_cents, tx_hash, tx_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (tx["id"], tx["sender"], tx["recipient"], tx["amount"], tx["reason"],
-         tx["timestamp"], tx["amount_cents"], tx["tx_hash"], tx["tx_type"])
-    )
+    tx["tx_hash"] = compute_tx_hash(tx)
+    _sign_mint(tx)
+    _insert_tx(conn, tx)
 
     # Record grant
     conn.execute(
@@ -396,7 +442,7 @@ def process_user_grant(db_path: str, username: str, wallet_id: str) -> Optional[
 # ============================================================================
 
 def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
-                     amount_cents: int, reason: str = "") -> dict:
+                     amount_cents: int, reason: str = "", data_key: Optional[bytes] = None) -> dict:
     """
     Process a GFC transfer between wallets.
     Validates sender has sufficient balance.
@@ -408,6 +454,9 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
 
     if sender_wallet == recipient_wallet:
         raise ValueError("Cannot send to yourself")
+
+    if sender_wallet == TREASURY_WALLET_ID or recipient_wallet == TREASURY_WALLET_ID:
+        raise ValueError("Treasury funds move only through grants and rewards")
 
     # Check sender balance
     sender_balance = get_balance_cents(db_path, sender_wallet)
@@ -432,13 +481,21 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
     }
     tx["tx_hash"] = compute_tx_hash(tx)
 
+    # Sign with the sender's local key. Legacy wallets (created before signed
+    # wallets, no key) can still transfer on this node, but peers reject the row.
+    # data_key unlocks the key if it is encrypted at rest (see keystore.py)
+    private_key = signing.get_wallet_private_key(db_path, sender_wallet, data_key)
+    if not private_key and signing.has_wallet_key(db_path, sender_wallet):
+        raise ValueError("Wallet key is locked: log in again to sign transfers")
+    if private_key:
+        tx["signer"] = sender_wallet
+        tx["signature"] = signing.sign_tx_hash(private_key, tx["tx_hash"])
+    else:
+        tx["signer"] = ""
+        tx["signature"] = ""
+
     conn = sqlite3.connect(db_path)
-    conn.execute(
-        "INSERT INTO transactions (id, sender, recipient, amount, reason, timestamp, "
-        "amount_cents, tx_hash, tx_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (tx["id"], tx["sender"], tx["recipient"], tx["amount"], tx["reason"],
-         tx["timestamp"], tx["amount_cents"], tx["tx_hash"], tx["tx_type"])
-    )
+    _insert_tx(conn, tx)
     conn.commit()
     conn.close()
 
@@ -465,7 +522,7 @@ def process_podt_reward(db_path: str, seeder_wallet: str, proof_id: str,
 
     # Calculate reward: bytes -> MB -> cents
     mb_transferred = bytes_transferred / (1024 * 1024)
-    reward_cents = int(mb_transferred * CREDITS_PER_MB_CENTS)
+    reward_cents = min(int(mb_transferred * CREDITS_PER_MB_CENTS), MAX_REWARD_CENTS)
 
     if reward_cents <= 0:
         return None  # Round-down to zero
@@ -502,14 +559,8 @@ def process_podt_reward(db_path: str, seeder_wallet: str, proof_id: str,
         "tx_type": TX_TYPE_REWARD,
     }
     tx["tx_hash"] = compute_tx_hash(tx)
-
-    # Insert transaction
-    conn.execute(
-        "INSERT INTO transactions (id, sender, recipient, amount, reason, timestamp, "
-        "amount_cents, tx_hash, tx_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (tx["id"], tx["sender"], tx["recipient"], tx["amount"], tx["reason"],
-         tx["timestamp"], tx["amount_cents"], tx["tx_hash"], tx["tx_type"])
-    )
+    _sign_mint(tx)
+    _insert_tx(conn, tx)
 
     # Record proof
     conn.execute(
@@ -529,6 +580,178 @@ def process_podt_reward(db_path: str, seeder_wallet: str, proof_id: str,
     print(f"[Blockchain] PoDT: {reward_cents / 100:.2f} GFC -> {seeder_wallet} "
           f"({bytes_transferred} bytes, block: {block['block_index']})")
     return tx
+
+
+# ============================================================================
+# SYNCED TRANSACTION VALIDATION
+# ============================================================================
+#
+# Rules for a transaction row received from a peer or the tracker (see
+# docs/signed-ledger.md for the reasoning):
+#   - tx_hash must equal compute_tx_hash() of the row's contents, and must be new
+#   - TRANSFER: sender is an Ed25519 public key and signed the tx_hash, and has
+#     enough balance on this node (otherwise the row waits in pending_sync_tx)
+#   - GRANT / REWARD: sender is the treasury wallet and the signature is from a
+#     pinned treasury key; GRANT is exactly NEW_USER_GRANT_CENTS, once per wallet
+#   - PREMINE: never accepted; every node creates its own genesis
+# The peer's block_index is ignored: accepted rows go into a new local block.
+
+ACCEPTED, DUPLICATE, PENDING, REJECTED = "accepted", "duplicate", "pending", "rejected"
+
+
+def _parse_timestamp(value) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def check_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
+    """
+    Decide what to do with a transaction row from a peer, without writing it.
+    Returns (status, reason) where status is ACCEPTED, DUPLICATE, PENDING or REJECTED.
+    """
+    tx_id = tx.get("id")
+    sender = tx.get("sender")
+    recipient = tx.get("recipient")
+    amount_cents = tx.get("amount_cents")
+    tx_type = tx.get("tx_type")
+    reason = tx.get("reason") or ""
+    tx_hash = tx.get("tx_hash") or ""
+    signature = tx.get("signature") or ""
+
+    if not isinstance(tx_id, str) or not 0 < len(tx_id) <= 100:
+        return REJECTED, "bad id"
+    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
+        return REJECTED, "bad amount"
+    if tx_type == TX_TYPE_PREMINE:
+        return REJECTED, "premine is created locally, never synced"
+    if tx_type not in (TX_TYPE_TRANSFER,) + MINT_TX_TYPES:
+        return REJECTED, "unknown tx_type"
+    if not isinstance(reason, str) or len(reason) > MAX_REASON_LEN:
+        return REJECTED, "bad reason"
+    if not isinstance(sender, str) or not isinstance(recipient, str) or not recipient \
+            or recipient == sender or recipient == TREASURY_WALLET_ID:
+        return REJECTED, "bad sender or recipient"
+    ts = _parse_timestamp(tx.get("timestamp"))
+    if ts is None or ts > datetime.now(timezone.utc) + MAX_CLOCK_SKEW:
+        return REJECTED, "bad timestamp"
+    if tx_hash != compute_tx_hash(tx):
+        return REJECTED, "tx_hash does not match contents"
+    if not isinstance(signature, str) or not signature:
+        return REJECTED, "unsigned"
+
+    if tx_type == TX_TYPE_TRANSFER:
+        if not signing.is_public_key(sender):
+            return REJECTED, "sender is not a public key"
+        if tx.get("signer") not in ("", None, sender):
+            return REJECTED, "transfer must be signed by its sender"
+        signer = sender
+    else:
+        signer = tx.get("signer") or ""
+        if sender != TREASURY_WALLET_ID:
+            return REJECTED, "mint must come from the treasury"
+        if not isinstance(signer, str) or signer.lower() not in signing.treasury_pubkeys():
+            return REJECTED, "mint not signed by a treasury key"
+        if tx_type == TX_TYPE_GRANT and amount_cents != NEW_USER_GRANT_CENTS:
+            return REJECTED, "wrong grant amount"
+        if tx_type == TX_TYPE_REWARD and amount_cents > MAX_REWARD_CENTS:
+            return REJECTED, "reward too large"
+    if not signing.verify_tx_signature(signer, tx_hash, signature):
+        return REJECTED, "bad signature"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        if conn.execute("SELECT 1 FROM transactions WHERE id = ?", (tx_id,)).fetchone():
+            return DUPLICATE, "already have this id"
+        if conn.execute("SELECT 1 FROM transactions WHERE tx_hash = ?", (tx_hash,)).fetchone():
+            return REJECTED, "replayed tx_hash"
+        if tx_type == TX_TYPE_GRANT and conn.execute(
+                "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ?",
+                (TX_TYPE_GRANT, recipient)).fetchone():
+            return REJECTED, "wallet already received a grant"
+    finally:
+        conn.close()
+
+    if get_balance_cents(db_path, sender) < amount_cents:
+        return PENDING, "insufficient sender balance"
+    return ACCEPTED, ""
+
+
+def accept_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
+    """Validate a synced transaction and, if valid, add it to a new local block."""
+    status, reason = check_synced_transaction(db_path, tx)
+    if status != ACCEPTED:
+        return status, reason
+    row = {c: tx.get(c, "") for c in TX_INSERT_COLUMNS}
+    row["amount"] = tx["amount_cents"] / 100.0
+    row["signer"] = tx.get("signer") or tx["sender"]
+    conn = sqlite3.connect(db_path)
+    try:
+        _insert_tx(conn, row)
+        conn.commit()
+    except sqlite3.IntegrityError:
+        return DUPLICATE, "inserted concurrently"
+    finally:
+        conn.close()
+    create_block(db_path, [tx["id"]])
+    return ACCEPTED, ""
+
+
+def _queue_pending(db_path: str, tx: dict):
+    now = datetime.now(timezone.utc)
+    conn = sqlite3.connect(db_path)
+    conn.execute("INSERT OR IGNORE INTO pending_sync_tx (id, tx_json, received_at) VALUES (?, ?, ?)",
+                 (tx["id"], json.dumps(tx), now.isoformat()))
+    conn.execute("DELETE FROM pending_sync_tx WHERE received_at < ?", ((now - PENDING_TTL).isoformat(),))
+    conn.execute("DELETE FROM pending_sync_tx WHERE id NOT IN "
+                 "(SELECT id FROM pending_sync_tx ORDER BY received_at DESC LIMIT ?)", (MAX_PENDING,))
+    conn.commit()
+    conn.close()
+
+
+def retry_pending_transactions(db_path: str) -> int:
+    """Re-check queued transfers until no more become valid. Returns how many were accepted."""
+    accepted_total = 0
+    while True:
+        conn = sqlite3.connect(db_path)
+        pending = [json.loads(r[0]) for r in conn.execute("SELECT tx_json FROM pending_sync_tx")]
+        conn.close()
+        pending.sort(key=lambda t: t.get("timestamp", ""))
+        accepted = 0
+        for tx in pending:
+            status, _ = accept_synced_transaction(db_path, tx)
+            if status == PENDING:
+                continue
+            accepted += status == ACCEPTED
+            conn = sqlite3.connect(db_path)
+            conn.execute("DELETE FROM pending_sync_tx WHERE id = ?", (tx["id"],))
+            conn.commit()
+            conn.close()
+        accepted_total += accepted
+        if not accepted:
+            return accepted_total
+
+
+def ingest_synced_transactions(db_path: str, columns: List[str], rows: list) -> Dict[str, int]:
+    """
+    Validate and store transaction rows from a peer or the tracker. Rows that are
+    signed correctly but not yet funded are queued and retried as more rows
+    arrive. Returns a count per status.
+    """
+    counts = {ACCEPTED: 0, DUPLICATE: 0, PENDING: 0, REJECTED: 0}
+    txs = [dict(zip(columns, row)) for row in rows if len(row) == len(columns)]
+    txs.sort(key=lambda t: str(t.get("timestamp", "")))
+    for tx in txs:
+        status, _ = accept_synced_transaction(db_path, tx)
+        if status == PENDING:
+            _queue_pending(db_path, tx)
+        counts[status] += 1
+    counts[ACCEPTED] += retry_pending_transactions(db_path)
+    return counts
 
 
 # ============================================================================

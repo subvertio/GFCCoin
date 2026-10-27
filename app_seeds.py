@@ -7,6 +7,8 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
+import keystore
+import signing
 from security import owner_from_token
 from config import DB_PATH, SEEDS_ORIG_DIR as ORIG_DIR, SEEDS_THUMB_DIR as THUMB_DIR
 
@@ -140,16 +142,36 @@ async def seeds_upload(
       - description   : optional
       - tags          : optional (comma separated)
       - api_token     : optional (for owner tracking)
-      - reward_wallet : optional (wallet ID for PoDT credit routing)
+      - reward_wallet : optional (one of your wallets on this node; defaults to
+                        your oldest one). The wallet signs the seed, and rewards are
+                        only ever paid to it. Without a signing wallet the seed is
+                        still shared but earns no rewards.
     """
     if not file:
         raise HTTPException(status_code=400, detail="file missing")
 
     owner = owner_from_token(api_token)
 
-    # Generate id and safe filename
-    sid = uuid.uuid4().hex[:12]
-    orig_safe = f"{sid}_{safe_name(file.filename or 'seed.bin')}"
+    # Pick the signing wallet: must be the owner's, with its key on this node
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        signer_wallet = signing.local_wallet_for(conn, owner, reward_wallet.strip())             if owner != "anonymous" else None
+    finally:
+        conn.close()
+    if reward_wallet.strip() and not signer_wallet:
+        raise HTTPException(status_code=400, detail="reward_wallet must be one of your wallets on this node")
+    reward_wallet = signer_wallet or ""
+    private_key = None
+    if reward_wallet:
+        private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet,
+                                                     keystore.data_key_for_token(api_token))
+        if not private_key:
+            raise HTTPException(status_code=401, detail="log in again to unlock your wallet key")
+
+    # Generate id and safe filename. Signed seeds get an ID bound to their reward wallet.
+    nonce = uuid.uuid4().hex[:12]
+    orig_safe = f"{nonce}_{safe_name(file.filename or 'seed.bin')}"
+    sid = signing.seed_id_for(reward_wallet, orig_safe) if reward_wallet else nonce
     orig_path = ORIG_DIR / orig_safe
 
     # Persist original
@@ -179,15 +201,20 @@ async def seeds_upload(
     # Store metadata in database
     created_at = datetime.datetime.utcnow().isoformat()
     tags_str = tags.strip() if tags else ""
+    signature = ""
+    if reward_wallet:
+        signature = signing.sign_seed(private_key, {
+            "id": sid, "owner": owner, "filename": orig_safe, "file_size": file_size,
+            "created_at": created_at, "reward_wallet": reward_wallet})
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.execute(
             "INSERT INTO seeds (id, owner, title, description, tags, filename, "
-            "thumb_filename, content_type, file_size, gfc_earned, created_at, reward_wallet) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "thumb_filename, content_type, file_size, gfc_earned, created_at, reward_wallet, signature) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (sid, owner, final_title, description, tags_str, orig_safe,
              thumb_filename, content_type, file_size, 0.0, created_at,
-             reward_wallet.strip())
+             reward_wallet, signature)
         )
         conn.commit()
         conn.close()
@@ -208,7 +235,8 @@ async def seeds_upload(
         "file_size": file_size,
         "gfc_earned": 0.0,
         "created_at": created_at,
-        "reward_wallet": reward_wallet.strip(),
+        "reward_wallet": reward_wallet,
+        "rewards_enabled": bool(signature),
     }
 
 @router.get("/seeds/mine")

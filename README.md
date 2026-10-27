@@ -27,7 +27,7 @@ GFC tries a different model. The community hosts the content, and the people who
 | **A starting balance** | Every new user's first wallet gets 100 GFC to tip, try out and support other creators. |
 | **Built for 3D and media** | Native support for images, video, audio and 3D formats (`.glb`, `.gltf`, `.fbx`, `.obj`, `.usdz`, `.stl`, `.3ds`). |
 | **A creator profile** | Bio, avatar, a feed, search, likes, comments and bookmarks. |
-| **A public ledger** | Every grant, transfer and reward is recorded in a hash-linked chain that anyone can check (`/blockchain/validate`). |
+| **A public ledger** | Every grant, transfer and reward is recorded in a hash-linked chain that anyone can check (`/blockchain/validate`). Transfers are signed with your wallet's key, so other nodes can't fake them. |
 
 ### A typical flow
 
@@ -47,9 +47,11 @@ GFC is a Python/FastAPI backend that each participant runs as a local node. The 
 | Seeds | `app_seeds.py` | Upload, thumbnails, content-type detection |
 | Engagement | `app_engagement.py` | Likes, comments, bookmarks, play rewards |
 | Profiles | `app_profile.py` | Bio and avatar |
-| Ledger | `blockchain.py` | Hash-linked blocks with Merkle roots over SQLite; balances in integer cents |
+| Ledger | `blockchain.py` | Hash-linked blocks with Merkle roots over SQLite; balances in integer cents; validation of synced transactions |
+| Signing | `signing.py` | Ed25519 wallet keys (wallet ID = public key), the treasury key and its backup CLI |
+| Keystore | `keystore.py` | Wallet keys encrypted at rest; passphrase-encrypted export/import |
 | PoDT | `podt_core.py`, `app_podt.py` | Proof-of-Data-Transfer rewards |
-| P2P sync | `sync_engine.py` | Length-prefixed JSON over TCP (port 6881), append-only sync |
+| P2P sync | `sync_engine.py`, `sync_ingest.py` | Length-prefixed JSON over TCP (port 6881), append-only sync; one set of accept rules shared with the tracker relay |
 | Discovery | `peer_discovery.py` | Bootstrap trackers, LAN broadcast (UDP 6882), peer exchange |
 | Security | `security.py` | Password hashing, session tokens, sync privacy filtering |
 
@@ -70,6 +72,12 @@ uvicorn main:app --host 127.0.0.1 --port 8000
 
 Then open `http://127.0.0.1:8000/docs` for the interactive API docs.
 
+Run the tests with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 - Data is stored in `./data` by default. Set `GFC_DATA_DIR` to use another location.
 - To sync with peers, TCP port 6881 and UDP port 6882 must be reachable.
 - `gfc_backend.spec` builds a single-file Windows executable with PyInstaller.
@@ -78,16 +86,21 @@ Then open `http://127.0.0.1:8000/docs` for the interactive API docs.
 
 These are known gaps, listed so you can make an informed choice:
 
-- **No consensus or signatures yet.** Peers trust each other's ledger rows. A modified node could insert fake balances or transactions. Wallets need public-key signatures, and the ledger needs real validation, before GFC can carry value between strangers.
-- **Rewards can be farmed.** Play and transfer rewards can be gamed with multiple accounts.
+- **Fixed: peers can no longer forge balances or spend your wallet.** Wallets are Ed25519 key pairs, and the private key never leaves your node. Every node checks a synced transaction's signature, hash and sender balance before accepting it. Grants and rewards from peers must be signed by the treasury key. Balances are computed only from validated transactions, never from a peer's balance column. See [docs/signed-ledger.md](docs/signed-ledger.md).
+- **No consensus yet.** If one wallet signs two transfers that together overspend it, each node accepts whichever one arrives first. Nodes can disagree until there's a consensus or ordering protocol.
+- **Fixed: forged rows can't redirect your rewards.** Each seed is signed by its reward wallet, and its ID is tied to that wallet. Rewards go only to the wallet that signed the seed, never to a wallet picked by owner name.
+- **Network-wide credit needs the treasury key.** Only grants and rewards signed by the pinned treasury key (`config.PINNED_TREASURY_PUBKEYS`) are accepted from peers. Those issued by other nodes work on that node only. Wallets created before this change can't sign, so their transfers stay on their home node. Seeds uploaded before this change earn no rewards.
+- **Rewards can be farmed (not Sybil-resistant).** Play and transfer rewards can be gamed with multiple accounts. Signing proves who issued a reward, not that a real person earned it.
 - **Huge premine.** The treasury holds the entire supply, so issuance is centrally controlled.
 - **No content moderation tools** yet for reporting or removing illegal or infringing uploads.
+- **Fixed: wallet keys are encrypted at rest and can be backed up.** They can only be unlocked with your password or a live login session. **Export a backup** (`POST /wallets/export`) and keep it with its passphrase. There's no password reset, so a forgotten password or a lost data folder can only be recovered from that backup. Treasury operators: `python signing.py backup FILE`.
+- **Usernames aren't signed yet.** Someone can post content, likes or comments under another person's name. They can't collect that person's rewards, but they can impersonate them.
 - **API tokens are passed as form/query parameters.** Run the node on localhost, or behind HTTPS if it's exposed.
 - **The Unreal front end isn't in this repository.** Right now you use the node through its API.
 
 ## Roadmap ideas
 
-- Signed transactions and a consensus model for the ledger
+- A consensus/ordering model for the ledger, and a claims service so any node's grants and rewards can be treasury-signed
 - Sybil-resistant reward rules
 - A lightweight web front end with an in-browser 3D viewer (e.g. `<model-viewer>`/three.js), so viewers don't need to install anything
 - Reporting and moderation tools
