@@ -42,7 +42,11 @@ a = Analysis(
         'peer_discovery',
         'sync_engine',
         'p2p_service',
+        'security',
+        'signing',
+        'sync_ingest',
         # Dependencies
+        'cryptography.hazmat.primitives.asymmetric.ed25519',
         'multipart',
         'multipart.multipart',
         'httpx',

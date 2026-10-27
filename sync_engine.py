@@ -6,12 +6,13 @@ Message types:
   HELLO          - Exchange node identity (version, wallet_id)
   PEER_LIST      - Exchange known peers (Tier 3 discovery)
   SYNC_REQUEST   - "What's new since timestamp X for table Y?"
-  SYNC_RESPONSE  - Here are the new rows (INSERT OR IGNORE on receiver)
+  SYNC_RESPONSE  - Here are the new rows (validated by sync_ingest on receiver)
   SEED_FILE_REQ  - Request a seed file by ID
   SEED_FILE_RESP - Seed file metadata response
   SEED_FILE_CHUNK- Binary file chunk (base64 encoded)
 
-Data sync is append-only and conflict-free via INSERT OR IGNORE.
+Data sync is append-only. Ledger rows (transactions) must carry valid Ed25519
+signatures and be funded before they are accepted; see sync_ingest.py.
 """
 
 import asyncio
@@ -24,7 +25,7 @@ import logging
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
 from pathlib import Path
 
-from security import PUBLIC_USER_COLUMNS, sanitize_incoming_rows
+from sync_ingest import SYNCABLE_TABLES, TABLE_COLUMNS, TABLE_TIMESTAMP_COL, ingest_rows, select_rows_since
 from config import DB_PATH, DATA_DIR, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR
 
 if TYPE_CHECKING:
@@ -37,37 +38,8 @@ FRAME_HEADER_SIZE = 4  # 4-byte big-endian length prefix
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max message size
 FILE_CHUNK_SIZE = 256 * 1024  # 256 KB chunks for file transfer
 
-# Tables that are synced between peers (append-only or unique-constrained)
-SYNCABLE_TABLES = ["users", "seeds", "transactions", "likes", "comments", "bookmarks", "wallets",
-                    "blocks", "user_grants", "podt_proofs"]
-
-# Columns for each table (used for INSERT OR IGNORE)
-TABLE_COLUMNS = {
-    "users": PUBLIC_USER_COLUMNS,  # never share passwords, email, phone or names
-    "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet",
-    "transactions": "id, sender, recipient, amount, reason, timestamp, amount_cents, tx_hash, block_index, tx_type",
-    "likes": "id, seed_id, owner, created_at",
-    "comments": "id, seed_id, owner, text, created_at",
-    "bookmarks": "id, seed_id, owner, created_at",
-    "wallets": "id, name, owner, gfc_balance, created_at, gfc_balance_cents, is_treasury",
-    "blocks": "block_index, prev_hash, merkle_root, timestamp, tx_count",
-    "user_grants": "username, wallet_id, granted_at",
-    "podt_proofs": "proof_id, seeder_wallet, receiver_wallet, file_hash, file_size_bytes, reward_cents, tx_id, created_at, seed_id",
-}
-
-# Timestamp column for each table (used for "since" queries)
-TABLE_TIMESTAMP_COL = {
-    "users": "created_at",
-    "seeds": "created_at",
-    "transactions": "timestamp",
-    "likes": "created_at",
-    "comments": "created_at",
-    "bookmarks": "created_at",
-    "wallets": "created_at",
-    "blocks": "timestamp",
-    "user_grants": "granted_at",
-    "podt_proofs": "created_at",
-}
+# Tables, columns and accept rules for synced rows live in sync_ingest.py
+# (shared with the tracker relay in peer_discovery.py).
 
 
 class SyncPeer:
@@ -407,19 +379,10 @@ class SyncEngine:
             return
 
         columns = TABLE_COLUMNS.get(table, "")
-        ts_col = TABLE_TIMESTAMP_COL.get(table, "created_at")
 
         try:
             conn = sqlite3.connect(DB_PATH)
-            if since:
-                rows = conn.execute(
-                    f"SELECT {columns} FROM {table} WHERE {ts_col} > ? ORDER BY {ts_col} ASC LIMIT 500",
-                    (since,)
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    f"SELECT {columns} FROM {table} ORDER BY {ts_col} ASC LIMIT 500"
-                ).fetchall()
+            rows = select_rows_since(conn, table, since, 500)
             conn.close()
         except Exception as e:
             logger.warning(f"Sync query error for {table}: {e}")
@@ -448,55 +411,25 @@ class SyncEngine:
             logger.debug(f"Sync response for {table} from {peer.peer_address}: 0 rows (up to date)")
             return
 
-        received_count = len(rows)
-        columns, rows = sanitize_incoming_rows(table, columns, rows, TABLE_COLUMNS)
-        if not columns:
-            return
-
-        col_names = ", ".join(columns)
-        placeholders = ", ".join(["?"] * len(columns))
-        ts_col = TABLE_TIMESTAMP_COL.get(table, "created_at")
-
-        inserted = 0
-        skipped = 0
-        errors = 0
-        new_seed_ids = []
         try:
-            conn = sqlite3.connect(DB_PATH)
-            for row in rows:
-                if len(row) != len(columns):
-                    skipped += 1
-                    continue  # Skip malformed rows
-                try:
-                    cursor = conn.execute(
-                        f"INSERT OR IGNORE INTO {table} ({col_names}) VALUES ({placeholders})",
-                        row
-                    )
-                    if cursor.rowcount > 0:
-                        inserted += 1
-                        # Track new seeds to request their files
-                        if table == "seeds":
-                            try:
-                                id_idx = columns.index("id")
-                                new_seed_ids.append(row[id_idx])
-                            except (ValueError, IndexError):
-                                pass
-                except Exception as e:
-                    errors += 1
-                    if errors <= 3:  # Log first few errors at INFO level
-                        logger.info(f"Sync insert error for {table} row: {e}")
-            conn.commit()
-            conn.close()
+            result = ingest_rows(table, columns, rows)
         except Exception as e:
             logger.warning(f"Sync DB error for {table}: {e}")
+            return
+        inserted = result["inserted"]
+        new_seed_ids = result["new_ids"] if table == "seeds" else []
 
-        logger.info(f"Sync {table} from {peer.peer_address}: {received_count} received, {inserted} inserted, {len(rows) - inserted - skipped - errors} duplicates, {errors} errors")
+        logger.info(f"Sync {table} from {peer.peer_address}: {result['received']} received, {inserted} inserted, "
+                    f"{result['duplicates']} duplicates, {result['pending']} pending, "
+                    f"{result['rejected']} rejected, {result['errors']} errors")
+        if result["rejected"]:
+            logger.warning(f"Rejected {result['rejected']} invalid {table} rows from {peer.peer_address}")
 
         # Update sync timestamps (both global for display and per-peer for queries)
         if rows:
             try:
-                ts_idx = columns.index(ts_col)
-                latest = max(r[ts_idx] for r in rows if r[ts_idx])
+                ts_idx = columns.index(TABLE_TIMESTAMP_COL.get(table, "created_at"))
+                latest = max(str(r[ts_idx]) for r in rows if len(r) > ts_idx and r[ts_idx])
                 self.last_sync_timestamps[table] = str(latest)
                 # Per-peer timestamp so next sync with THIS peer only fetches newer data
                 peer_ts_key = f"{peer.peer_address}:{table}"
@@ -852,7 +785,7 @@ class SyncEngine:
 
         Uses per-peer timestamps so that connecting to a NEW peer fetches ALL
         data from them, not just data newer than what we got from other peers.
-        INSERT OR IGNORE handles duplicates safely.
+        Duplicates are ignored by sync_ingest.
         """
         if not peer.is_connected:
             logger.debug(f"Skipping sync with {peer.peer_address} - not connected")

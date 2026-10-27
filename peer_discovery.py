@@ -16,7 +16,7 @@ import logging
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
 
-from security import PUBLIC_USER_COLUMNS, sanitize_incoming_rows
+from sync_ingest import SYNCABLE_TABLES, TABLE_COLUMNS, TABLE_TIMESTAMP_COL, ingest_rows, select_rows_since
 
 logger = logging.getLogger("gfc.discovery")
 
@@ -53,33 +53,10 @@ MAX_KNOWN_PEERS = 500
 # Tracker sync relay interval (seconds) - how often to upload/download via tracker
 TRACKER_SYNC_INTERVAL = 60
 
-# Tables and columns for tracker sync (mirrors sync_engine.py SYNCABLE_TABLES)
-TRACKER_SYNCABLE_TABLES = ["users", "seeds", "transactions", "likes", "comments", "bookmarks", "wallets",
-                           "blocks", "user_grants", "podt_proofs"]
-TRACKER_TABLE_COLUMNS = {
-    "users": PUBLIC_USER_COLUMNS,  # never share passwords, email, phone or names
-    "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet",
-    "transactions": "id, sender, recipient, amount, reason, timestamp, amount_cents, tx_hash, block_index, tx_type",
-    "likes": "id, seed_id, owner, created_at",
-    "comments": "id, seed_id, owner, text, created_at",
-    "bookmarks": "id, seed_id, owner, created_at",
-    "wallets": "id, name, owner, gfc_balance, created_at, gfc_balance_cents, is_treasury",
-    "blocks": "block_index, prev_hash, merkle_root, timestamp, tx_count",
-    "user_grants": "username, wallet_id, granted_at",
-    "podt_proofs": "proof_id, seeder_wallet, receiver_wallet, file_hash, file_size_bytes, reward_cents, tx_id, created_at, seed_id",
-}
-TRACKER_TABLE_TIMESTAMP_COL = {
-    "users": "created_at",
-    "seeds": "created_at",
-    "transactions": "timestamp",
-    "likes": "created_at",
-    "comments": "created_at",
-    "bookmarks": "created_at",
-    "wallets": "created_at",
-    "blocks": "timestamp",
-    "user_grants": "granted_at",
-    "podt_proofs": "created_at",
-}
+# Tables and columns for tracker sync (same rules as P2P sync, see sync_ingest.py)
+TRACKER_SYNCABLE_TABLES = SYNCABLE_TABLES
+TRACKER_TABLE_COLUMNS = TABLE_COLUMNS
+TRACKER_TABLE_TIMESTAMP_COL = TABLE_TIMESTAMP_COL
 # Max rows per upload bundle (to stay within Wix text field limits)
 TRACKER_MAX_ROWS_PER_UPLOAD = 50
 
@@ -273,15 +250,7 @@ class PeerDiscovery:
                 since = self._tracker_upload_ts.get(table, "")
 
                 conn = sqlite3.connect(DB_PATH)
-                if since:
-                    rows = conn.execute(
-                        f"SELECT {columns} FROM {table} WHERE {ts_col} > ? ORDER BY {ts_col} ASC LIMIT {TRACKER_MAX_ROWS_PER_UPLOAD}",
-                        (since,)
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        f"SELECT {columns} FROM {table} ORDER BY {ts_col} ASC LIMIT {TRACKER_MAX_ROWS_PER_UPLOAD}"
-                    ).fetchall()
+                rows = select_rows_since(conn, table, since, TRACKER_MAX_ROWS_PER_UPLOAD)
                 conn.close()
 
                 if not rows:
@@ -316,7 +285,7 @@ class PeerDiscovery:
             logger.info(f"Tracker sync: uploaded {total_uploaded} rows across tables")
 
     async def _download_from_tracker(self, client, base_url: str):
-        """Download sync bundles from the tracker and INSERT OR IGNORE locally."""
+        """Download sync bundles from the tracker and store the rows that pass validation."""
         download_url = f"{base_url}/sync_download"
 
         params = {"exclude_peer": self._my_peer_key}
@@ -348,39 +317,21 @@ class PeerDiscovery:
 
                 if table not in TRACKER_SYNCABLE_TABLES or not columns or not rows:
                     continue
-                columns, rows = sanitize_incoming_rows(table, columns, rows, TRACKER_TABLE_COLUMNS)
-                if not columns:
-                    continue
 
                 # Track the latest bundle time for next download
                 if uploaded_at and uploaded_at > (latest_upload_time or ""):
                     latest_upload_time = uploaded_at
 
-                # INSERT OR IGNORE into local database
-                col_names = ", ".join(columns)
-                placeholders = ", ".join(["?"] * len(columns))
-                inserted = 0
-
+                # Validate and store (ledger rows must be signed and funded)
                 try:
-                    conn = sqlite3.connect(DB_PATH)
-                    for row in rows:
-                        if len(row) != len(columns):
-                            continue
-                        try:
-                            cursor = conn.execute(
-                                f"INSERT OR IGNORE INTO {table} ({col_names}) VALUES ({placeholders})",
-                                row
-                            )
-                            if cursor.rowcount > 0:
-                                inserted += 1
-                        except Exception as e:
-                            logger.debug(f"Tracker sync insert error for {table}: {e}")
-                    conn.commit()
-                    conn.close()
+                    result = ingest_rows(table, columns, rows)
                 except Exception as e:
                     logger.warning(f"Tracker sync DB error for {table}: {e}")
+                    continue
+                if result["rejected"]:
+                    logger.warning(f"Tracker sync: rejected {result['rejected']} invalid {table} rows")
 
-                total_inserted += inserted
+                total_inserted += result["inserted"]
 
             if latest_upload_time:
                 self._tracker_download_ts = latest_upload_time

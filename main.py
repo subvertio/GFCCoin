@@ -23,6 +23,7 @@ from app_engagement import router as engagement_router
 from app_profile import router as profile_router
 from app_podt import podt_router
 import blockchain
+import signing
 from security import (
     hash_password, verify_password, migrate_plaintext_passwords,
     init_sessions_table, create_session, require_user,
@@ -287,12 +288,10 @@ async def create_wallet(name: str = Form("Default Wallet"), api_token: str = For
     """Create a new GFC wallet"""
     owner = require_user(api_token)
 
-    # Generate wallet ID
-    wallet_uuid = str(uuid.uuid4())
-    wallet_id = hashlib.sha256(wallet_uuid.encode()).hexdigest()[:64]
-
     try:
         conn = sqlite3.connect(DB_PATH)
+        # Wallet ID is the Ed25519 public key; the private key stays in this node's wallet_keys
+        wallet_id = signing.create_wallet_key(conn)
         conn.execute(
             "INSERT INTO wallets (id, name, owner, gfc_balance, created_at, gfc_balance_cents) VALUES (?, ?, ?, ?, ?, ?)",
             (wallet_id, name, owner, 0.0, datetime.datetime.utcnow().isoformat(), 0)
@@ -378,6 +377,8 @@ async def create_transaction(transaction: TransactionRequest):
             "tx_hash": tx["tx_hash"],
             "tx_type": tx["tx_type"],
             "block_index": tx.get("block_index"),
+            # False for legacy wallets without a key: the transfer is valid on this node only
+            "signed": bool(tx.get("signature")),
         }
     except ValueError as e:
         # Insufficient balance or validation error
@@ -747,7 +748,7 @@ async def sync_debug():
     table_counts = {}
     try:
         conn = _sqlite3.connect(DB_PATH)
-        for table in ["users", "seeds", "transactions", "likes", "comments", "bookmarks", "wallets", "blocks", "user_grants", "podt_proofs"]:
+        for table in ["users", "seeds", "transactions", "likes", "comments", "bookmarks", "wallets", "blocks", "user_grants", "podt_proofs", "pending_sync_tx"]:
             try:
                 count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 table_counts[table] = count
