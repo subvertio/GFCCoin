@@ -21,10 +21,10 @@ GFC tries a different model. The community hosts the content, and the people who
 
 | What you get | How GFC does it |
 |---|---|
-| **Credit from your first viewer** | When another user plays your work, you earn GFC credit (one payout per viewer per item, no self-crediting). There's no follower threshold. |
+| **Credit from your first viewer** | When another verified user plays your work, you earn GFC credit (one payout per viewer per item, at most one per viewer per day for each creator, no self-crediting). There's no follower threshold. |
 | **Free distribution** | Your uploads ("seeds") are copied between peers, so the network serves your files instead of a paid host. |
 | **Rewards for sharing** | Nodes that pass content along earn *Proof-of-Data-Transfer* (PoDT) credit (0.10 GFC per MB), so people have a reason to help spread your work. |
-| **A starting balance** | Every new user's first wallet gets 100 GFC to tip, try out and support other creators. |
+| **A starting balance** | Every new user's first wallet gets 100 GFC, once they verify a phone number, to tip, try out and support other creators. |
 | **Built for 3D and media** | Native support for images, video, audio and 3D formats (`.glb`, `.gltf`, `.fbx`, `.obj`, `.usdz`, `.stl`, `.3ds`). |
 | **A creator profile** | Bio, avatar, a feed, search, likes, comments and bookmarks. |
 | **A public ledger** | Every grant, transfer and reward is recorded in a hash-linked chain that anyone can check (`/blockchain/validate`). Transfers are signed with your wallet's key, so other nodes can't fake them. |
@@ -90,7 +90,7 @@ These are known gaps, listed so you can make an informed choice:
 - **No consensus yet.** If one wallet signs two transfers that together overspend it, each node accepts whichever one arrives first. Nodes can disagree until there's a consensus or ordering protocol.
 - **Fixed: forged rows can't redirect your rewards.** Each seed is signed by its reward wallet, and its ID is tied to that wallet. Rewards go only to the wallet that signed the seed, never to a wallet picked by owner name.
 - **Network-wide credit needs the treasury key.** Only grants and rewards signed by the pinned treasury key (`config.PINNED_TREASURY_PUBKEYS`) are accepted from peers. Those issued by other nodes work on that node only. Wallets created before this change can't sign, so their transfers stay on their home node. Seeds uploaded before this change earn no rewards.
-- **Rewards can be farmed (not Sybil-resistant).** Play and transfer rewards can be gamed with multiple accounts. Signing proves who issued a reward, not that a real person earned it.
+- **Reward farming is harder, but not solved.** The 100 GFC grant and play rewards now need a verified phone number (one account per number, via Twilio Verify), and a play only pays if the viewer's account is at least 24 hours old, at most once per viewer per creator per day. Cheap and virtual SMS numbers still exist, so someone with many numbers can still farm. PoDT transfer rewards aren't phone-gated yet. Only the phone number's keyed hash is stored, and it is never synced. These rules are enforced by the node that issues the reward, and only the treasury node's rewards count network-wide. See [docs/signed-ledger.md](docs/signed-ledger.md#phone-verification-and-reward-rules).
 - **Huge premine.** The treasury holds the entire supply, so issuance is centrally controlled.
 - **No content moderation tools** yet for reporting or removing illegal or infringing uploads.
 - **Fixed: wallet keys are encrypted at rest and can be backed up.** They can only be unlocked with your password or a live login session. **Export a backup** (`POST /wallets/export`) and keep it with its passphrase. There's no password reset, so a forgotten password or a lost data folder can only be recovered from that backup. Treasury operators: `python signing.py backup FILE`.
@@ -101,7 +101,7 @@ These are known gaps, listed so you can make an informed choice:
 ## Roadmap ideas
 
 - A consensus/ordering model for the ledger, and a claims service so any node's grants and rewards can be treasury-signed
-- Sybil-resistant reward rules
+- Stronger Sybil resistance than phone verification (proof-of-personhood)
 - A lightweight web front end with an in-browser 3D viewer (e.g. `<model-viewer>`/three.js), so viewers don't need to install anything
 - Reporting and moderation tools
 - Optional bridges to established payment rails for creators who want real-money tips

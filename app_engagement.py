@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Form, Query
 import signing
 from security import owner_from_token
 from config import DB_PATH
-from blockchain import process_podt_reward
+from blockchain import process_podt_reward, play_reward_block_reason, claim_play_slot, release_play_slot
 
 router = APIRouter()
 
@@ -275,6 +275,8 @@ def get_bookmarks(api_token: str = ""):
 async def record_played(seed_id: str, api_token: str = Form("")):
     """Award PoDT credits to the seed owner when another user plays the media.
     One payout per (seed, requesting_user) pair — duplicates are rejected by proof_id.
+    The viewer must be phone-verified with an account at least 24h old, and pays
+    a given creator wallet at most once per day.
     """
     requester = owner_from_token(api_token)
     if requester == "anonymous":
@@ -315,11 +317,23 @@ async def record_played(seed_id: str, api_token: str = Form("")):
             conn.close()
             return {"ok": True, "credited": False, "reason": "self-play"}
 
-        conn.close()
+        # Sybil friction: only phone-verified viewers with accounts older than 24h pay out
+        blocked = play_reward_block_reason(conn, requester)
+        if blocked:
+            conn.close()
+            return {"ok": True, "credited": False, "reason": blocked}
 
         # One payout per (seed, user) pair
         proof_string = f"play:{seed_id}:{requester}"
         proof_id = hashlib.sha256(proof_string.encode()).hexdigest()
+        already = conn.execute("SELECT 1 FROM podt_proofs WHERE proof_id = ?", (proof_id,)).fetchone()
+        conn.close()
+        if already:
+            return {"ok": True, "credited": False, "reason": "already credited"}
+
+        # At most PLAY_REWARDS_PER_CREATOR_PER_DAY payouts per (viewer, creator wallet, day)
+        if not claim_play_slot(DB_PATH, requester, seeder_wallet, proof_id):
+            return {"ok": True, "credited": False, "reason": "daily limit for this creator reached"}
 
         result = process_podt_reward(
             db_path=DB_PATH,
@@ -334,6 +348,7 @@ async def record_played(seed_id: str, api_token: str = Form("")):
         if result:
             return {"ok": True, "credited": True, "amount": result["amount"]}
         else:
+            release_play_slot(DB_PATH, proof_id)
             return {"ok": True, "credited": False, "reason": "already credited"}
 
     except Exception as ex:
