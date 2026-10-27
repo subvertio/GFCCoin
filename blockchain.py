@@ -442,7 +442,7 @@ def process_user_grant(db_path: str, username: str, wallet_id: str) -> Optional[
 # ============================================================================
 
 def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
-                     amount_cents: int, reason: str = "") -> dict:
+                     amount_cents: int, reason: str = "", data_key: Optional[bytes] = None) -> dict:
     """
     Process a GFC transfer between wallets.
     Validates sender has sufficient balance.
@@ -483,7 +483,10 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
 
     # Sign with the sender's local key. Legacy wallets (created before signed
     # wallets, no key) can still transfer on this node, but peers reject the row.
-    private_key = signing.get_wallet_private_key(db_path, sender_wallet)
+    # data_key unlocks the key if it is encrypted at rest (see keystore.py)
+    private_key = signing.get_wallet_private_key(db_path, sender_wallet, data_key)
+    if not private_key and signing.has_wallet_key(db_path, sender_wallet):
+        raise ValueError("Wallet key is locked: log in again to sign transfers")
     if private_key:
         tx["signer"] = sender_wallet
         tx["signature"] = signing.sign_tx_hash(private_key, tx["tx_hash"])

@@ -48,7 +48,8 @@ GFC is a Python/FastAPI backend that each participant runs as a local node. The 
 | Engagement | `app_engagement.py` | Likes, comments, bookmarks, play rewards |
 | Profiles | `app_profile.py` | Bio and avatar |
 | Ledger | `blockchain.py` | Hash-linked blocks with Merkle roots over SQLite; balances in integer cents; validation of synced transactions |
-| Signing | `signing.py` | Ed25519 wallet keys (wallet ID = public key) and the treasury key |
+| Signing | `signing.py` | Ed25519 wallet keys (wallet ID = public key), the treasury key and its backup CLI |
+| Keystore | `keystore.py` | Wallet keys encrypted at rest; passphrase-encrypted export/import |
 | PoDT | `podt_core.py`, `app_podt.py` | Proof-of-Data-Transfer rewards |
 | P2P sync | `sync_engine.py`, `sync_ingest.py` | Length-prefixed JSON over TCP (port 6881), append-only sync; one set of accept rules shared with the tracker relay |
 | Discovery | `peer_discovery.py` | Bootstrap trackers, LAN broadcast (UDP 6882), peer exchange |
@@ -92,7 +93,7 @@ These are known gaps, listed so you can make an informed choice:
 - **Rewards can be farmed (not Sybil-resistant).** Play and transfer rewards can be gamed with multiple accounts. Signing proves who issued a reward, not that a real person earned it.
 - **Huge premine.** The treasury holds the entire supply, so issuance is centrally controlled.
 - **No content moderation tools** yet for reporting or removing illegal or infringing uploads.
-- **Wallet keys are stored unencrypted** in the node's database. Keep your data directory private and backed up.
+- **Fixed: wallet keys are encrypted at rest and can be backed up.** They can only be unlocked with your password or a live login session. **Export a backup** (`POST /wallets/export`) and keep it with its passphrase. There's no password reset, so a forgotten password or a lost data folder can only be recovered from that backup. Treasury operators: `python signing.py backup FILE`.
 - **Usernames aren't signed yet.** Someone can post content, likes or comments under another person's name. They can't collect that person's rewards, but they can impersonate them.
 - **API tokens are passed as form/query parameters.** Run the node on localhost, or behind HTTPS if it's exposed.
 - **The Unreal front end isn't in this repository.** Right now you use the node through its API.

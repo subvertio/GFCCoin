@@ -3,8 +3,9 @@ GFC Ledger Signing - Ed25519 keys for wallets and the treasury
 
 - A wallet's ID is the hex of its Ed25519 public key (64 hex chars), so any
   node can check a transfer's signature from the sender field alone.
-- Private keys live in the local `wallet_keys` table. That table is never in
-  SYNCABLE_TABLES, so keys never leave the node the wallet was created on.
+- Private keys live in the local `wallet_keys` table, encrypted with the
+  owner's data key (keystore.py). That table is never in SYNCABLE_TABLES, so
+  keys never leave the node except in a passphrase-encrypted export.
 - Mints (GRANT / REWARD) are signed by the treasury key. Every node pins the
   treasury public key(s) in config.TREASURY_PUBKEYS and only accepts synced
   mints signed by one of them. The private key is only present on the node(s)
@@ -147,13 +148,18 @@ def init_wallet_keys_table(conn: sqlite3.Connection):
     )''')
 
 
-def create_wallet_key(conn: sqlite3.Connection) -> str:
-    """Generate and store a wallet keypair. Returns the wallet ID (public key hex)."""
+def create_wallet_key(conn: sqlite3.Connection, data_key: Optional[bytes] = None) -> str:
+    """
+    Generate and store a wallet keypair. Returns the wallet ID (public key hex).
+    With a user data key (see keystore.py) the private key is stored encrypted.
+    """
+    import keystore
     init_wallet_keys_table(conn)
     priv, pub = generate_keypair()
+    stored = keystore.encrypt_wallet_key(data_key, pub, priv) if data_key else priv
     conn.execute(
         "INSERT INTO wallet_keys (wallet_id, private_key, created_at) VALUES (?, ?, ?)",
-        (pub, priv, datetime.datetime.utcnow().isoformat())
+        (pub, stored, datetime.datetime.utcnow().isoformat())
     )
     return pub
 
@@ -174,7 +180,21 @@ def local_wallet_for(conn: sqlite3.Connection, owner: str, wallet_id: str = "") 
     return row[0] if row else None
 
 
-def get_wallet_private_key(db_path: str, wallet_id: str) -> Optional[str]:
+def has_wallet_key(db_path: str, wallet_id: str) -> bool:
+    conn = sqlite3.connect(db_path)
+    try:
+        init_wallet_keys_table(conn)
+        return conn.execute("SELECT 1 FROM wallet_keys WHERE wallet_id = ?", (wallet_id,)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def get_wallet_private_key(db_path: str, wallet_id: str, data_key: Optional[bytes] = None) -> Optional[str]:
+    """
+    The wallet's private key hex, or None if this node doesn't have it, or it
+    is encrypted and data_key is missing or wrong.
+    """
+    import keystore
     conn = sqlite3.connect(db_path)
     try:
         init_wallet_keys_table(conn)
@@ -183,7 +203,16 @@ def get_wallet_private_key(db_path: str, wallet_id: str) -> Optional[str]:
         ).fetchone()
     finally:
         conn.close()
-    return row[0] if row else None
+    if not row:
+        return None
+    if not keystore.is_encrypted(row[0]):
+        return row[0]
+    if not data_key:
+        return None
+    try:
+        return keystore.decrypt_wallet_key(data_key, wallet_id, row[0])
+    except keystore.KeystoreError:
+        return None
 
 
 # ============================================================================
@@ -198,27 +227,97 @@ def treasury_pubkeys() -> set:
 def load_treasury_private_key() -> Optional[str]:
     """
     Treasury private key hex if this node is a treasury node, else None.
-    Read from GFC_TREASURY_KEY_FILE (default: DATA_DIR/treasury_key.hex). The
-    key is only used if its public key is pinned in TREASURY_PUBKEYS.
+    Read from GFC_TREASURY_KEY_FILE (default: DATA_DIR/treasury_key.hex), which
+    may be encrypted (`python signing.py encrypt`, unlocked by
+    GFC_TREASURY_PASSPHRASE). The key is only used if its public key is pinned.
     """
-    path = Path(os.environ.get("GFC_TREASURY_KEY_FILE", str(DATA_DIR / "treasury_key.hex")))
+    path = _treasury_key_path()
     if not path.exists():
         return None
     try:
-        priv = path.read_text().strip()
+        priv = _read_treasury_key_file(path, os.environ.get("GFC_TREASURY_PASSPHRASE"))
         if public_key_of(priv) in treasury_pubkeys():
             return priv
-    except (ValueError, OSError):
-        pass
+    except (ValueError, OSError, KeyError):
+        pass  # Missing/wrong passphrase or unreadable file: this node doesn't sign mints
     return None
 
 
+def _treasury_key_path() -> Path:
+    return Path(os.environ.get("GFC_TREASURY_KEY_FILE", str(DATA_DIR / "treasury_key.hex")))
+
+
+def _read_treasury_key_file(path: Path, passphrase: Optional[str]) -> str:
+    """Key hex from a plain key file, or from one encrypted by `python signing.py encrypt`."""
+    import keystore
+    text = path.read_text().strip()
+    if text.startswith("{"):
+        payload = keystore.open_backup(passphrase or "", json.loads(text), "treasury")
+        return payload["private_key"]
+    return text
+
+
+def _passphrase(prompt: str, confirm: bool) -> str:
+    """Passphrase from GFC_BACKUP_PASSPHRASE (for scripts) or an interactive prompt."""
+    if os.environ.get("GFC_BACKUP_PASSPHRASE"):
+        return os.environ["GFC_BACKUP_PASSPHRASE"]
+    import getpass
+    first = getpass.getpass(prompt)
+    if confirm and getpass.getpass("Repeat passphrase: ") != first:
+        raise SystemExit("Passphrases don't match")
+    return first
+
+
+def _cli(argv: list) -> int:
+    import keystore
+    usage = ("usage: python signing.py [generate | backup OUT_FILE | restore BACKUP_FILE | encrypt]\n"
+             "  generate  create the treasury key (default)\n"
+             "  backup    write a passphrase-encrypted copy of the treasury key\n"
+             "  restore   recreate the treasury key file from a backup\n"
+             "  encrypt   encrypt the treasury key file in place; the node then needs\n"
+             "            GFC_TREASURY_PASSPHRASE set to sign mints")
+    cmd = argv[0] if argv else "generate"
+    key_path = _treasury_key_path()
+
+    if cmd == "generate":
+        if key_path.exists():
+            raise SystemExit(f"{key_path} already exists; refusing to overwrite")
+        priv, pub = generate_keypair()
+        key_path.write_text(priv)
+        print(f"Treasury private key written to {key_path}. Back it up now: python signing.py backup FILE")
+        print(f"Pin this public key in config.PINNED_TREASURY_PUBKEYS:\n  {pub}")
+    elif cmd == "backup" and len(argv) == 2:
+        out = Path(argv[1])
+        if out.exists():
+            raise SystemExit(f"{out} already exists; refusing to overwrite")
+        priv = _read_treasury_key_file(key_path, os.environ.get("GFC_TREASURY_PASSPHRASE"))
+        backup = keystore.seal_backup(_passphrase("Backup passphrase (12+ chars): ", True),
+                                      {"private_key": priv, "public_key": public_key_of(priv)}, "treasury")
+        out.write_text(json.dumps(backup, indent=2))
+        print(f"Encrypted backup of treasury key {public_key_of(priv)} written to {out}.")
+        print("Store it off this machine (USB drive, password manager). Without the passphrase it can't be opened.")
+    elif cmd == "restore" and len(argv) == 2:
+        if key_path.exists():
+            raise SystemExit(f"{key_path} already exists; refusing to overwrite")
+        payload = keystore.open_backup(_passphrase("Backup passphrase: ", False),
+                                       json.loads(Path(argv[1]).read_text()), "treasury")
+        priv = payload["private_key"]
+        key_path.write_text(priv)
+        pub = public_key_of(priv)
+        pinned = "pinned" if pub in treasury_pubkeys() else "NOT pinned in config - mints won't be accepted"
+        print(f"Treasury key {pub} restored to {key_path} ({pinned}).")
+    elif cmd == "encrypt" and len(argv) == 1:
+        priv = _read_treasury_key_file(key_path, None)
+        sealed = keystore.seal_backup(_passphrase("New passphrase for the key file (12+ chars): ", True),
+                                      {"private_key": priv, "public_key": public_key_of(priv)}, "treasury")
+        key_path.write_text(json.dumps(sealed, indent=2))
+        print(f"{key_path} is now encrypted. Set GFC_TREASURY_PASSPHRASE when starting the treasury node.")
+    else:
+        print(usage)
+        return 2
+    return 0
+
+
 if __name__ == "__main__":
-    # Operator helper: generate a treasury keypair to pin in config.py.
-    priv, pub = generate_keypair()
-    out = Path(os.environ.get("GFC_TREASURY_KEY_FILE", str(DATA_DIR / "treasury_key.hex")))
-    if out.exists():
-        raise SystemExit(f"{out} already exists; refusing to overwrite")
-    out.write_text(priv)
-    print(f"Treasury private key written to {out} (keep it secret, back it up).")
-    print(f"Pin this public key in config.TREASURY_PUBKEYS:\n  {pub}")
+    import sys
+    raise SystemExit(_cli(sys.argv[1:]))

@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Form, File, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import json
 import sqlite3
 import os
 import uuid
@@ -23,6 +24,7 @@ from app_engagement import router as engagement_router
 from app_profile import router as profile_router
 from app_podt import podt_router
 import blockchain
+import keystore
 import signing
 from security import (
     hash_password, verify_password, migrate_plaintext_passwords,
@@ -167,6 +169,7 @@ def init_db():
         pass  # column already exists
 
     init_sessions_table(conn)
+    keystore.init_keystore(conn)
     migrate_plaintext_passwords(conn)
 
     conn.commit()
@@ -211,6 +214,7 @@ async def auth_register(
         conn.close()
 
     token = create_session(username)
+    keystore.attach_to_session(token, keystore.unlock_user_keys(username, password))
     return {"ok": True, "token": token, "user": username}
 
 
@@ -237,6 +241,8 @@ async def auth_login(
     # Return the canonical username from the database, not the user input
     canonical_username = row[0]
     token = create_session(canonical_username)
+    # Unwrap the user's data key with the password and re-wrap it for this session
+    keystore.attach_to_session(token, keystore.unlock_user_keys(canonical_username, password))
     return {"ok": True, "token": token, "user": canonical_username}
 
 
@@ -296,7 +302,7 @@ async def create_wallet(name: str = Form("Default Wallet"), api_token: str = For
     try:
         conn = sqlite3.connect(DB_PATH)
         # Wallet ID is the Ed25519 public key; the private key stays in this node's wallet_keys
-        wallet_id = signing.create_wallet_key(conn)
+        wallet_id = signing.create_wallet_key(conn, keystore.data_key_for_token(api_token))
         conn.execute(
             "INSERT INTO wallets (id, name, owner, gfc_balance, created_at, gfc_balance_cents) VALUES (?, ?, ?, ?, ?, ?)",
             (wallet_id, name, owner, 0.0, datetime.datetime.utcnow().isoformat(), 0)
@@ -342,6 +348,48 @@ async def get_wallet(wallet_id: str):
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
+@app.post("/wallets/export")
+async def export_wallet_keys(api_token: str = Form(...), password: str = Form(...),
+                             backup_passphrase: str = Form(...)):
+    """
+    Download an encrypted backup of your wallet keys on this node. Keep it (and
+    the passphrase) somewhere safe: it is the only way to recover your wallets
+    if this node's data is lost or you forget your password.
+    """
+    username = require_user(api_token)
+    _require_password(username, password)
+    data_key = keystore.data_key_for_token(api_token)
+    if not data_key:
+        raise HTTPException(status_code=401, detail="log in again to unlock your keys")
+    try:
+        return keystore.export_wallets(username, data_key, backup_passphrase)
+    except keystore.KeystoreError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/wallets/import")
+async def import_wallet_keys(api_token: str = Form(...), backup_passphrase: str = Form(...),
+                             backup: str = Form(...)):
+    """Restore wallet keys from a backup made by /wallets/export (on this or another node)."""
+    username = require_user(api_token)
+    data_key = keystore.data_key_for_token(api_token)
+    if not data_key:
+        raise HTTPException(status_code=401, detail="log in again to unlock your keys")
+    try:
+        imported = keystore.import_wallets(username, data_key, backup_passphrase, json.loads(backup))
+    except (keystore.KeystoreError, json.JSONDecodeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "imported": imported}
+
+
+def _require_password(username: str, password: str):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT password FROM users WHERE username = ?", (username,)).fetchone()
+    conn.close()
+    if not row or not verify_password(password, row[0]):
+        raise HTTPException(status_code=401, detail="invalid credentials")
+
+
 # ============================================================================
 # TRANSACTION ENDPOINTS
 # ============================================================================
@@ -369,6 +417,7 @@ async def create_transaction(transaction: TransactionRequest):
             recipient_wallet=transaction.recipient,
             amount_cents=amount_cents,
             reason=transaction.reason,
+            data_key=keystore.data_key_for_token(transaction.api_token),
         )
 
         return {

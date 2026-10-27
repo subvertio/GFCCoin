@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
+import keystore
 import signing
 from security import owner_from_token
 from config import DB_PATH, SEEDS_ORIG_DIR as ORIG_DIR, SEEDS_THUMB_DIR as THUMB_DIR
@@ -160,6 +161,12 @@ async def seeds_upload(
     if reward_wallet.strip() and not signer_wallet:
         raise HTTPException(status_code=400, detail="reward_wallet must be one of your wallets on this node")
     reward_wallet = signer_wallet or ""
+    private_key = None
+    if reward_wallet:
+        private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet,
+                                                     keystore.data_key_for_token(api_token))
+        if not private_key:
+            raise HTTPException(status_code=401, detail="log in again to unlock your wallet key")
 
     # Generate id and safe filename. Signed seeds get an ID bound to their reward wallet.
     nonce = uuid.uuid4().hex[:12]
@@ -196,7 +203,7 @@ async def seeds_upload(
     tags_str = tags.strip() if tags else ""
     signature = ""
     if reward_wallet:
-        signature = signing.sign_seed(signing.get_wallet_private_key(DB_PATH, reward_wallet), {
+        signature = signing.sign_seed(private_key, {
             "id": sid, "owner": owner, "filename": orig_safe, "file_size": file_size,
             "created_at": created_at, "reward_wallet": reward_wallet})
     try:

@@ -37,6 +37,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import blockchain  # noqa: E402
 import main  # noqa: E402
+import keystore  # noqa: E402
 import signing  # noqa: E402
 from sync_ingest import TABLE_COLUMNS, ingest_rows, select_rows_since  # noqa: E402
 
@@ -430,6 +431,129 @@ class SeedRewardTests(unittest.TestCase):
         conn.close()
         self.assertEqual(stored, "")
         self.assertIsNone(self.reward_wallet(self.peer, legacy["id"]))
+
+
+class KeystoreTests(unittest.TestCase):
+    """Wallet keys are encrypted at rest and can be backed up and restored."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(main.app)
+
+    def register(self, username, password=None):
+        password = password or "pw-" + username
+        r = self.client.post("/auth/register", data={"username": username, "password": password})
+        self.assertEqual(r.status_code, 200, r.text)
+        token = r.json()["token"]
+        w = self.client.post("/wallets/create", data={"name": "main", "api_token": token}).json()
+        return token, w["id"], password
+
+    def stored_key(self, wallet_id, db=None):
+        conn = sqlite3.connect(db or main.DB_PATH)
+        row = conn.execute("SELECT private_key FROM wallet_keys WHERE wallet_id = ?", (wallet_id,)).fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def test_keys_encrypted_at_rest_and_unlocked_by_session(self):
+        token, wallet, password = self.register("hana")
+        stored = self.stored_key(wallet)
+        self.assertTrue(keystore.is_encrypted(stored))
+        # The database alone can't produce the key; the live token can
+        self.assertIsNone(signing.get_wallet_private_key(main.DB_PATH, wallet))
+        self.assertIsNone(keystore.data_key_for_token("not-a-token"))
+        priv = signing.get_wallet_private_key(main.DB_PATH, wallet, keystore.data_key_for_token(token))
+        self.assertEqual(signing.public_key_of(priv), wallet)
+        self.assertNotIn(priv, stored)
+        # Signing without the data key fails loudly instead of sending an unsigned transfer
+        _, other, _ = self.register("ivan")
+        with self.assertRaises(ValueError):
+            blockchain.process_transfer(main.DB_PATH, wallet, other, 100)
+        # A fresh login unlocks the same keys
+        login = self.client.post("/auth/login", data={"username": "hana", "password": password}).json()
+        r = self.client.post("/transactions/create", json={
+            "sender": wallet, "recipient": other, "amount": 1.0, "reason": "", "api_token": login["token"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["signed"])
+
+    def test_plaintext_keys_encrypted_on_login(self):
+        token, _, password = self.register("jo")
+        conn = sqlite3.connect(main.DB_PATH)
+        old_wallet = signing.create_wallet_key(conn)  # plaintext, as before this change
+        conn.execute("INSERT INTO wallets (id, name, owner, created_at) VALUES (?, 'old', 'jo', '')", (old_wallet,))
+        conn.commit()
+        conn.close()
+        self.assertFalse(keystore.is_encrypted(self.stored_key(old_wallet)))
+        self.client.post("/auth/login", data={"username": "jo", "password": password})
+        self.assertTrue(keystore.is_encrypted(self.stored_key(old_wallet)))
+
+    def test_export_and_import(self):
+        token, wallet, password = self.register("kim")
+        passphrase = "correct horse battery"
+        bad_pw = self.client.post("/wallets/export", data={
+            "api_token": token, "password": "wrong", "backup_passphrase": passphrase})
+        self.assertEqual(bad_pw.status_code, 401)
+        short = self.client.post("/wallets/export", data={
+            "api_token": token, "password": password, "backup_passphrase": "short"})
+        self.assertEqual(short.status_code, 400)
+        r = self.client.post("/wallets/export", data={
+            "api_token": token, "password": password, "backup_passphrase": passphrase})
+        self.assertEqual(r.status_code, 200, r.text)
+        backup = r.json()
+        priv = signing.get_wallet_private_key(main.DB_PATH, wallet, keystore.data_key_for_token(token))
+        self.assertNotIn(priv, json.dumps(backup))
+
+        # Wrong passphrase and tampered parameters are refused
+        lee_token, _, _ = self.register("lee")
+        wrong = self.client.post("/wallets/import", data={
+            "api_token": lee_token, "backup_passphrase": "not the passphrase", "backup": json.dumps(backup)})
+        self.assertEqual(wrong.status_code, 400)
+        huge = dict(backup, n=2 ** 30)
+        self.assertEqual(self.client.post("/wallets/import", data={
+            "api_token": lee_token, "backup_passphrase": passphrase, "backup": json.dumps(huge)}).status_code, 400)
+
+        # Restore onto a brand-new node (e.g. after losing the data folder)
+        node = new_node(f"restore_{uuid.uuid4().hex[:8]}")
+        conn = sqlite3.connect(node)
+        conn.execute("INSERT INTO users (id, username, password, created_at) VALUES ('u', 'kim', ?, '')",
+                     (main.hash_password("new-password"),))
+        conn.commit()
+        conn.close()
+        data_key = keystore.unlock_user_keys("kim", "new-password", db_path=node)
+        self.assertEqual(keystore.import_wallets("kim", data_key, passphrase, backup, db_path=node), [wallet])
+        self.assertTrue(keystore.is_encrypted(self.stored_key(wallet, node)))
+        self.assertEqual(signing.get_wallet_private_key(node, wallet, data_key), priv)
+
+    def test_backup_with_mismatched_key_rejected(self):
+        priv_other = signing.generate_keypair()[0]  # a key that doesn't match the wallet
+        _, wallet, _ = self.register("max")
+        forged = keystore.seal_backup("correct horse battery", {"wallets": [
+            {"wallet_id": wallet, "private_key": priv_other, "name": "x"}]}, "wallets")
+        with self.assertRaises(keystore.KeystoreError):
+            keystore.import_wallets("max", b"k" * 32, "correct horse battery", forged)
+
+    def test_treasury_backup_restore_and_encrypt(self):
+        work = Path(tempfile.mkdtemp(prefix="gfc_treasury_cli_", dir=_TMP))
+        key_file, backup_file = work / "treasury_key.hex", work / "treasury.backup"
+        key_file.write_text(TREASURY_PRIV)
+        os.environ["GFC_TREASURY_KEY_FILE"] = str(key_file)
+        os.environ["GFC_BACKUP_PASSPHRASE"] = "treasury passphrase 1"
+        try:
+            self.assertEqual(signing._cli(["backup", str(backup_file)]), 0)
+            self.assertNotIn(TREASURY_PRIV, backup_file.read_text())
+            key_file.unlink()
+            self.assertEqual(signing._cli(["restore", str(backup_file)]), 0)
+            self.assertEqual(key_file.read_text().strip(), TREASURY_PRIV)
+
+            self.assertEqual(signing._cli(["encrypt"]), 0)
+            self.assertNotIn(TREASURY_PRIV, key_file.read_text())
+            os.environ.pop("GFC_TREASURY_PASSPHRASE", None)
+            self.assertIsNone(signing.load_treasury_private_key())  # locked without the passphrase
+            os.environ["GFC_TREASURY_PASSPHRASE"] = "treasury passphrase 1"
+            self.assertEqual(signing.load_treasury_private_key(), TREASURY_PRIV)
+        finally:
+            os.environ["GFC_TREASURY_KEY_FILE"] = str(NO_KEY_FILE)
+            os.environ.pop("GFC_BACKUP_PASSPHRASE", None)
+            os.environ.pop("GFC_TREASURY_PASSPHRASE", None)
 
 
 if __name__ == "__main__":

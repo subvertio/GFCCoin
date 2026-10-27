@@ -21,6 +21,30 @@ accept the result. This note covers what changed and why.
   and reason, so the signature covers every field that affects balances. New
   columns `signature` and `signer` are added to `transactions`.
 
+## Keeping keys safe (keystore.py)
+
+- **Encrypted at rest.** Each user has a random data key that encrypts their
+  wallet keys (AES-256-GCM, bound to the wallet ID). The data key is stored
+  only wrapped: under the user's password (scrypt), and under each live
+  session's API token (HKDF). Only the token's hash is in the database, so a
+  copied database or data folder holds no usable wallet keys. Login unwraps
+  the data key with the password, and API calls with a valid token can sign as
+  before. Plaintext keys from before this change are encrypted at the owner's
+  next login.
+- **Forgetting your password loses your keys**, because there's no reset that
+  could recover them. That's why export exists:
+- **`POST /wallets/export`** (token + password + backup passphrase of at least
+  12 characters) returns a passphrase-encrypted backup of all your wallet keys
+  on this node (scrypt + AES-GCM).
+- **`POST /wallets/import`** restores the backup on any node, under any
+  account. Every key is checked against its wallet ID. Holding the key proves
+  ownership, so the local wallet is assigned to the importing user. Backup KDF
+  parameters are bounded, so a crafted file can't exhaust memory.
+- **Treasury key:** `python signing.py backup FILE` writes an encrypted copy.
+  `restore FILE` recreates the key file from it. `encrypt` encrypts the key file
+  in place, and the treasury node then needs `GFC_TREASURY_PASSPHRASE` to sign
+  mints. Without it, the node runs but issues local-only credit.
+
 ## Validating synced transactions
 
 Both sync paths now call `sync_ingest.ingest_rows()`. For `transactions`, that
@@ -141,9 +165,10 @@ a forged wallet row named "bob" could take Bob's rewards.
 - **Issuance is centralized.** Network-wide credit depends on the treasury key
   holder(s). A claims service, where non-treasury nodes submit mint requests
   for the treasury to sign, would be the next step.
-- **Private keys are stored unencrypted** in the node's SQLite file, protected
-  only by the user's OS account. Key export/backup and encryption at rest are
-  still to do.
+- **Keys are only as strong as the password.** Someone holding the data
+  folder can try to guess a weak password offline (scrypt slows that down but
+  can't stop it). Keys are also decrypted in memory while signing, so malware
+  on the node can still steal them.
 - **Usernames aren't keys.** A seed's `owner` name, likes, comments and the
   wallet `owner` label are still taken at face value. They no longer decide who
   gets paid, but a peer can still post content under someone else's name (the
