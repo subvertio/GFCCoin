@@ -595,6 +595,35 @@ class KeystoreTests(unittest.TestCase):
             os.environ.pop("GFC_BACKUP_PASSPHRASE", None)
             os.environ.pop("GFC_TREASURY_PASSPHRASE", None)
 
+    def test_generate_encrypted_and_pubkey_for_rotation(self):
+        import contextlib, io
+        work = Path(tempfile.mkdtemp(prefix="gfc_rotate_", dir=_TMP))
+        new_file = work / "treasury_key.next"
+        os.environ["GFC_BACKUP_PASSPHRASE"] = "rotation passphrase 9"
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(signing._cli(["generate-encrypted", str(new_file)]), 0)
+            pub = out.getvalue().strip()
+            self.assertTrue(signing.is_public_key(pub))
+            self.assertTrue(new_file.read_text().startswith("{"))  # never plaintext on disk
+            if os.name == "posix":
+                self.assertEqual(new_file.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(SystemExit):  # refuses to overwrite
+                signing._cli(["generate-encrypted", str(new_file)])
+
+            os.environ["GFC_TREASURY_PASSPHRASE"] = "rotation passphrase 9"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(signing._cli(["pubkey", str(new_file)]), 0)
+            self.assertEqual(out.getvalue().strip(), pub)
+            os.environ["GFC_TREASURY_PASSPHRASE"] = "wrong passphrase!!"
+            with self.assertRaises(keystore.KeystoreError):
+                signing._cli(["pubkey", str(new_file)])
+        finally:
+            os.environ.pop("GFC_BACKUP_PASSPHRASE", None)
+            os.environ.pop("GFC_TREASURY_PASSPHRASE", None)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

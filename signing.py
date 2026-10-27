@@ -283,7 +283,13 @@ def _cli(argv: list) -> int:
              "  backup    write a passphrase-encrypted copy of the treasury key\n"
              "  restore   recreate the treasury key file from a backup\n"
              "  encrypt   encrypt the treasury key file in place; the node then needs\n"
-             "            GFC_TREASURY_PASSPHRASE set to sign mints")
+             "            GFC_TREASURY_PASSPHRASE set to sign mints\n"
+             "  generate-encrypted OUT_FILE\n"
+             "            create a new treasury key directly as an encrypted file (for\n"
+             "            rotation); prints its public key\n"
+             "  pubkey FILE\n"
+             "            print the public key of a key file (plain or encrypted; uses\n"
+             "            GFC_TREASURY_PASSPHRASE for encrypted ones)")
     cmd = argv[0] if argv else "generate"
     key_path = _treasury_key_path()
 
@@ -320,6 +326,18 @@ def _cli(argv: list) -> int:
                                       {"private_key": priv, "public_key": public_key_of(priv)}, "treasury")
         _write_secret(key_path, json.dumps(sealed, indent=2))
         print(f"{key_path} is now encrypted. Set GFC_TREASURY_PASSPHRASE when starting the treasury node.")
+    elif cmd == "generate-encrypted" and len(argv) == 2:
+        out = Path(argv[1])
+        if out.exists():
+            raise SystemExit(f"{out} already exists; refusing to overwrite")
+        priv, pub = generate_keypair()  # never written to disk in plaintext
+        sealed = keystore.seal_backup(_passphrase("Passphrase for the new key file (12+ chars): ", True),
+                                      {"private_key": priv, "public_key": pub}, "treasury")
+        _write_secret(out, json.dumps(sealed, indent=2))
+        print(pub)
+    elif cmd == "pubkey" and len(argv) == 2:
+        priv = _read_treasury_key_file(Path(argv[1]), os.environ.get("GFC_TREASURY_PASSPHRASE"))
+        print(public_key_of(priv))
     else:
         print(usage)
         return 2

@@ -24,6 +24,12 @@ usage: gfc <command>
                         (default F: /var/lib/gfc/treasury.backup; needs ssh -t)
   encrypt-treasury      encrypt the treasury key file with the passphrase saved
                         in the settings (set GFC_TREASURY_PASSPHRASE via gfc config first)
+  rotate-treasury       step 1 of replacing the treasury key: create the new key
+                        (encrypted with the saved passphrase) and print its public
+                        key to pin in config.py
+  rotate-treasury --activate
+                        step 2, after the pin is merged and 'gfc update' has run:
+                        switch the node to the new key (rolls back on failure)
 EOF
 }
 
@@ -88,7 +94,11 @@ cmd_check() {
         line FAIL "treasury key file present but not usable (is its public key pinned in config.py?)"
     fi
 
-    if [[ -n "$(env_value TWILIO_ACCOUNT_SID)" && -n "$(env_value TWILIO_AUTH_TOKEN)" && -n "$(env_value TWILIO_VERIFY_SERVICE_SID)" ]]; then
+    if [[ -f "$DATA_DIR/treasury_key.next" ]]; then
+        line info "new treasury key staged, not active yet: $(next_pubkey 2>/dev/null || echo '?') (gfc rotate-treasury --activate)"
+    fi
+
+    if [[ -n "$(env_value TWILIO_ACCOUNT_SID)"&& -n "$(env_value TWILIO_AUTH_TOKEN)" && -n "$(env_value TWILIO_VERIFY_SERVICE_SID)" ]]; then
         line ok "Twilio phone verification configured"
     else
         line --  "Twilio not configured - using the fake test provider (gfc config)"
@@ -147,6 +157,64 @@ cmd_encrypt_treasury() {
     fi
 }
 
+next_pubkey() {
+    as_gfc "$VENV/bin/python" signing.py pubkey "$DATA_DIR/treasury_key.next"
+}
+
+next_is_pinned() {
+    as_gfc "$VENV/bin/python" -c 'import signing, sys; sys.exit(0 if sys.argv[1] in signing.treasury_pubkeys() else 1)' "$1"
+}
+
+cmd_rotate_treasury() {
+    need_root
+    local keyfile; keyfile="$(env_value GFC_TREASURY_KEY_FILE)"; keyfile="${keyfile:-$DATA_DIR/treasury_key.hex}"
+    local next="$DATA_DIR/treasury_key.next"
+
+    if [[ "${1:-}" != "--activate" ]]; then
+        # Step 1: stage a new key, encrypted from the start with the saved passphrase
+        if [[ -f "$next" ]]; then
+            echo "A new treasury key is already staged. Its public key:"
+            next_pubkey
+            echo "Pin it in config.py, merge, run 'gfc update', then: gfc rotate-treasury --activate"
+            return 0
+        fi
+        as_gfc bash -c '[[ ${#GFC_TREASURY_PASSPHRASE} -ge 12 ]]' \
+            || die "set GFC_TREASURY_PASSPHRASE (12+ characters) first: ssh -t gfc-node gfc config"
+        local pub
+        pub="$(as_gfc bash -c 'GFC_BACKUP_PASSPHRASE="$GFC_TREASURY_PASSPHRASE" exec "$0" signing.py generate-encrypted "$1"' \
+               "$VENV/bin/python" "$next")" || die "could not create the new key"
+        echo "New treasury key staged (encrypted with the passphrase in the settings)."
+        echo "Public key to pin in config.py PINNED_TREASURY_PUBKEYS:"
+        echo "  $pub"
+        echo "Offline copy: $next is itself an encrypted backup (restore with the same passphrase)."
+        echo "Next: pin it, merge, 'gfc update', then: gfc rotate-treasury --activate"
+        return 0
+    fi
+
+    # Step 2: switch over, only if the new key is pinned by the code now running
+    [[ -f "$next" ]] || die "no staged key; run 'gfc rotate-treasury' first"
+    local pub; pub="$(next_pubkey)" || die "can't open the staged key with GFC_TREASURY_PASSPHRASE (gfc config)"
+    next_is_pinned "$pub" || die "the staged key $pub is not pinned by the running code yet: pin it in config.py, merge, run 'gfc update', then retry"
+
+    local retired=""
+    if [[ -f "$keyfile" ]]; then
+        retired="$keyfile.retired-$(date -u +%Y%m%d-%H%M%S)"
+        mv "$keyfile" "$retired"
+    fi
+    mv "$next" "$keyfile"
+    chown gfc:gfc "$keyfile"; chmod 600 "$keyfile"
+    restart_node
+    if treasury_loaded; then
+        echo "Treasury switched to $pub. The node signs with the new key."
+        [[ -n "$retired" ]] && echo "Old key kept at $retired - delete it once you're happy:  rm $retired"
+    else
+        mv "$keyfile" "$next"
+        [[ -n "$retired" ]] && mv "$retired" "$keyfile"
+        restart_node
+        die "the node couldn't load the new key, so the old one was put back (gfc check)"
+    fi
+}
+
 cmd_config() {
     need_root
     [[ -t 0 ]] || die "this opens an editor: run it with  ssh -t gfc-node gfc config"
@@ -165,6 +233,7 @@ case "${1:-}" in
     backup)           need_root; /usr/local/sbin/gfc-backup ;;
     restore-treasury) shift; cmd_restore_treasury "$@" ;;
     encrypt-treasury) cmd_encrypt_treasury ;;
+    rotate-treasury)  shift; cmd_rotate_treasury "$@" ;;
     ""|-h|--help|help) usage ;;
     *) usage; exit 2 ;;
 esac
