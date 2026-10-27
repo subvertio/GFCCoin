@@ -24,10 +24,12 @@ from app_profile import router as profile_router
 from app_podt import podt_router
 from app_verify import router as verify_router
 from app_share import router as share_router
+from app_referrals import router as referrals_router
 from app_echohunt import router as echohunt_router
 from app_tokens import router as tokens_router
 import blockchain
 import keystore
+import referrals
 import signing
 from security import (
     hash_password, verify_password, migrate_plaintext_passwords,
@@ -55,6 +57,7 @@ app.include_router(profile_router)
 app.include_router(podt_router)
 app.include_router(verify_router)
 app.include_router(share_router)
+app.include_router(referrals_router)
 app.include_router(echohunt_router)
 app.include_router(tokens_router)
 
@@ -195,9 +198,10 @@ async def auth_register(
     first_name: str = Form(""),
     last_name: str = Form(""),
     email: str = Form(""),
-    phone: str = Form("")
+    phone: str = Form(""),
+    ref: str = Form("")
 ):
-    """Register a new user account"""
+    """Register a new user account. `ref` is the username of whoever invited them (optional)."""
     if not username.strip() or not password:
         raise HTTPException(status_code=400, detail="username and password required")
 
@@ -217,7 +221,8 @@ async def auth_register(
 
     token = create_session(username)
     keystore.attach_to_session(token, keystore.unlock_user_keys(username, password))
-    return {"ok": True, "token": token, "user": username}
+    invited_by = referrals.record_invite(DB_PATH, username, ref)
+    return {"ok": True, "token": token, "user": username, "invited_by": invited_by}
 
 
 @app.post("/auth/login")

@@ -37,7 +37,12 @@ TX_TYPE_PREMINE  = "PREMINE"   # Genesis: SYSTEM -> Treasury
 TX_TYPE_GRANT    = "GRANT"     # Treasury -> new user (first wallet)
 TX_TYPE_TRANSFER = "TRANSFER"  # User -> User
 TX_TYPE_REWARD   = "REWARD"    # Treasury -> Seeder (PoDT)
-MINT_TX_TYPES = (TX_TYPE_GRANT, TX_TYPE_REWARD)
+TX_TYPE_REFERRAL = "REFERRAL"  # Treasury -> inviter (friend became active) or invited friend (bonus)
+MINT_TX_TYPES = (TX_TYPE_GRANT, TX_TYPE_REWARD, TX_TYPE_REFERRAL)
+
+# Invite rewards: the only two amounts a REFERRAL mint may carry (see referrals.py)
+REFERRAL_REWARD_CENTS = 100_000         # 1,000 GFC to the inviter per friend who becomes active
+REFERRAL_BONUS_CENTS = 10_000           # 100 GFC extra to the invited friend
 
 # Limits applied to transactions received from peers
 MAX_REASON_LEN = 500
@@ -603,6 +608,36 @@ def process_podt_reward(db_path: str, seeder_wallet: str, proof_id: str,
     return tx
 
 
+def process_referral_mint(db_path: str, wallet_id: str, amount_cents: int, reason: str) -> Optional[dict]:
+    """
+    Mint an invite reward or bonus (REFERRAL) from the treasury. Callers (referrals.py)
+    decide eligibility and make sure each one is paid once. None if the treasury is short.
+    """
+    if amount_cents not in (REFERRAL_REWARD_CENTS, REFERRAL_BONUS_CENTS):
+        raise ValueError("referral mints are REFERRAL_REWARD_CENTS or REFERRAL_BONUS_CENTS")
+    if get_balance_cents(db_path, TREASURY_WALLET_ID) < amount_cents:
+        print(f"[Blockchain] WARNING: Treasury depleted, cannot pay referral {amount_cents / 100:.2f} GFC")
+        return None
+    tx = {
+        "id": str(uuid.uuid4()),
+        "sender": TREASURY_WALLET_ID,
+        "recipient": wallet_id,
+        "amount": amount_cents / 100.0,
+        "amount_cents": amount_cents,
+        "reason": reason[:MAX_REASON_LEN],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tx_type": TX_TYPE_REFERRAL,
+    }
+    tx["tx_hash"] = compute_tx_hash(tx)
+    _sign_mint(tx)
+    conn = sqlite3.connect(db_path)
+    _insert_tx(conn, tx)
+    conn.commit()
+    conn.close()
+    tx["block_index"] = create_block(db_path, [tx["id"]])["block_index"]
+    return tx
+
+
 def play_reward_block_reason(conn: sqlite3.Connection, viewer: str) -> Optional[str]:
     """Why `viewer`'s plays can't earn credit for anyone (None if they can)."""
     if not phone_verify.is_verified(conn, viewer):
@@ -649,8 +684,9 @@ def release_play_slot(db_path: str, proof_id: str):
 #   - tx_hash must equal compute_tx_hash() of the row's contents, and must be new
 #   - TRANSFER: sender is an Ed25519 public key and signed the tx_hash, and has
 #     enough balance on this node (otherwise the row waits in pending_sync_tx)
-#   - GRANT / REWARD: sender is the treasury wallet and the signature is from a
-#     pinned treasury key; GRANT is exactly NEW_USER_GRANT_CENTS, once per wallet
+#   - GRANT / REWARD / REFERRAL: sender is the treasury wallet and the signature is
+#     from a pinned treasury key; GRANT is exactly NEW_USER_GRANT_CENTS, once per
+#     wallet; REFERRAL is exactly REFERRAL_REWARD_CENTS or REFERRAL_BONUS_CENTS
 #   - PREMINE: never accepted; every node creates its own genesis
 # The peer's block_index is ignored: accepted rows go into a new local block.
 
@@ -718,6 +754,8 @@ def check_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
             return REJECTED, "wrong grant amount"
         if tx_type == TX_TYPE_REWARD and amount_cents > MAX_REWARD_CENTS:
             return REJECTED, "reward too large"
+        if tx_type == TX_TYPE_REFERRAL and amount_cents not in (REFERRAL_REWARD_CENTS, REFERRAL_BONUS_CENTS):
+            return REJECTED, "wrong referral amount"
     if not signing.verify_tx_signature(signer, tx_hash, signature):
         return REJECTED, "bad signature"
 
@@ -897,8 +935,8 @@ def get_blockchain_stats(db_path: str = DB_PATH) -> dict:
 
     rewarded = conn.execute(
         "SELECT COALESCE(SUM(amount_cents), 0) FROM transactions "
-        "WHERE tx_type = ? AND block_index IS NOT NULL",
-        (TX_TYPE_REWARD,)
+        "WHERE tx_type IN (?, ?) AND block_index IS NOT NULL",
+        (TX_TYPE_REWARD, TX_TYPE_REFERRAL)
     ).fetchone()[0]
 
     circulation_cents = granted + rewarded

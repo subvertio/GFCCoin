@@ -6,7 +6,11 @@ node on the public domain serves these pages for every seed it has synced.
 
 - GET /p/{seed_id}                 HTML page with Open Graph / Twitter Card tags
 - GET /p/{seed_id}/share           share URL, text and X web intent URL (JSON)
+- GET /join?ref=<username>         invite landing page ("<username> invited you"), see referrals.py
 - GET /.well-known/assetlinks.json Android App Links verification
+
+Any page accepts ?ref=<username>; it's passed to the app's deep link so the
+invite survives install-and-open, and the app sends it at sign-up.
 
 Seed rows arrive from peers and are untrusted: every field is HTML-escaped and
 every path segment is URL-quoted. The pages run no script.
@@ -25,6 +29,7 @@ intent links still launch the app there, or fall back to GFC_ANDROID_FALLBACK_UR
 """
 import html
 import os
+import re
 import secrets
 import sqlite3
 from urllib.parse import quote, urlencode, urlsplit
@@ -53,24 +58,55 @@ def app_link_base() -> str:
     return (os.environ.get("GFC_APP_LINK_BASE") or DEFAULT_APP_LINK_BASE).rstrip("/")
 
 
-def android_open_link(seed_id: str, page_url: str) -> str:
+REF_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def clean_ref(ref) -> str:
+    """An invite ref (inviter username) safe to pass along, or '' if it isn't one."""
+    ref = (ref or "").strip()
+    return ref if REF_RE.match(ref) else ""
+
+
+def _with_ref(route: str, ref: str) -> str:
+    return f"{route}{'&' if '?' in route else '?'}ref={quote(ref, safe='')}" if ref else route
+
+
+def _app_link(route: str, page_url: str, user_agent: str) -> str:
     """
-    Android intent:// link that opens the GFC app at this seed, e.g. for gfc://seed/<id>:
-    intent://seed/<id>#Intent;scheme=gfc;package=<pkg>;S.browser_fallback_url=<url>;end
+    Link that opens the app at `route` (e.g. "seed/<id>", "join?ref=x"): an Android
+    intent:// link (works inside X's in-app browser, falls back to page_url or
+    GFC_ANDROID_FALLBACK_URL) when the package is configured, else gfc://<route>.
     """
-    target = urlsplit(app_link_base())
+    scheme = urlsplit(app_link_base()).scheme or "gfc"
+    if "android" in (user_agent or "").lower() and os.environ.get("GFC_ANDROID_PACKAGE", "").strip():
+        return _intent_link(route, page_url)
+    return f"{scheme}://{route}"
+
+
+def _intent_link(route: str, page_url: str) -> str:
+    """intent://<route>#Intent;scheme=gfc;package=<pkg>;S.browser_fallback_url=<url>;end"""
+    scheme = urlsplit(app_link_base()).scheme or "gfc"
     package = os.environ.get("GFC_ANDROID_PACKAGE", "").strip()
     fallback = os.environ.get("GFC_ANDROID_FALLBACK_URL", "").strip() or page_url
-    path = f"{target.netloc}{target.path}/{quote(seed_id, safe='')}"
-    return (f"intent://{path}#Intent;scheme={target.scheme};package={package};"
+    return (f"intent://{route}#Intent;scheme={scheme};package={package};"
             f"S.browser_fallback_url={quote(fallback, safe='')};end")
 
 
-def open_in_app_link(seed_id: str, page_url: str, user_agent: str) -> str:
+def _seed_route(seed_id: str) -> str:
+    target = urlsplit(app_link_base())
+    return f"{target.netloc}{target.path}/{quote(seed_id, safe='')}"
+
+
+def android_open_link(seed_id: str, page_url: str, ref: str = "") -> str:
+    """Android intent:// link that opens the GFC app at this seed (see _app_link)."""
+    return _intent_link(_with_ref(_seed_route(seed_id), ref), page_url)
+
+
+def open_in_app_link(seed_id: str, page_url: str, user_agent: str, ref: str = "") -> str:
     """intent:// on Android when the app's package is configured, else the plain deep link."""
     if "android" in (user_agent or "").lower() and os.environ.get("GFC_ANDROID_PACKAGE", "").strip():
-        return android_open_link(seed_id, page_url)
-    return f"{app_link_base()}/{quote(seed_id, safe='')}"
+        return android_open_link(seed_id, page_url, ref)
+    return _with_ref(f"{app_link_base()}/{quote(seed_id, safe='')}", ref)
 
 
 def share_url(seed_id: str) -> str:
@@ -136,7 +172,8 @@ def share_page(seed_id: str, request: Request):
     og_description = description if len(description) <= DESCRIPTION_LIMIT else description[:DESCRIPTION_LIMIT - 1] + "…"
     thumb_path = f"/thumbs/{quote(seed['thumb_filename'], safe='')}" if seed["thumb_filename"] else ""
     media_path = f"/originals/{quote(seed['filename'], safe='')}" if seed["filename"] else ""
-    app_link = open_in_app_link(seed["id"], url, request.headers.get("user-agent", ""))
+    app_link = open_in_app_link(seed["id"], url, request.headers.get("user-agent", ""),
+                                clean_ref(request.query_params.get("ref")))
     intent = x_intent_url(share_text(seed), url)
 
     ctype = seed["content_type"]
@@ -213,6 +250,66 @@ h1{{font-size:1.4rem;margin:16px 0 4px}}
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "strict-origin-when-cross-origin",
         "Vary": "User-Agent",  # "Open in GFC" differs on Android
+    })
+
+
+@router.get("/join", response_class=HTMLResponse)
+def join_page(request: Request):
+    """Invite landing page: '<inviter> invited you to GFC', with Open in GFC carrying the invite."""
+    ref = clean_ref(request.query_params.get("ref"))
+    inviter = ""
+    if ref:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT username FROM users WHERE LOWER(username) = LOWER(?)", (ref,)).fetchone()
+        conn.close()
+        inviter = row[0] if row else ""
+    e = lambda s: html.escape(s, quote=True)  # noqa: E731
+    url = f"{public_base_url()}/join" + (f"?ref={quote(inviter, safe='')}" if inviter else "")
+    title = f"{inviter} invited you to GFC" if inviter else "Join GFC"
+    description = ("Discover 3D art, music and video from independent creators, and earn GFC for the "
+                   "creators you watch. Join with this invite for a 100 GFC welcome bonus.")
+    app_link = _app_link(_with_ref("join", inviter), url, request.headers.get("user-agent", ""))
+    nonce = secrets.token_urlsafe(16)
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{e(title)}</title>
+<meta name="description" content="{e(description)}">
+<link rel="canonical" href="{e(url)}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GFC">
+<meta property="og:title" content="{e(title)}">
+<meta property="og:description" content="{e(description)}">
+<meta property="og:url" content="{e(url)}">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="{e(title)}">
+<meta name="twitter:description" content="{e(description)}">
+<style nonce="{nonce}">
+body{{margin:0;font-family:system-ui,sans-serif;background:#0b0d17;color:#e8e9f0}}
+main{{max-width:560px;margin:0 auto;padding:48px 16px;text-align:center}}
+h1{{font-size:1.6rem}}
+p{{line-height:1.5;color:#b8bccc}}
+.actions a{{display:inline-block;margin-top:16px;padding:12px 20px;border-radius:8px;background:#3b4cca;color:#fff;text-decoration:none}}
+</style>
+</head>
+<body>
+<main>
+<h1>{e(title)}</h1>
+<p>{e(description)}</p>
+<p class="actions"><a href="{e(app_link)}">Open in GFC</a></p>
+</main>
+</body>
+</html>
+"""
+    csp = (f"default-src 'none'; style-src 'nonce-{nonce}'; base-uri 'none'; "
+           "form-action 'none'; frame-ancestors 'none'")
+    return HTMLResponse(page, headers={
+        "Content-Security-Policy": csp,
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Vary": "User-Agent",
     })
 
 

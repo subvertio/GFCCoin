@@ -11,6 +11,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, Form, Query, Depends
 
 import echohunt
+import referrals
 import signing
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH
@@ -323,6 +324,12 @@ async def record_played(seed_id: str, caller: Caller = Depends(caller_from_form)
         if os.environ.get("GFC_REQUIRE_ECHOHUNT") == "1" and not echohunt.has_recent_pass(conn, requester):
             conn.close()
             return {"ok": True, "credited": False, "reason": "echo hunt not passed in the last 24h"}
+
+        # An invited viewer's first qualifying play releases their inviter's reward (once)
+        try:
+            referrals.maybe_reward(DB_PATH, requester)
+        except Exception as ex:  # never let invite bookkeeping break a play
+            print(f"[Referrals] payout check failed for {requester}: {ex}")
 
         # One payout per (seed, user) pair
         proof_string = f"play:{seed_id}:{requester}"
