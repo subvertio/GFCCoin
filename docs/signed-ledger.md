@@ -60,6 +60,7 @@ each row:
 | GRANT/REWARD: from the treasury wallet, signed by a pinned treasury key | rejected |
 | GRANT: exactly 100 GFC, and the wallet's first grant | rejected |
 | REWARD: at most `MAX_REWARD_CENTS` (1,000 GFC) | rejected |
+| FIRST_POST: at most `FIRST_POST_BONUS_MAX_CENTS` (1,000 GFC), and the wallet's first one (see [first-post-bonus.md](first-post-bonus.md)) | rejected |
 | PREMINE | always rejected |
 | Timestamp parses and is less than 1 hour in the future | rejected |
 | Sender's balance on this node covers the amount | **pending** |

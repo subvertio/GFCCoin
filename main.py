@@ -29,6 +29,7 @@ from app_echohunt import router as echohunt_router
 from app_tokens import router as tokens_router
 import blockchain
 import keystore
+import first_post
 import referrals
 import reposts
 import signing
@@ -177,6 +178,7 @@ def init_db():
     init_sessions_table(conn)
     keystore.init_keystore(conn)
     reposts.init_repost_tables(conn)
+    first_post.init_first_post_tables(conn)
     migrate_plaintext_passwords(conn)
 
     conn.commit()
@@ -328,6 +330,10 @@ async def create_wallet(name: str = Form("Default Wallet"), caller: Caller = Dep
         grant_result = blockchain.process_user_grant(DB_PATH, owner, wallet_id)
         if grant_result:
             grant_balance = grant_result["amount"]  # 100.0
+        # A first post made before the account had a wallet is paid now
+        bonus = first_post.pay_pending(DB_PATH, owner)
+        if bonus:
+            grant_balance += bonus["amount"]
 
     return WalletCreateResponse(id=wallet_id, name=name, gfc_balance=grant_balance)
 

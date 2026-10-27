@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
+import first_post
 import reposts
 import signing
 from security import Caller, caller_from_form, caller_from_query
@@ -164,6 +165,10 @@ async def seeds_upload(
     If the file matches content that was notarised earlier (see reposts.py), the
     seed is still shared but becomes a repost: `repost_of` names the original, and
     all its earnings go to the original creator.
+
+    The account's first original seed earns the first post bonus (see first_post.py):
+    the response then has `first_post_bonus` (GFC), plus `first_post_bonus_pending: true`
+    when it's waiting for a wallet or a verified phone. Both are absent otherwise.
     """
     if not file:
         raise HTTPException(status_code=400, detail="file missing")
@@ -223,6 +228,7 @@ async def seeds_upload(
         signature = signing.sign_seed(private_key, {
             "id": sid, "owner": owner, "filename": orig_safe, "file_size": file_size,
             "created_at": created_at, "reward_wallet": reward_wallet})
+    stored = False
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.execute(
@@ -235,6 +241,7 @@ async def seeds_upload(
         )
         conn.commit()
         conn.close()
+        stored = True
     except Exception as ex:
         # Log but don't fail - file is already saved
         print(f"Warning: failed to insert seed metadata: {ex}")
@@ -250,7 +257,14 @@ async def seeds_upload(
     except Exception as ex:
         print(f"Warning: repost check failed for seed {sid}: {ex}")
 
-    return {
+    bonus = None
+    if stored:
+        try:
+            bonus = first_post.on_upload(DB_PATH, owner, sid, is_repost=repost_info is not None)
+        except Exception as ex:
+            print(f"Warning: first post bonus failed for seed {sid}: {ex}")
+
+    result = {
         "ok": True,
         "id": sid,
         "title": final_title,
@@ -268,6 +282,11 @@ async def seeds_upload(
         "repost_of": repost_info,
         "repost_credit_gfc": repost_credit["amount"] if repost_credit else 0.0,
     }
+    if bonus:
+        result["first_post_bonus"] = bonus["amount"]
+        if bonus["pending"]:
+            result["first_post_bonus_pending"] = True
+    return result
 
 @router.get("/seeds/mine")
 def my_seeds(caller: Caller = Depends(caller_from_query)):
