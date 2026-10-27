@@ -90,9 +90,31 @@ How it works in practice:
   *pending* on other nodes until signed funding for them arrives there.
 - `PREMINE` is never synced. Every node creates the same genesis rule locally.
 
-**Until a treasury key is pinned, no mint is accepted from peers.** That's the
-safe default, but it means only credit minted by a treasury node moves
-between nodes.
+**Pinned key.** `config.PINNED_TREASURY_PUBKEYS` contains the operator's
+treasury public key. The private key is kept outside the repository, in the
+operator's data directory (`data/`, which is gitignored). Only nodes that hold
+that file sign mints. To rotate or add a key, run `python signing.py` and add
+the new public key to the list.
+
+## Who gets paid for a seed
+
+Before this change, rewards went to the seed's `reward_wallet` if a wallet row
+with that ID existed. Otherwise they went to the first wallet whose `owner` label
+matched the seed owner. Both the seed row and the wallet row come from peers, so
+a forged wallet row named "bob" could take Bob's rewards.
+
+- **Seeds are signed by their reward wallet** (`signing.sign_seed`). The
+  signature covers `id, owner, filename, file_size, created_at, reward_wallet`.
+  On upload, the wallet must be one of the uploader's wallets with its key on
+  this node. The default is their oldest one.
+- **The seed ID is derived from the wallet and filename**
+  (`signing.seed_id_for`). An attacker who re-signs someone's seed with their
+  own wallet ends up with a different seed ID, so the original isn't hijacked.
+- **Rewards go only to a verified signer** (`signing.seed_reward_wallet`), for
+  both play rewards and PoDT transfer rewards. The owner-name fallback is gone.
+- **Synced seeds:** signed seed rows that fail verification are dropped.
+  Unsigned (legacy or anonymous) seeds are still shared as content, but their
+  `reward_wallet` is cleared, so they earn nothing.
 
 ## Upgrading an existing node
 
@@ -122,7 +144,11 @@ between nodes.
 - **Private keys are stored unencrypted** in the node's SQLite file, protected
   only by the user's OS account. Key export/backup and encryption at rest are
   still to do.
-- **Other synced rows aren't authenticated.** Seeds, likes, comments and the
-  wallet `owner` label are still taken at face value. This matters because
-  reward routing picks a wallet by `owner` or `reward_wallet`, so a forged
-  row could redirect rewards to the attacker's wallet. That's a follow-up.
+- **Usernames aren't keys.** A seed's `owner` name, likes, comments and the
+  wallet `owner` label are still taken at face value. They no longer decide who
+  gets paid, but a peer can still post content under someone else's name (the
+  rewards then go to the impersonator's own wallet). Signed user identities
+  would fix that.
+- **A seed's `file_size` is self-declared** for play rewards, so a creator can
+  overstate it, up to the per-reward cap. PoDT transfer rewards use the bytes
+  actually received.

@@ -9,9 +9,13 @@ GFC Ledger Signing - Ed25519 keys for wallets and the treasury
   treasury public key(s) in config.TREASURY_PUBKEYS and only accepts synced
   mints signed by one of them. The private key is only present on the node(s)
   the network operator runs (GFC_TREASURY_KEY_FILE).
+- Seeds are signed by their reward wallet, and rewards are only paid to that
+  signer (see SEED SIGNATURES below).
 """
 
 import datetime
+import hashlib
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -77,6 +81,61 @@ def verify_tx_signature(public_key_hex: str, tx_hash: str, signature_hex: str) -
 
 
 # ============================================================================
+# SEED SIGNATURES (who gets paid for a seed)
+# ============================================================================
+#
+# A seed's reward_wallet signs the seed's identity fields. Rewards are only paid
+# to a reward_wallet that signed its seed, so a peer can't redirect someone's
+# rewards by sending a forged seed or a wallet row with a borrowed owner name.
+# The seed ID is derived from (reward_wallet, filename), so re-signing someone
+# else's seed with another wallet gives a different seed, not a hijacked one.
+
+SEED_SIGNATURE_DOMAIN = b"GFC-SEED-SIG-v1:"
+SEED_SIGNED_FIELDS = ("id", "owner", "filename", "file_size", "created_at", "reward_wallet")
+
+
+def seed_id_for(reward_wallet: str, filename: str) -> str:
+    return hashlib.sha256(f"{reward_wallet}:{filename}".encode()).hexdigest()[:24]
+
+
+def _seed_message(seed: dict) -> bytes:
+    canonical = {f: seed.get(f, "") for f in SEED_SIGNED_FIELDS}
+    return SEED_SIGNATURE_DOMAIN + json.dumps(canonical, sort_keys=True, separators=(',', ':')).encode()
+
+
+def sign_seed(private_key_hex: str, seed: dict) -> str:
+    key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_key_hex))
+    return key.sign(_seed_message(seed)).hex()
+
+
+def verify_seed(seed: dict) -> bool:
+    """True if the seed is signed by its reward_wallet and its ID is bound to that wallet."""
+    wallet = seed.get("reward_wallet") or ""
+    signature = seed.get("signature") or ""
+    if not is_public_key(wallet) or not isinstance(signature, str) or not signature:
+        return False
+    if not isinstance(seed.get("filename"), str) or seed.get("id") != seed_id_for(wallet, seed["filename"]):
+        return False
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(wallet)).verify(
+            bytes.fromhex(signature), _seed_message(seed))
+        return True
+    except (ValueError, TypeError, InvalidSignature):
+        return False
+
+
+def seed_reward_wallet(conn: sqlite3.Connection, seed_id: str) -> Optional[str]:
+    """The wallet to pay for plays/transfers of a seed, or None if the seed isn't signed."""
+    row = conn.execute(
+        f"SELECT {', '.join(SEED_SIGNED_FIELDS)}, signature FROM seeds WHERE id = ?", (seed_id,)
+    ).fetchone()
+    if not row:
+        return None
+    seed = dict(zip(SEED_SIGNED_FIELDS + ("signature",), row))
+    return seed["reward_wallet"] if verify_seed(seed) else None
+
+
+# ============================================================================
 # WALLET KEYS (local only, never synced)
 # ============================================================================
 
@@ -97,6 +156,22 @@ def create_wallet_key(conn: sqlite3.Connection) -> str:
         (pub, priv, datetime.datetime.utcnow().isoformat())
     )
     return pub
+
+
+def local_wallet_for(conn: sqlite3.Connection, owner: str, wallet_id: str = "") -> Optional[str]:
+    """
+    A wallet of `owner` whose key is on this node: `wallet_id` if it qualifies,
+    else (when wallet_id is empty) the owner's oldest such wallet.
+    """
+    init_wallet_keys_table(conn)
+    query = ("SELECT wallets.id FROM wallets JOIN wallet_keys ON wallet_keys.wallet_id = wallets.id "
+             "WHERE LOWER(wallets.owner) = LOWER(?)")
+    params = [owner]
+    if wallet_id:
+        query += " AND wallets.id = ?"
+        params.append(wallet_id)
+    row = conn.execute(query + " ORDER BY wallet_keys.created_at LIMIT 1", params).fetchone()
+    return row[0] if row else None
 
 
 def get_wallet_private_key(db_path: str, wallet_id: str) -> Optional[str]:

@@ -87,12 +87,13 @@ These are known gaps, listed so you can make an informed choice:
 
 - **Fixed: peers can no longer forge balances or spend your wallet.** Wallets are Ed25519 key pairs, and the private key never leaves your node. Every node checks a synced transaction's signature, hash and sender balance before accepting it. Grants and rewards from peers must be signed by the treasury key. Balances are computed only from validated transactions, never from a peer's balance column. See [docs/signed-ledger.md](docs/signed-ledger.md).
 - **No consensus yet.** If one wallet signs two transfers that together overspend it, each node accepts whichever one arrives first. Nodes can disagree until there's a consensus or ordering protocol.
-- **Network-wide credit needs the treasury key.** Grants and rewards issued by nodes without the key work on that node only. A treasury public key must be pinned in `config.py` before any mint is accepted from peers. Wallets created before this change can't sign, so their transfers stay on their home node.
+- **Fixed: forged rows can't redirect your rewards.** Each seed is signed by its reward wallet, and its ID is tied to that wallet. Rewards go only to the wallet that signed the seed, never to a wallet picked by owner name.
+- **Network-wide credit needs the treasury key.** Only grants and rewards signed by the pinned treasury key (`config.PINNED_TREASURY_PUBKEYS`) are accepted from peers. Those issued by other nodes work on that node only. Wallets created before this change can't sign, so their transfers stay on their home node. Seeds uploaded before this change earn no rewards.
 - **Rewards can be farmed (not Sybil-resistant).** Play and transfer rewards can be gamed with multiple accounts. Signing proves who issued a reward, not that a real person earned it.
 - **Huge premine.** The treasury holds the entire supply, so issuance is centrally controlled.
 - **No content moderation tools** yet for reporting or removing illegal or infringing uploads.
 - **Wallet keys are stored unencrypted** in the node's database. Keep your data directory private and backed up.
-- **Other synced content isn't signed yet.** Seeds, likes, comments and wallet owner labels from peers are still taken on trust.
+- **Usernames aren't signed yet.** Someone can post content, likes or comments under another person's name. They can't collect that person's rewards, but they can impersonate them.
 - **API tokens are passed as form/query parameters.** Run the node on localhost, or behind HTTPS if it's exposed.
 - **The Unreal front end isn't in this repository.** Right now you use the node through its API.
 

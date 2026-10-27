@@ -7,6 +7,9 @@ Shared by the TCP sync engine (sync_engine.py) and the tracker relay
 - Only whitelisted columns are sent or accepted (security.sanitize_incoming_rows).
 - `transactions` rows go through blockchain.ingest_synced_transactions: they must
   be signed and funded, and get a new local block. Only signed rows are sent.
+- `seeds` rows signed by their reward wallet must verify, or they are dropped.
+  Unsigned (legacy) seeds are still shared as content, but with no reward
+  wallet, so they earn nothing on this node.
 - `wallets` rows are accepted as directory entries only. Balances are never taken
   from a peer; they are always computed from validated transactions.
 - `blocks`, `user_grants` and `podt_proofs` are not synced. They are derived on
@@ -18,6 +21,7 @@ import sqlite3
 from typing import Dict, List
 
 import blockchain
+import signing
 from config import DB_PATH
 from security import PUBLIC_USER_COLUMNS, sanitize_incoming_rows
 
@@ -28,7 +32,7 @@ SYNCABLE_TABLES = ["users", "seeds", "transactions", "likes", "comments", "bookm
 # Columns for each table (sent to peers, and the only ones accepted from them)
 TABLE_COLUMNS = {
     "users": PUBLIC_USER_COLUMNS,  # never share passwords, email, phone or names
-    "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet",
+    "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet, signature",
     "transactions": "id, sender, recipient, amount, reason, timestamp, amount_cents, tx_hash, tx_type, signature, signer",
     "likes": "id, seed_id, owner, created_at",
     "comments": "id, seed_id, owner, text, created_at",
@@ -90,6 +94,22 @@ def ingest_rows(table: str, columns: List[str], rows: list, db_path: str = DB_PA
         result.update(inserted=counts[blockchain.ACCEPTED], duplicates=counts[blockchain.DUPLICATE],
                       pending=counts[blockchain.PENDING], rejected=counts[blockchain.REJECTED])
         return result
+
+    if table == "seeds":
+        kept = []
+        for row in rows:
+            seed = dict(zip(columns, row))
+            if seed.get("signature"):
+                if signing.verify_seed(seed):
+                    kept.append(row)
+            elif "reward_wallet" in columns:
+                row = list(row)
+                row[columns.index("reward_wallet")] = ""
+                kept.append(row)
+            else:
+                kept.append(row)
+        result["rejected"] += len(rows) - len(kept)
+        rows = kept
 
     if table == "wallets":
         id_idx = columns.index("id") if "id" in columns else None

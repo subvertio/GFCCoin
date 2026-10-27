@@ -41,6 +41,7 @@ import signing  # noqa: E402
 from sync_ingest import TABLE_COLUMNS, ingest_rows, select_rows_since  # noqa: E402
 
 TX_COLUMNS = [c.strip() for c in TABLE_COLUMNS["transactions"].split(",")]
+SEED_COLUMNS = [c.strip() for c in TABLE_COLUMNS["seeds"].split(",")]
 
 
 def new_node(name: str) -> str:
@@ -165,6 +166,36 @@ class RestTransferTests(unittest.TestCase):
             "reason": "", "api_token": dan_token})
         self.assertEqual(not_owner.status_code, 403)
         self.assertEqual(self.balance(carol["id"]), 10_000)
+
+    def upload(self, token, **form):
+        files = {"file": ("model.glb", b"x" * 200_000, "model/gltf-binary")}  # earns 1 cent per play
+        return self.client.post("/seeds/upload", data={"api_token": token, **form}, files=files)
+
+    def test_seed_upload_signed_and_play_pays_signer(self):
+        fay_token, fay = self.register("fay")
+        gus_token, gus = self.register("gus")
+        r = self.upload(fay_token, title="ship")
+        self.assertEqual(r.status_code, 200, r.text)
+        seed = r.json()
+        self.assertTrue(seed["rewards_enabled"])
+        self.assertEqual(seed["reward_wallet"], fay["id"])
+
+        # Can't route rewards to someone else's wallet
+        self.assertEqual(self.upload(fay_token, reward_wallet=gus["id"]).status_code, 400)
+        # Anonymous uploads are shared but earn nothing
+        self.assertFalse(self.upload("").json()["rewards_enabled"])
+
+        before = self.balance(fay["id"])
+        self_play = self.client.post(f"/seeds/{seed['id']}/played", data={"api_token": fay_token}).json()
+        self.assertFalse(self_play["credited"])
+        play = self.client.post(f"/seeds/{seed['id']}/played", data={"api_token": gus_token}).json()
+        self.assertTrue(play["credited"], play)
+        self.assertEqual(self.balance(fay["id"]), before + round(play["amount"] * 100))
+        conn = sqlite3.connect(main.DB_PATH)
+        paid = conn.execute("SELECT recipient FROM transactions WHERE tx_type = 'REWARD' "
+                            "ORDER BY timestamp DESC LIMIT 1").fetchone()[0]
+        conn.close()
+        self.assertEqual(paid, fay["id"])
 
     def test_local_only_grant_is_not_shared(self):
         # This node has no treasury key, so its grants are unsigned and never sent to peers
@@ -327,6 +358,78 @@ class SyncValidationTests(unittest.TestCase):
             payload = json.dumps([list(r) for r in select_rows_since(conn, table, "", 500)])
             self.assertNotIn(self.alice_priv, payload, table)
         conn.close()
+
+
+def make_seed(priv_hex, wallet, owner="alice", **overrides) -> dict:
+    """A seed row as a peer would send it, signed by `priv_hex` (None = unsigned)."""
+    filename = f"{uuid.uuid4().hex[:12]}_model.glb"
+    seed = {c: "" for c in SEED_COLUMNS}
+    seed.update(id=signing.seed_id_for(wallet, filename), owner=owner, title="t", filename=filename,
+                content_type="3d", file_size=4096, gfc_earned=0, likes=0, comments=0, views=0,
+                created_at=datetime.now(timezone.utc).isoformat(), reward_wallet=wallet)
+    seed.update(overrides)
+    seed["signature"] = signing.sign_seed(priv_hex, seed) if priv_hex else ""
+    return seed
+
+
+def seed_rows(*seeds) -> list:
+    return [[s[c] for c in SEED_COLUMNS] for s in seeds]
+
+
+class SeedRewardTests(unittest.TestCase):
+    """Rewards go only to the wallet that signed the seed."""
+
+    def setUp(self):
+        tag = uuid.uuid4().hex[:8]
+        self.home = new_node(f"seedhome_{tag}")
+        self.peer = new_node(f"seedpeer_{tag}")
+        self.alice = new_wallet(self.home, "alice")
+        self.alice_priv = signing.get_wallet_private_key(self.home, self.alice)
+        attacker = Ed25519PrivateKey.generate()
+        self.attacker_priv = attacker.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()).hex()
+        self.attacker = signing.public_key_of(self.attacker_priv)
+
+    def reward_wallet(self, db, seed_id):
+        conn = sqlite3.connect(db)
+        try:
+            return signing.seed_reward_wallet(conn, seed_id)
+        finally:
+            conn.close()
+
+    def test_signed_seed_syncs_and_pays_its_signer(self):
+        seed = make_seed(self.alice_priv, self.alice)
+        result = ingest_rows("seeds", SEED_COLUMNS, seed_rows(seed), db_path=self.peer)
+        self.assertEqual(result["inserted"], 1, result)
+        self.assertEqual(self.reward_wallet(self.peer, seed["id"]), self.alice)
+
+    def test_forged_seeds_rejected(self):
+        real = make_seed(self.alice_priv, self.alice)
+        # Same ID, re-signed with the attacker's wallet as reward wallet
+        resigned = dict(real, reward_wallet=self.attacker)
+        resigned["signature"] = signing.sign_seed(self.attacker_priv, resigned)
+        # Reward wallet swapped without re-signing
+        swapped = dict(real, reward_wallet=self.attacker)
+        # Signed by the attacker but claiming Alice's wallet
+        claimed = make_seed(self.attacker_priv, self.alice)
+        result = ingest_rows("seeds", SEED_COLUMNS, seed_rows(resigned, swapped, claimed), db_path=self.peer)
+        self.assertEqual(result["rejected"], 3, result)
+        self.assertEqual(result["inserted"], 0, result)
+        # The real seed still arrives afterwards and pays Alice
+        ingest_rows("seeds", SEED_COLUMNS, seed_rows(real), db_path=self.peer)
+        self.assertEqual(self.reward_wallet(self.peer, real["id"]), self.alice)
+
+    def test_unsigned_seed_and_owner_label_pay_nobody(self):
+        # A peer claims Alice's name for its own wallet, and sends an unsigned seed for "alice"
+        ingest_rows("wallets", ["id", "name", "owner", "created_at"],
+                    [[self.attacker, "x", "alice", "2026-01-01T00:00:00"]], db_path=self.peer)
+        legacy = make_seed(None, self.attacker, id=uuid.uuid4().hex[:12])
+        result = ingest_rows("seeds", SEED_COLUMNS, seed_rows(legacy), db_path=self.peer)
+        self.assertEqual(result["inserted"], 1, result)
+        conn = sqlite3.connect(self.peer)
+        stored = conn.execute("SELECT reward_wallet FROM seeds WHERE id = ?", (legacy["id"],)).fetchone()[0]
+        conn.close()
+        self.assertEqual(stored, "")
+        self.assertIsNone(self.reward_wallet(self.peer, legacy["id"]))
 
 
 if __name__ == "__main__":

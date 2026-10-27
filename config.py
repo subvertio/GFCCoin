@@ -29,9 +29,14 @@ PODT_DB_PATH = str(DATA_DIR / "podt.db")  # Legacy PoDT DB (no longer used — P
 TREASURY_WALLET_ID = "GFC-TREASURY-GENESIS-001"
 
 # Treasury public keys (Ed25519, hex). Synced GRANT/REWARD transactions are only
-# accepted when signed by one of these. Generate a key with `python signing.py`
-# and pin its public key here before release. Override with GFC_TREASURY_PUBKEYS
-# (comma-separated) for test networks.
-TREASURY_PUBKEYS = tuple(
-    k.strip() for k in os.environ.get("GFC_TREASURY_PUBKEYS", "").split(",") if k.strip()
+# accepted when signed by one of these. The matching private key is held by the
+# network operator only (GFC_TREASURY_KEY_FILE, default DATA_DIR/treasury_key.hex).
+# To rotate: generate a new key with `python signing.py` and add its public key here.
+# GFC_TREASURY_PUBKEYS (comma-separated) replaces this list, for test networks.
+PINNED_TREASURY_PUBKEYS = (
+    "b615b7fa89de96fa29fe83012959c6cbf5374d6d4f9d4c86a859bfedcdb05d89",
 )
+_env_treasury = os.environ.get("GFC_TREASURY_PUBKEYS", "")
+TREASURY_PUBKEYS = tuple(
+    k.strip() for k in _env_treasury.split(",") if k.strip()
+) if _env_treasury.strip() else PINNED_TREASURY_PUBKEYS

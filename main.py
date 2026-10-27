@@ -160,6 +160,11 @@ def init_db():
         conn.execute("ALTER TABLE seeds ADD COLUMN reward_wallet TEXT DEFAULT ''")
     except Exception:
         pass  # column already exists
+    try:
+        # Signature by reward_wallet over the seed's identity (see signing.sign_seed)
+        conn.execute("ALTER TABLE seeds ADD COLUMN signature TEXT DEFAULT ''")
+    except Exception:
+        pass  # column already exists
 
     init_sessions_table(conn)
     migrate_plaintext_passwords(conn)

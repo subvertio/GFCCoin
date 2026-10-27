@@ -25,6 +25,7 @@ import logging
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
 from pathlib import Path
 
+import signing
 from sync_ingest import SYNCABLE_TABLES, TABLE_COLUMNS, TABLE_TIMESTAMP_COL, ingest_rows, select_rows_since
 from config import DB_PATH, DATA_DIR, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR
 
@@ -676,45 +677,14 @@ class SyncEngine:
             import hashlib as _hashlib
             from blockchain import process_podt_reward
 
-            # Look up the seed owner and reward wallet
+            # Pay only the wallet that signed the seed. Owner names and wallet
+            # rows come from peers and can't be trusted to pick a wallet.
             conn = sqlite3.connect(DB_PATH)
-            row = conn.execute(
-                "SELECT owner, reward_wallet FROM seeds WHERE id = ?", (seed_id,)
-            ).fetchone()
-
-            if not row:
-                conn.close()
-                return
-
-            seed_owner = row[0]
-            reward_wallet = row[1] if row[1] else ""
-
-            # Determine which wallet gets the reward
-            seeder_wallet = None
-
-            # Priority 1: Use the seed's designated reward_wallet if set
-            if reward_wallet:
-                wallet_exists = conn.execute(
-                    "SELECT id FROM wallets WHERE id = ?", (reward_wallet,)
-                ).fetchone()
-                if wallet_exists:
-                    seeder_wallet = reward_wallet
-                else:
-                    logger.warning(f"PoDT: Reward wallet '{reward_wallet[:16]}...' not found, "
-                                   f"falling back to owner lookup")
-
-            # Priority 2: Fall back to owner's first wallet
-            if not seeder_wallet:
-                wallet_row = conn.execute(
-                    "SELECT id FROM wallets WHERE owner = ? LIMIT 1", (seed_owner,)
-                ).fetchone()
-                if not wallet_row:
-                    conn.close()
-                    logger.debug(f"PoDT: No wallet found for seed owner '{seed_owner}', skipping reward")
-                    return
-                seeder_wallet = wallet_row[0]
-
+            seeder_wallet = signing.seed_reward_wallet(conn, seed_id)
             conn.close()
+            if not seeder_wallet:
+                logger.debug(f"PoDT: seed {seed_id} has no signed reward wallet, skipping reward")
+                return
 
             # Compute proof ID from seed_id + filename + file_size
             proof_string = f"{seed_id}:{filename}:{file_size}"
