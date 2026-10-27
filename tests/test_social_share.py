@@ -128,6 +128,48 @@ class SharePageTests(unittest.TestCase):
         # 3D seeds get a poster image only, never the model file.
         self.assertNotIn("/originals/", r.text)
 
+    ANDROID_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36"
+    DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"
+
+    def open_link(self, sid, ua, **env):
+        saved = {k: os.environ.get(k) for k in ("GFC_ANDROID_PACKAGE", "GFC_ANDROID_FALLBACK_URL")}
+        try:
+            for k in saved:
+                os.environ.pop(k, None)
+            os.environ.update(env)
+            r = self.client.get(f"/p/{sid}", headers={"User-Agent": ua})
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+        self.assertIn("User-Agent", r.headers.get("vary", ""))
+        a = [h for h in r.text.split('<a href="')[1:] if h.split('"', 1)[1].startswith(">Open in GFC")]
+        return a[0].split('"', 1)[0].replace("&amp;", "&")
+
+    def test_android_gets_intent_link_to_the_app(self):
+        sid = self.add_seed()
+        link = self.open_link(sid, self.ANDROID_UA, GFC_ANDROID_PACKAGE="tech.galacticfederation.gfc")
+        self.assertTrue(link.startswith(f"intent://seed/{sid}#Intent;scheme=gfc;"), link)
+        self.assertIn("package=tech.galacticfederation.gfc;", link)
+        # Not installed yet: stays on this share page (URL-encoded) until a store URL is set
+        self.assertIn("S.browser_fallback_url=" + f"{BASE}/p/{sid}".replace(":", "%3A").replace("/", "%2F"), link)
+        self.assertTrue(link.endswith(";end"))
+        store = "https://play.google.com/store/apps/details?id=tech.galacticfederation.gfc"
+        link = self.open_link(sid, self.ANDROID_UA, GFC_ANDROID_PACKAGE="tech.galacticfederation.gfc",
+                              GFC_ANDROID_FALLBACK_URL=store)
+        self.assertIn("S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2F", link)
+
+    def test_other_devices_and_unconfigured_package_get_plain_deep_link(self):
+        sid = self.add_seed()
+        self.assertEqual(self.open_link(sid, self.DESKTOP_UA, GFC_ANDROID_PACKAGE="tech.galacticfederation.gfc"),
+                         f"gfc://seed/{sid}")
+        self.assertEqual(self.open_link(sid, self.ANDROID_UA), f"gfc://seed/{sid}")
+
+    def test_intent_link_escapes_seed_id(self):
+        link = app_share.android_open_link('a"b<c', "https://x.example/p/1")
+        self.assertIn("seed/a%22b%3Cc#Intent", link)
+
     def test_media_preview_by_type(self):
         img = self.client.get(f"/p/{self.add_seed(content_type='image', filename='pic.png')}").text
         self.assertIn('<img class="media" src="/originals/pic.png"', img)

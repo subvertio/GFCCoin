@@ -16,14 +16,20 @@ Environment:
 - GFC_APP_LINK_BASE         deep link prefix for "Open in GFC" (default gfc://seed)
 - GFC_ANDROID_PACKAGE       Android package name for assetlinks.json (default: none)
 - GFC_ANDROID_CERT_SHA256   comma-separated SHA-256 signing cert fingerprints (default: none)
+- GFC_ANDROID_FALLBACK_URL  where Android goes from "Open in GFC" when the app isn't installed
+                            (default: stay on the share page; set to the Play Store listing once live)
+
+On Android, "Open in GFC" is an intent:// link (when GFC_ANDROID_PACKAGE is set). X and other
+apps often open links in an in-app browser that ignores App Links and custom schemes; Android
+intent links still launch the app there, or fall back to GFC_ANDROID_FALLBACK_URL.
 """
 import html
 import os
 import secrets
 import sqlite3
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 import signing
@@ -45,6 +51,26 @@ def public_base_url() -> str:
 
 def app_link_base() -> str:
     return (os.environ.get("GFC_APP_LINK_BASE") or DEFAULT_APP_LINK_BASE).rstrip("/")
+
+
+def android_open_link(seed_id: str, page_url: str) -> str:
+    """
+    Android intent:// link that opens the GFC app at this seed, e.g. for gfc://seed/<id>:
+    intent://seed/<id>#Intent;scheme=gfc;package=<pkg>;S.browser_fallback_url=<url>;end
+    """
+    target = urlsplit(app_link_base())
+    package = os.environ.get("GFC_ANDROID_PACKAGE", "").strip()
+    fallback = os.environ.get("GFC_ANDROID_FALLBACK_URL", "").strip() or page_url
+    path = f"{target.netloc}{target.path}/{quote(seed_id, safe='')}"
+    return (f"intent://{path}#Intent;scheme={target.scheme};package={package};"
+            f"S.browser_fallback_url={quote(fallback, safe='')};end")
+
+
+def open_in_app_link(seed_id: str, page_url: str, user_agent: str) -> str:
+    """intent:// on Android when the app's package is configured, else the plain deep link."""
+    if "android" in (user_agent or "").lower() and os.environ.get("GFC_ANDROID_PACKAGE", "").strip():
+        return android_open_link(seed_id, page_url)
+    return f"{app_link_base()}/{quote(seed_id, safe='')}"
 
 
 def share_url(seed_id: str) -> str:
@@ -100,7 +126,7 @@ def share_info(seed_id: str):
 
 
 @router.get("/p/{seed_id}", response_class=HTMLResponse)
-def share_page(seed_id: str):
+def share_page(seed_id: str, request: Request):
     seed = load_seed(seed_id)
     e = lambda s: html.escape(s, quote=True)  # noqa: E731
     base = public_base_url()
@@ -110,7 +136,7 @@ def share_page(seed_id: str):
     og_description = description if len(description) <= DESCRIPTION_LIMIT else description[:DESCRIPTION_LIMIT - 1] + "…"
     thumb_path = f"/thumbs/{quote(seed['thumb_filename'], safe='')}" if seed["thumb_filename"] else ""
     media_path = f"/originals/{quote(seed['filename'], safe='')}" if seed["filename"] else ""
-    app_link = f"{app_link_base()}/{quote(seed['id'], safe='')}"
+    app_link = open_in_app_link(seed["id"], url, request.headers.get("user-agent", ""))
     intent = x_intent_url(share_text(seed), url)
 
     ctype = seed["content_type"]
@@ -186,6 +212,7 @@ h1{{font-size:1.4rem;margin:16px 0 4px}}
         "Content-Security-Policy": csp,
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Vary": "User-Agent",  # "Open in GFC" differs on Android
     })
 
 
