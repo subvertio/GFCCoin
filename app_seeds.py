@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
+import reposts
 import signing
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH, SEEDS_ORIG_DIR as ORIG_DIR, SEEDS_THUMB_DIR as THUMB_DIR
@@ -72,6 +73,18 @@ def seed_row(sid: str, orig_file: str) -> Dict[str, Any]:
         "created_at":   "",
     }
 
+def _repost_map() -> Dict[str, Any]:
+    """{seed_id: repost_of} for reposts on this node (empty if the tables aren't there)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            return reposts.repost_map(conn)
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+
 def list_rows() -> List[Dict[str, Any]]:
     """List all seeds - pulls from DB first, falls back to filesystem."""
     # Try DB first
@@ -90,6 +103,7 @@ def list_rows() -> List[Dict[str, Any]]:
         conn.close()
         if rows:
             items = []
+            repost_of = _repost_map()
             for r in rows:
                 avatar_filename = r[15] if len(r) > 15 else ""
                 owner_avatar = f"/avatars/{avatar_filename}" if avatar_filename else ""
@@ -103,6 +117,7 @@ def list_rows() -> List[Dict[str, Any]]:
                     "views": r[11], "created_at": r[12], "owner": r[13],
                     "reward_wallet": r[14] or "",
                     "owner_avatar": owner_avatar,
+                    "repost_of": repost_of.get(r[0]),
                 })
             return items
     except Exception:
@@ -145,6 +160,10 @@ async def seeds_upload(
                         your oldest one). The wallet signs the seed, and rewards are
                         only ever paid to it. Without a signing wallet the seed is
                         still shared but earns no rewards.
+
+    If the file matches content that was notarised earlier (see reposts.py), the
+    seed is still shared but becomes a repost: `repost_of` names the original, and
+    all its earnings go to the original creator.
     """
     if not file:
         raise HTTPException(status_code=400, detail="file missing")
@@ -220,6 +239,17 @@ async def seeds_upload(
         # Log but don't fail - file is already saved
         print(f"Warning: failed to insert seed metadata: {ex}")
 
+    # Repost check: a match makes this a repost of the original (credit and earnings go
+    # there); otherwise a treasury node notarises it as an original. See reposts.py.
+    repost_info, repost_credit = None, None
+    try:
+        original = reposts.process_seed(DB_PATH, sid)
+        if original:
+            repost_info = reposts.public_info(original)
+            repost_credit = reposts.maybe_credit(DB_PATH, owner, sid, original)
+    except Exception as ex:
+        print(f"Warning: repost check failed for seed {sid}: {ex}")
+
     return {
         "ok": True,
         "id": sid,
@@ -235,6 +265,8 @@ async def seeds_upload(
         "created_at": created_at,
         "reward_wallet": reward_wallet,
         "rewards_enabled": bool(signature),
+        "repost_of": repost_info,
+        "repost_credit_gfc": repost_credit["amount"] if repost_credit else 0.0,
     }
 
 @router.get("/seeds/mine")
@@ -262,6 +294,7 @@ def my_seeds(caller: Caller = Depends(caller_from_query)):
         return {"items": []}
 
     items = []
+    repost_of = _repost_map()
     for r in rows:
         avatar_filename = r[14] if len(r) > 14 else ""
         owner_avatar = f"/avatars/{avatar_filename}" if avatar_filename else ""
@@ -275,6 +308,7 @@ def my_seeds(caller: Caller = Depends(caller_from_query)):
             "views": r[11], "owner": owner, "created_at": r[12],
             "reward_wallet": r[13] or "",
             "owner_avatar": owner_avatar,
+            "repost_of": repost_of.get(r[0]),
         })
     return {"items": items}
 
@@ -313,6 +347,7 @@ def get_seed(sid: str):
                 "views": row[11], "created_at": row[12], "owner": row[13],
                 "reward_wallet": row[14] or "",
                 "owner_avatar": owner_avatar,
+                "repost_of": _repost_map().get(row[0]),
             }
     except Exception:
         pass

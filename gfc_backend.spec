@@ -45,6 +45,9 @@ a = Analysis(
         'security',
         'signing',
         'sync_ingest',
+        'fingerprint',
+        'reposts',
+        'PIL.Image',
         # Dependencies
         'cryptography.hazmat.primitives.asymmetric.ed25519',
         'multipart',

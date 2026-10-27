@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Form, Query, Depends
 
 import echohunt
 import referrals
+import reposts
 import signing
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH
@@ -269,7 +270,8 @@ def get_bookmarks(caller: Caller = Depends(caller_from_query)):
 
 @router.post("/seeds/{seed_id}/played")
 async def record_played(seed_id: str, caller: Caller = Depends(caller_from_form)):
-    """Award PoDT credits to the seed owner when another user plays the media.
+    """Award PoDT credits to the seed owner when another user plays the media
+    (to the original creator when the seed is a repost).
     One payout per (seed, requesting_user) pair — duplicates are rejected by proof_id.
     The viewer must be phone-verified with an account at least 24h old, and pays
     a given creator wallet at most once per day. With GFC_REQUIRE_ECHOHUNT=1 the
@@ -303,11 +305,16 @@ async def record_played(seed_id: str, caller: Caller = Depends(caller_from_form)
             conn.close()
             return {"ok": True, "credited": False, "reason": "file too small"}
 
-        # Pay only the wallet that signed the seed (never a wallet picked by owner name)
-        seeder_wallet = signing.seed_reward_wallet(conn, seed_id)
+        # Pay only the wallet that signed the seed (never a wallet picked by owner name).
+        # A repost pays the original's signed wallet instead (see reposts.py).
+        seeder_wallet = reposts.reward_wallet_for(conn, seed_id)
         if not seeder_wallet:
             conn.close()
             return {"ok": True, "credited": False, "reason": "seed has no signed reward wallet"}
+        original = reposts.repost_of(conn, seed_id)
+        if original and requester.lower() == (original["original_owner"] or "").lower():
+            conn.close()
+            return {"ok": True, "credited": False, "reason": "self-play"}
 
         # No self-crediting through a wallet the requester owns on this node
         if signing.local_wallet_for(conn, requester, seeder_wallet):

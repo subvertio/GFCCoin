@@ -58,7 +58,7 @@ class ReferralTests(unittest.TestCase):
     def play_someone_elses_seed(self, viewer_token):
         """A qualifying play: a signed seed from a third creator."""
         name, token, wallet, _ = self.register()
-        files = {"file": ("model.glb", b"x" * 200_000, "model/gltf-binary")}
+        files = {"file": ("model.glb", os.urandom(200_000), "model/gltf-binary")}
         seed = self.client.post("/seeds/upload", data={"api_token": token}, files=files).json()
         return self.client.post(f"/seeds/{seed['id']}/played", data={"api_token": viewer_token}).json()
 
@@ -156,7 +156,7 @@ class ReferralTests(unittest.TestCase):
 
     def test_share_page_passes_ref_to_app(self):
         _, token, _, _ = self.register()
-        files = {"file": ("pic.png", b"x" * 5000, "image/png")}
+        files = {"file": ("pic.png", os.urandom(5000), "image/png")}
         seed = self.client.post("/seeds/upload", data={"api_token": token}, files=files).json()
         r = self.client.get(f"/p/{seed['id']}", params={"ref": "alice"})
         self.assertIn(f"gfc://seed/{seed['id']}?ref=alice", r.text)

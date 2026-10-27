@@ -30,6 +30,7 @@ from app_tokens import router as tokens_router
 import blockchain
 import keystore
 import referrals
+import reposts
 import signing
 from security import (
     hash_password, verify_password, migrate_plaintext_passwords,
@@ -175,6 +176,7 @@ def init_db():
 
     init_sessions_table(conn)
     keystore.init_keystore(conn)
+    reposts.init_repost_tables(conn)
     migrate_plaintext_passwords(conn)
 
     conn.commit()
@@ -626,12 +628,25 @@ async def startup_event():
     """Start P2P services when the server starts."""
     # Ensure firewall rules exist for P2P ports (best-effort, requires admin)
     _ensure_firewall_rules()
+    # Fingerprint seeds stored before the repost check existed (a treasury node also
+    # notarises them, oldest first). In the background: images and models take a while.
+    import threading
+    threading.Thread(target=_backfill_fingerprints, daemon=True).start()
     try:
         await start_p2p()
     except Exception as e:
         print(f"[P2P] ERROR: Failed to start P2P services: {e}")
         import traceback
         traceback.print_exc()
+
+
+def _backfill_fingerprints():
+    try:
+        done = reposts.backfill(DB_PATH)
+        if done:
+            print(f"[Reposts] Fingerprinted {done} existing seeds")
+    except Exception as e:
+        print(f"[Reposts] Backfill failed: {e}")
 
 
 def _ensure_firewall_rules():

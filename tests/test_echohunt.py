@@ -495,7 +495,7 @@ class RewardGatingTests(EchoHuntApiTestCase):
         _, ctoken = self.register()
         self.verify(ctoken)
         self.wallet(ctoken)
-        files = {"file": ("model.glb", b"x" * 200_000, "model/gltf-binary")}
+        files = {"file": ("model.glb", os.urandom(200_000), "model/gltf-binary")}
         r = self.client.post("/seeds/upload", data={"api_token": ctoken, "title": "t"}, files=files)
         self.assertEqual(r.status_code, 200, r.text)
         viewer, vtoken = self.register()

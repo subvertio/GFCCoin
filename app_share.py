@@ -12,6 +12,9 @@ node on the public domain serves these pages for every seed it has synced.
 Any page accepts ?ref=<username>; it's passed to the app's deep link so the
 invite survives install-and-open, and the app sends it at sign-up.
 
+A repost (reposts.py) is labelled "Repost of @original", linking to the original's
+page, and its share text credits the original creator.
+
 Seed rows arrive from peers and are untrusted: every field is HTML-escaped and
 every path segment is URL-quoted. The pages run no script.
 
@@ -37,6 +40,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+import reposts
 import signing
 from config import DB_PATH
 from security import PUBLIC_USER_COLUMNS
@@ -140,6 +144,7 @@ def load_seed(seed_id: str) -> dict:
         public_user = dict(zip([c.strip() for c in PUBLIC_USER_COLUMNS.split(",")], user)) if user else {}
         seed["owner_avatar"] = public_user.get("avatar_filename") or ""
         seed["reward_wallet"] = signing.seed_reward_wallet(conn, seed_id) or ""
+        seed["repost_of"] = reposts.public_info(reposts.repost_of(conn, seed_id))
         return seed
     finally:
         conn.close()
@@ -147,6 +152,8 @@ def load_seed(seed_id: str) -> dict:
 
 def share_text(seed: dict) -> str:
     title = seed["title"] or "a seed"
+    if seed.get("repost_of"):  # credit the original creator, not the reposter
+        return f"{title} by {seed['repost_of']['owner']} on GFC"
     return f"{title} by {seed['owner']} on GFC" if seed["owner"] else f"{title} on GFC"
 
 
@@ -158,7 +165,8 @@ def share_info(seed_id: str):
     seed = load_seed(seed_id)
     url, text = share_url(seed["id"]), share_text(seed)
     return {"url": url, "text": text, "x_intent_url": x_intent_url(text, url),
-            "app_link": f"{app_link_base()}/{quote(seed['id'], safe='')}"}
+            "app_link": f"{app_link_base()}/{quote(seed['id'], safe='')}",
+            "repost_of": seed["repost_of"]}
 
 
 @router.get("/p/{seed_id}", response_class=HTMLResponse)
@@ -196,7 +204,12 @@ def share_page(seed_id: str, request: Request):
         image_tags = (f'<meta property="og:image" content="{e(image)}">\n'
                       f'<meta name="twitter:image" content="{e(image)}">\n')
     badge = ('<p class="badge" title="Signed by its reward wallet">&#10003; Rewards verified</p>'
-             if seed["reward_wallet"] else "")
+             if seed["reward_wallet"] and not seed["repost_of"] else "")
+    repost = ""
+    if seed["repost_of"]:
+        original = seed["repost_of"]
+        repost = (f'<p class="repost">Repost of <a href="/p/{e(quote(original["seed_id"], safe=""))}">'
+                  f'@{e(original["owner"])}</a>. Earnings go to the original creator.</p>')
     avatar = (f'<img class="avatar" src="/avatars/{e(quote(seed["owner_avatar"], safe=""))}" alt="">'
               if seed["owner_avatar"] else "")
 
@@ -226,6 +239,8 @@ audio{{width:100%;margin-top:8px}}
 h1{{font-size:1.4rem;margin:16px 0 4px}}
 .creator{{display:flex;align-items:center;gap:8px;color:#b8bccc}}
 .avatar{{width:28px;height:28px;border-radius:50%}}
+.repost{{padding:8px 12px;border-radius:8px;background:#2a2340;color:#d6ccff}}
+.repost a{{color:#fff}}
 .badge{{display:inline-block;padding:2px 8px;border-radius:12px;background:#1d4d2f;color:#9ff0b8;font-size:.85rem}}
 .desc{{white-space:pre-wrap;line-height:1.5}}
 .actions a{{display:inline-block;margin:8px 8px 0 0;padding:10px 16px;border-radius:8px;background:#3b4cca;color:#fff;text-decoration:none}}
@@ -236,7 +251,7 @@ h1{{font-size:1.4rem;margin:16px 0 4px}}
 {media}
 <h1>{e(title)}</h1>
 <p class="creator">{avatar}<span>by {e(seed["owner"])}</span></p>
-{badge}
+{repost}{badge}
 <p class="desc">{e(seed["description"])}</p>
 <p class="actions"><a href="{e(app_link)}">Open in GFC</a><a href="{e(intent)}" rel="noopener" target="_blank">Post to X</a></p>
 </main>

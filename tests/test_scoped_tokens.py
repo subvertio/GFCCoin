@@ -64,7 +64,7 @@ class TokenTestCase(unittest.TestCase):
             "sender": sender, "recipient": recipient, "amount": amount, "reason": "test"})
 
     def upload(self, token):
-        files = {"file": ("model.glb", b"x" * 1000, "model/gltf-binary")}
+        files = {"file": ("model.glb", os.urandom(1000), "model/gltf-binary")}
         return self.client.post("/seeds/upload", headers=bearer(token), data={"title": "t"}, files=files)
 
 
