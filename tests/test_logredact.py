@@ -48,6 +48,31 @@ class RedactTests(unittest.TestCase):
         self.assertNotIn("4155550100", written)
         self.assertIn("+...00", written)
 
+    def test_uvicorn_access_log_still_formats(self):
+        # uvicorn's AccessFormatter reads client, method, path, version and status from record.args:
+        # the filter must keep that tuple's shape, or every access line becomes a logging error.
+        from uvicorn.logging import AccessFormatter
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False))
+        handler.addFilter(logredact.RedactFilter())
+        access = logging.getLogger("test.uvicorn.access")
+        access.propagate = False
+        access.setLevel(logging.INFO)
+        access.addHandler(handler)
+        errors = io.StringIO()
+        old_raise, logging.raiseExceptions = logging.raiseExceptions, True
+        import sys
+        old_stderr, sys.stderr = sys.stderr, errors
+        try:
+            access.info('%s - "%s %s HTTP/%s" %d', "1.2.3.4:0", "GET", "/verify?c=SecretLinkCode12345", "1.1", 200)
+        finally:
+            sys.stderr = old_stderr
+            logging.raiseExceptions = old_raise
+            access.removeHandler(handler)
+        self.assertEqual(errors.getvalue(), "")  # no "--- Logging error ---"
+        self.assertEqual(stream.getvalue().strip(), '1.2.3.4:0 - "GET /verify?c=<hidden> HTTP/1.1" 200 OK')
+
 
 if __name__ == "__main__":
     unittest.main()
