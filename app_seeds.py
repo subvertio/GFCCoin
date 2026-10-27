@@ -5,11 +5,10 @@ import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
-import keystore
 import signing
-from security import owner_from_token
+from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH, SEEDS_ORIG_DIR as ORIG_DIR, SEEDS_THUMB_DIR as THUMB_DIR
 
 router = APIRouter()
@@ -131,8 +130,8 @@ async def seeds_upload(
     title: str = Form(""),
     description: str = Form(""),
     tags: str = Form(""),
-    api_token: str = Form(""),
-    reward_wallet: str = Form("")
+    reward_wallet: str = Form(""),
+    caller: Caller = Depends(caller_from_form),
 ):
     """
     Accepts a multipart upload:
@@ -141,7 +140,7 @@ async def seeds_upload(
       - title         : optional
       - description   : optional
       - tags          : optional (comma separated)
-      - api_token     : optional (for owner tracking)
+      - Authorization : optional Bearer token with the post scope (or legacy api_token field)
       - reward_wallet : optional (one of your wallets on this node; defaults to
                         your oldest one). The wallet signs the seed, and rewards are
                         only ever paid to it. Without a signing wallet the seed is
@@ -150,7 +149,7 @@ async def seeds_upload(
     if not file:
         raise HTTPException(status_code=400, detail="file missing")
 
-    owner = owner_from_token(api_token)
+    owner = caller.owner("post")
 
     # Pick the signing wallet: must be the owner's, with its key on this node
     conn = sqlite3.connect(DB_PATH)
@@ -163,8 +162,7 @@ async def seeds_upload(
     reward_wallet = signer_wallet or ""
     private_key = None
     if reward_wallet:
-        private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet,
-                                                     keystore.data_key_for_token(api_token))
+        private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet, caller.data_key())
         if not private_key:
             raise HTTPException(status_code=401, detail="log in again to unlock your wallet key")
 
@@ -240,9 +238,9 @@ async def seeds_upload(
     }
 
 @router.get("/seeds/mine")
-def my_seeds(api_token: str = ""):
+def my_seeds(caller: Caller = Depends(caller_from_query)):
     """Return seeds uploaded by the authenticated user."""
-    owner = owner_from_token(api_token)
+    owner = caller.owner("read")
     if owner == "anonymous":
         return {"items": []}
 

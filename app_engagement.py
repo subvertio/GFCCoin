@@ -7,10 +7,10 @@ import sqlite3
 import datetime
 from typing import Optional, Dict, Any, List
 
-from fastapi import APIRouter, HTTPException, Form, Query
+from fastapi import APIRouter, HTTPException, Form, Query, Depends
 
 import signing
-from security import owner_from_token
+from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH
 from blockchain import process_podt_reward, play_reward_block_reason, claim_play_slot, release_play_slot
 
@@ -59,9 +59,8 @@ SEED_SELECT = (
 
 # ---------- rich feed ----------
 
-def get_feed_items(api_token: str = "") -> Dict[str, Any]:
-    """Return all seeds with per-user liked/bookmarked state."""
-    owner = owner_from_token(api_token)
+def get_feed_items(owner: str = "anonymous") -> Dict[str, Any]:
+    """Return all seeds with liked/bookmarked state for `owner`."""
 
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -95,13 +94,11 @@ def get_feed_items(api_token: str = "") -> Dict[str, Any]:
 @router.post("/seeds/{seed_id}/comments")
 async def add_comment(
     seed_id: str,
-    api_token: str = Form(""),
-    text: str = Form("")
+    text: str = Form(""),
+    caller: Caller = Depends(caller_from_form),
 ):
     """Add a comment to a seed."""
-    owner = owner_from_token(api_token)
-    if owner == "anonymous":
-        raise HTTPException(status_code=401, detail="login required")
+    owner = caller.require("post")
     if not text.strip():
         raise HTTPException(status_code=400, detail="comment text required")
 
@@ -164,11 +161,9 @@ def list_comments(seed_id: str, limit: int = 50, offset: int = 0):
 # ---------- likes ----------
 
 @router.post("/seeds/{seed_id}/like")
-async def toggle_like(seed_id: str, api_token: str = Form("")):
+async def toggle_like(seed_id: str, caller: Caller = Depends(caller_from_form)):
     """Toggle like on a seed. If already liked, unlikes."""
-    owner = owner_from_token(api_token)
-    if owner == "anonymous":
-        raise HTTPException(status_code=401, detail="login required")
+    owner = caller.require("post")
 
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -208,11 +203,9 @@ async def toggle_like(seed_id: str, api_token: str = Form("")):
 # ---------- bookmarks ----------
 
 @router.post("/seeds/{seed_id}/bookmark")
-async def toggle_bookmark(seed_id: str, api_token: str = Form("")):
+async def toggle_bookmark(seed_id: str, caller: Caller = Depends(caller_from_form)):
     """Toggle bookmark on a seed."""
-    owner = owner_from_token(api_token)
-    if owner == "anonymous":
-        raise HTTPException(status_code=401, detail="login required")
+    owner = caller.require("post")
 
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -242,9 +235,9 @@ async def toggle_bookmark(seed_id: str, api_token: str = Form("")):
 
 
 @router.get("/bookmarks")
-def get_bookmarks(api_token: str = ""):
+def get_bookmarks(caller: Caller = Depends(caller_from_query)):
     """Get user's bookmarked seeds with full seed data."""
-    owner = owner_from_token(api_token)
+    owner = caller.owner("read")
     if owner == "anonymous":
         return {"items": []}
 
@@ -272,13 +265,13 @@ def get_bookmarks(api_token: str = ""):
 # ---------- playback PoDT credits ----------
 
 @router.post("/seeds/{seed_id}/played")
-async def record_played(seed_id: str, api_token: str = Form("")):
+async def record_played(seed_id: str, caller: Caller = Depends(caller_from_form)):
     """Award PoDT credits to the seed owner when another user plays the media.
     One payout per (seed, requesting_user) pair — duplicates are rejected by proof_id.
     The viewer must be phone-verified with an account at least 24h old, and pays
     a given creator wallet at most once per day.
     """
-    requester = owner_from_token(api_token)
+    requester = caller.owner("post")
     if requester == "anonymous":
         return {"ok": False, "credited": False, "reason": "login required"}
 

@@ -4,23 +4,23 @@ and play rewards. See phone_verify.py for storage and limits.
 """
 import sqlite3
 
-from fastapi import APIRouter, HTTPException, Form, Request
+from fastapi import APIRouter, HTTPException, Form, Request, Depends
 
 import blockchain
 import phone_verify
 import signing
 from config import DB_PATH
-from security import require_user
+from security import Caller, caller_from_form
 
 router = APIRouter()
 
 
 @router.post("/verify/phone/start")
-async def verify_phone_start(request: Request, api_token: str = Form(...), phone: str = Form(...),
-                             turnstile_token: str = Form("")):
+async def verify_phone_start(request: Request, phone: str = Form(...), turnstile_token: str = Form(""),
+                             caller: Caller = Depends(caller_from_form)):
     """Send a one-time code by SMS to `phone` (E.164, e.g. +14155550123).
     Requires a Cloudflare Turnstile token when the node has GFC_TURNSTILE_SECRET set."""
-    username = require_user(api_token)
+    username = caller.require("post")
     try:
         # Bot check first: a failed challenge never counts against limits or costs an SMS
         phone_verify.check_turnstile(turnstile_token, request.client.host if request.client else "")
@@ -30,9 +30,10 @@ async def verify_phone_start(request: Request, api_token: str = Form(...), phone
 
 
 @router.post("/verify/phone/check")
-async def verify_phone_check(api_token: str = Form(...), phone: str = Form(...), code: str = Form(...)):
+async def verify_phone_check(phone: str = Form(...), code: str = Form(...),
+                             caller: Caller = Depends(caller_from_form)):
     """Check the code. On success the account is verified and its first wallet gets the new-user grant."""
-    username = require_user(api_token)
+    username = caller.require("post")
     try:
         result = phone_verify.check_verification(DB_PATH, username, phone, code)
     except phone_verify.FlowError as ex:

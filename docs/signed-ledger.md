@@ -14,7 +14,7 @@ accept the result. This note covers what changed and why.
 - **The private key stays on the wallet's home node**, in the `wallet_keys`
   table. That table isn't in `SYNCABLE_TABLES`, so it's never sent anywhere.
   The REST API is unchanged: `POST /transactions/create` still authenticates
-  with the session token plus wallet ownership (`security.require_user`). The
+  with the session token (which needs the `spend` scope) plus wallet ownership. The
   node then signs the transfer with the wallet's key.
 - **What gets signed:** `SIGNATURE_DOMAIN + tx_hash`. `tx_hash` is the existing
   `compute_tx_hash()` over sender, recipient, amount_cents, timestamp, tx_type
