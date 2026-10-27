@@ -25,7 +25,7 @@ import logging
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
 from pathlib import Path
 
-import signing
+import reposts
 from sync_ingest import SYNCABLE_TABLES, TABLE_COLUMNS, TABLE_TIMESTAMP_COL, ingest_rows, select_rows_since
 from config import DB_PATH, DATA_DIR, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR
 
@@ -667,7 +667,13 @@ class SyncEngine:
             logger.warning(f"Failed to save seed file {filename}: {e}")
             return
 
-        # Award PoDT credits (only for original files, not thumbnails)
+        # Fingerprint it (repost check; a treasury node notarises originals), then
+        # award PoDT credits (only for original files, not thumbnails)
+        if file_type != "thumbnail":
+            try:
+                reposts.process_seed(DB_PATH, seed_id)
+            except Exception as e:
+                logger.warning(f"Repost check failed for seed {seed_id}: {e}")
         if file_type != "thumbnail" and len(file_data) >= 1024:
             self._award_podt_credits(seed_id, filename, len(file_data), pending)
 
@@ -677,10 +683,11 @@ class SyncEngine:
             import hashlib as _hashlib
             from blockchain import process_podt_reward
 
-            # Pay only the wallet that signed the seed. Owner names and wallet
-            # rows come from peers and can't be trusted to pick a wallet.
+            # Pay only the wallet that signed the seed (or, for a repost, the
+            # original's signed wallet from its treasury receipt). Owner names and
+            # wallet rows come from peers and can't be trusted to pick a wallet.
             conn = sqlite3.connect(DB_PATH)
-            seeder_wallet = signing.seed_reward_wallet(conn, seed_id)
+            seeder_wallet = reposts.reward_wallet_for(conn, seed_id)
             conn.close()
             if not seeder_wallet:
                 logger.debug(f"PoDT: seed {seed_id} has no signed reward wallet, skipping reward")

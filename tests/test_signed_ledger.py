@@ -205,7 +205,7 @@ class RestTransferTests(unittest.TestCase):
         self.assertEqual(self.balance(carol["id"]), 10_000)
 
     def upload(self, token, **form):
-        files = {"file": ("model.glb", b"x" * 200_000, "model/gltf-binary")}  # earns 1 cent per play
+        files = {"file": ("model.glb", os.urandom(200_000), "model/gltf-binary")}  # earns 1 cent per play
         return self.client.post("/seeds/upload", data={"api_token": token, **form}, files=files)
 
     def test_seed_upload_signed_and_play_pays_signer(self):

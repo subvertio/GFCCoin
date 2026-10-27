@@ -10,9 +10,12 @@ Shared by the TCP sync engine (sync_engine.py) and the tracker relay
 - `seeds` rows signed by their reward wallet must verify, or they are dropped.
   Unsigned (legacy) seeds are still shared as content, but with no reward
   wallet, so they earn nothing on this node.
+- `originality_receipts` must be signed by a pinned treasury key (reposts.py), or
+  they are dropped. New ones re-check local seeds (the earliest receipt wins).
 - `wallets` rows are accepted as directory entries only. Balances are never taken
   from a peer; they are always computed from validated transactions.
-- `blocks`, `user_grants` and `podt_proofs` are not synced. They are derived on
+- `blocks`, `user_grants`, `podt_proofs` and the local repost tables
+  (seed_fingerprints, reposts, repost_credits) are not synced. They are derived on
   each node from the transactions it accepted or issued itself.
 """
 
@@ -21,13 +24,15 @@ import sqlite3
 from typing import Dict, List
 
 import blockchain
+import reposts
 import signing
 from config import DB_PATH
 from security import PUBLIC_USER_COLUMNS, sanitize_incoming_rows
 
 logger = logging.getLogger("gfc.sync")
 
-SYNCABLE_TABLES = ["users", "seeds", "transactions", "likes", "comments", "bookmarks", "wallets"]
+SYNCABLE_TABLES = ["users", "seeds", "transactions", "likes", "comments", "bookmarks", "wallets",
+                   "originality_receipts"]
 
 # Columns for each table (sent to peers, and the only ones accepted from them)
 TABLE_COLUMNS = {
@@ -38,6 +43,7 @@ TABLE_COLUMNS = {
     "comments": "id, seed_id, owner, text, created_at",
     "bookmarks": "id, seed_id, owner, created_at",
     "wallets": "id, name, owner, created_at",  # no balance columns: balances come from the ledger
+    "originality_receipts": "id, fingerprints, seed_id, owner, reward_wallet, first_seen_at, signer, signature",
 }
 
 # Timestamp column for each table (used for "since" queries)
@@ -49,6 +55,7 @@ TABLE_TIMESTAMP_COL = {
     "comments": "created_at",
     "bookmarks": "created_at",
     "wallets": "created_at",
+    "originality_receipts": "first_seen_at",
 }
 
 # Extra WHERE clause for rows we send. Unsigned transactions (legacy rows, and
@@ -93,6 +100,12 @@ def ingest_rows(table: str, columns: List[str], rows: list, db_path: str = DB_PA
         counts = blockchain.ingest_synced_transactions(db_path, columns, rows)
         result.update(inserted=counts[blockchain.ACCEPTED], duplicates=counts[blockchain.DUPLICATE],
                       pending=counts[blockchain.PENDING], rejected=counts[blockchain.REJECTED])
+        return result
+
+    if table == "originality_receipts":
+        counts = reposts.ingest_receipts(db_path, columns, rows)
+        result.update(inserted=counts["inserted"], duplicates=counts["duplicates"],
+                      rejected=counts["rejected"], new_ids=counts["new_ids"])
         return result
 
     if table == "seeds":

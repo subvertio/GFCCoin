@@ -230,7 +230,7 @@ class PlayRewardTests(PhoneVerifyTestCase):
         return user, token
 
     def upload(self, token):
-        files = {"file": ("model.glb", b"x" * 200_000, "model/gltf-binary")}
+        files = {"file": ("model.glb", os.urandom(200_000), "model/gltf-binary")}
         r = self.client.post("/seeds/upload", data={"api_token": token, "title": "t"}, files=files)
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()["id"]
