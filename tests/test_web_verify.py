@@ -138,6 +138,27 @@ class WebVerifyTests(unittest.TestCase):
                                                          "cf-turnstile-response": "t"})
         self.assertIn("expired", r.text)
 
+    def test_refused_check_says_why(self):
+        # The widget can show "Success!" and Cloudflare still refuse the token (an expired token, or a
+        # site key and secret from different widgets): the page shouldn't tell them to do the check
+        os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_PASS_SECRET
+        os.environ["GFC_TURNSTILE_SITEKEY"] = "1x00000000000000000000AA"
+        _, token = self.register(wallet=False)
+        code = self.link_code(token)
+        for codes, message in ((["invalid-input-response"], "go through"),  # the page escapes apostrophes
+                               (["timeout-or-duplicate"], "expired"),
+                               (["invalid-input-secret"], "working on this node")):
+            phone_verify.set_turnstile_client(httpx.Client(transport=httpx.MockTransport(
+                lambda request, c=codes: httpx.Response(200, json={"success": False, "error-codes": c}))))
+            phone = unique_phone()
+            with self.subTest(codes=codes):
+                r = self.client.post("/verify/web/start", data={"c": code, "phone": phone,
+                                                                 "cf-turnstile-response": "XXXX.DUMMY"})
+                self.assertIn(message, r.text)
+                self.assertNotIn("complete the check", r.text)
+                self.assertIn('class="cf-turnstile"', r.text)  # a fresh widget to try again
+                self.assertNotIn(phone, FAKE_SMS.sent)
+
     def test_link_needs_a_post_token(self):
         self.assertEqual(self.client.post("/verify/link").status_code, 401)
 

@@ -32,9 +32,22 @@ class RedactFilter(logging.Filter):
         except Exception:
             return True
         cleaned = redact(message)
-        if cleaned != message:
+        if cleaned == message:
+            return True
+        # Redact the arguments in place and keep the record's shape: uvicorn's access formatter
+        # unpacks record.args (client, method, path, version, status), so it can't be None.
+        if isinstance(record.args, tuple):
+            record.args = tuple(redact(a) if isinstance(a, str) else a for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: redact(v) if isinstance(v, str) else v for k, v in record.args.items()}
+        record.msg = redact(record.msg) if isinstance(record.msg, str) else record.msg
+        try:
+            still_private = record.getMessage() != cleaned
+        except Exception:
+            still_private = True
+        if still_private:  # something private spans the format string and its args: flatten it
             record.msg = cleaned
-            record.args = None
+            record.args = ()
         return True
 
 

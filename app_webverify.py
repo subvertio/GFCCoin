@@ -268,10 +268,19 @@ def verify_web_check(request: Request, c: str = Form(""), phone: str = Form(""),
     return _page(request, "done", username=username, paid=paid)
 
 
+_TURNSTILE_MESSAGES = {
+    phone_verify.TURNSTILE_EXPIRED: "The check above expired. Wait for it to show Success again, then try again.",
+    phone_verify.TURNSTILE_REJECTED: "The check above didn't go through. Please try again.",
+    phone_verify.TURNSTILE_MISCONFIGURED: "Phone verification isn't working on this node right now. "
+                                          "Please try again later.",
+    phone_verify.TURNSTILE_UNAVAILABLE: "Couldn't reach the bot check. Please try again in a minute.",
+}
+
+
 def _friendly(ex: phone_verify.FlowError) -> str:
     detail = ex.detail or "Something went wrong."
     if ex.status == 403:
-        return "Please complete the check above, then try again."
+        return _TURNSTILE_MESSAGES.get(ex.reason, "Please complete the check above, then try again.")
     if ex.status == 429:
         return "Too many attempts today. Please try again tomorrow."
     return detail[0].upper() + detail[1:] + ("" if detail.endswith(".") else ".")

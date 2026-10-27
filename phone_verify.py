@@ -14,6 +14,7 @@ GFC Phone Verification - makes each rewarded account cost a phone number.
 import datetime
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -24,6 +25,8 @@ from typing import Optional
 import httpx
 
 from config import DATA_DIR
+
+logger = logging.getLogger("gfc.phone")
 
 # ============================================================================
 # LIMITS
@@ -224,6 +227,9 @@ def check_turnstile(token: str, remoteip: str = ""):
     Raise FlowError(403) unless Cloudflare accepts the Turnstile token. Uses the
     secret in GFC_TURNSTILE_SECRET; if unset, the check is skipped (warned once),
     so local nodes work without it. Fails closed if Cloudflare can't be reached.
+
+    Every refusal is logged with Cloudflare's error codes, and its FlowError.reason says
+    which kind it was (see TURNSTILE_* below), so the pages can say what to do about it.
     """
     global _turnstile_warned
     secret = os.environ.get("GFC_TURNSTILE_SECRET", "")
@@ -233,17 +239,52 @@ def check_turnstile(token: str, remoteip: str = ""):
             _turnstile_warned = True
         return
     if not token:
-        raise FlowError(403, "bot check required (turnstile_token missing)")
+        raise FlowError(403, "bot check required (turnstile_token missing)", TURNSTILE_MISSING)
     data = {"secret": secret, "response": token}
     if remoteip:
         data["remoteip"] = remoteip
     try:
         r = _turnstile_client.post(TURNSTILE_VERIFY_URL, data=data)
-        success = r.status_code == 200 and (r.json() or {}).get("success") is True
-    except (httpx.HTTPError, ValueError):
-        raise FlowError(403, "bot check unavailable, try again later")
-    if not success:
-        raise FlowError(403, "bot check failed")
+        body = r.json() if r.status_code == 200 else {}
+        if not isinstance(body, dict):
+            body = {}
+    except (httpx.HTTPError, ValueError) as ex:
+        logger.warning("Turnstile siteverify unreachable: %s", type(ex).__name__)
+        raise FlowError(403, "bot check unavailable, try again later", TURNSTILE_UNAVAILABLE)
+    if body.get("success") is True:
+        return
+    codes = [str(c) for c in body.get("error-codes") or []]
+    reason = _turnstile_reason(r.status_code, codes)
+    if reason == TURNSTILE_MISCONFIGURED:
+        logger.error("Turnstile siteverify rejected this node's secret (%s): check GFC_TURNSTILE_SECRET",
+                     ", ".join(codes))
+    elif reason == TURNSTILE_REJECTED:
+        # A site key and secret from different widgets look exactly like this: the widget says
+        # "Success!" in the browser, then every token comes back invalid-input-response.
+        logger.warning("Turnstile token rejected (%s, hostname %s). If every token fails, "
+                       "GFC_TURNSTILE_SITEKEY and GFC_TURNSTILE_SECRET may be from different widgets",
+                       ", ".join(codes) or "no error codes", body.get("hostname") or "-")
+    else:
+        logger.warning("Turnstile token refused (%s, HTTP %s)", ", ".join(codes) or "no error codes", r.status_code)
+    raise FlowError(403, f"bot check failed ({', '.join(codes) or 'rejected'})", reason)
+
+
+# FlowError.reason for each way the Turnstile check can refuse
+TURNSTILE_MISSING = "turnstile_missing"            # no token sent
+TURNSTILE_EXPIRED = "turnstile_expired"            # token too old or already used: check again
+TURNSTILE_REJECTED = "turnstile_rejected"          # Cloudflare didn't accept the token
+TURNSTILE_MISCONFIGURED = "turnstile_misconfigured"  # this node's secret is wrong: the operator's problem
+TURNSTILE_UNAVAILABLE = "turnstile_unavailable"    # Cloudflare unreachable or erroring: try later
+
+
+def _turnstile_reason(status: int, codes: list) -> str:
+    if status != 200 or "internal-error" in codes:
+        return TURNSTILE_UNAVAILABLE
+    if "missing-input-secret" in codes or "invalid-input-secret" in codes:
+        return TURNSTILE_MISCONFIGURED
+    if "timeout-or-duplicate" in codes:
+        return TURNSTILE_EXPIRED
+    return TURNSTILE_REJECTED
 
 
 # ============================================================================
@@ -304,11 +345,12 @@ def _phone_taken(conn: sqlite3.Connection, username: str, hashed: str) -> bool:
 # ============================================================================
 
 class FlowError(Exception):
-    """A refused step, with the HTTP status the endpoint should return."""
-    def __init__(self, status: int, detail: str):
+    """A refused step, with the HTTP status the endpoint should return (and, for some, why)."""
+    def __init__(self, status: int, detail: str, reason: str = ""):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        self.reason = reason
 
 
 def start_verification(db_path: str, username: str, phone: str) -> dict:

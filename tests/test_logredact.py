@@ -48,6 +48,27 @@ class RedactTests(unittest.TestCase):
         self.assertNotIn("4155550100", written)
         self.assertIn("+...00", written)
 
+    def test_uvicorn_access_log_keeps_its_args(self):
+        # uvicorn's AccessFormatter unpacks record.args; the filter used to set them to None,
+        # which crashed the formatter on every GET /verify?c=<code> ("Logging error" tracebacks)
+        from uvicorn.logging import AccessFormatter
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False))
+        handler.addFilter(logredact._FILTER)
+        log = logging.getLogger("test.access")
+        log.addHandler(handler)
+        log.propagate = False
+        log.setLevel(logging.INFO)
+        try:
+            log.info('%s - "%s %s HTTP/%s" %d', "47.221.141.91:0", "GET",
+                     "/verify?c=50maEC9p0ai3vKlIHbyvksh00sjJ4M88", "1.1", 200)
+        finally:
+            log.removeHandler(handler)
+        written = stream.getvalue()
+        self.assertIn('47.221.141.91:0 - "GET /verify?c=<hidden> HTTP/1.1" 200', written)
+        self.assertNotIn("50maEC9p", written)
+
 
 if __name__ == "__main__":
     unittest.main()

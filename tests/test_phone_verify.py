@@ -375,6 +375,31 @@ class TurnstileTests(PhoneVerifyTestCase):
         self.assertEqual(self.start_with(token, phone, "XXXX.DUMMY.TOKEN.XXXX").status_code, 403)
         self.assertNotIn(phone, FAKE_SMS.sent)
 
+    def test_refusals_say_why_and_log_cloudflares_codes(self):
+        os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_PASS_SECRET
+        cases = [
+            (200, {"success": False, "error-codes": ["timeout-or-duplicate"]}, phone_verify.TURNSTILE_EXPIRED),
+            (200, {"success": False, "error-codes": ["invalid-input-response"]}, phone_verify.TURNSTILE_REJECTED),
+            (200, {"success": False, "error-codes": ["invalid-input-secret"]}, phone_verify.TURNSTILE_MISCONFIGURED),
+            (200, {"success": False, "error-codes": ["internal-error"]}, phone_verify.TURNSTILE_UNAVAILABLE),
+            (500, {}, phone_verify.TURNSTILE_UNAVAILABLE),
+        ]
+        for status, body, reason in cases:
+            phone_verify.set_turnstile_client(httpx.Client(transport=httpx.MockTransport(
+                lambda request, s=status, b=body: httpx.Response(s, json=b))))
+            with self.subTest(reason=reason, codes=body.get("error-codes")):
+                with self.assertLogs("gfc.phone") as logs:
+                    with self.assertRaises(phone_verify.FlowError) as ctx:
+                        phone_verify.check_turnstile("XXXX.DUMMY.TOKEN.XXXX", "203.0.113.5")
+                self.assertEqual(ctx.exception.status, 403)
+                self.assertEqual(ctx.exception.reason, reason)
+                for code in body.get("error-codes", []):
+                    self.assertIn(code, "\n".join(logs.output))
+                self.assertNotIn(TURNSTILE_PASS_SECRET, "\n".join(logs.output))
+        with self.assertRaises(phone_verify.FlowError) as ctx:
+            phone_verify.check_turnstile("")
+        self.assertEqual(ctx.exception.reason, phone_verify.TURNSTILE_MISSING)
+
     def test_secret_unset_skips_check(self):
         os.environ.pop("GFC_TURNSTILE_SECRET", None)
         _, token = self.register()
