@@ -243,6 +243,14 @@ def load_treasury_private_key() -> Optional[str]:
     return None
 
 
+def _write_secret(path: Path, text: str):
+    """Write a key or backup file readable by its owner only (0600), whatever the umask."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(path, 0o600)  # in case the file already existed with wider permissions
+
+
 def _treasury_key_path() -> Path:
     return Path(os.environ.get("GFC_TREASURY_KEY_FILE", str(DATA_DIR / "treasury_key.hex")))
 
@@ -283,7 +291,7 @@ def _cli(argv: list) -> int:
         if key_path.exists():
             raise SystemExit(f"{key_path} already exists; refusing to overwrite")
         priv, pub = generate_keypair()
-        key_path.write_text(priv)
+        _write_secret(key_path, priv)
         print(f"Treasury private key written to {key_path}. Back it up now: python signing.py backup FILE")
         print(f"Pin this public key in config.PINNED_TREASURY_PUBKEYS:\n  {pub}")
     elif cmd == "backup" and len(argv) == 2:
@@ -293,7 +301,7 @@ def _cli(argv: list) -> int:
         priv = _read_treasury_key_file(key_path, os.environ.get("GFC_TREASURY_PASSPHRASE"))
         backup = keystore.seal_backup(_passphrase("Backup passphrase (12+ chars): ", True),
                                       {"private_key": priv, "public_key": public_key_of(priv)}, "treasury")
-        out.write_text(json.dumps(backup, indent=2))
+        _write_secret(out, json.dumps(backup, indent=2))
         print(f"Encrypted backup of treasury key {public_key_of(priv)} written to {out}.")
         print("Store it off this machine (USB drive, password manager). Without the passphrase it can't be opened.")
     elif cmd == "restore" and len(argv) == 2:
@@ -302,7 +310,7 @@ def _cli(argv: list) -> int:
         payload = keystore.open_backup(_passphrase("Backup passphrase: ", False),
                                        json.loads(Path(argv[1]).read_text()), "treasury")
         priv = payload["private_key"]
-        key_path.write_text(priv)
+        _write_secret(key_path, priv)
         pub = public_key_of(priv)
         pinned = "pinned" if pub in treasury_pubkeys() else "NOT pinned in config - mints won't be accepted"
         print(f"Treasury key {pub} restored to {key_path} ({pinned}).")
@@ -310,7 +318,7 @@ def _cli(argv: list) -> int:
         priv = _read_treasury_key_file(key_path, None)
         sealed = keystore.seal_backup(_passphrase("New passphrase for the key file (12+ chars): ", True),
                                       {"private_key": priv, "public_key": public_key_of(priv)}, "treasury")
-        key_path.write_text(json.dumps(sealed, indent=2))
+        _write_secret(key_path, json.dumps(sealed, indent=2))
         print(f"{key_path} is now encrypted. Set GFC_TREASURY_PASSPHRASE when starting the treasury node.")
     else:
         print(usage)

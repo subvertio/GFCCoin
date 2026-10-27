@@ -72,12 +72,7 @@ fi
 chown root:gfc "$ETC_DIR/gfc.env"
 chmod 640 "$ETC_DIR/gfc.env"
 
-install -m 644 "$APP_DIR/deploy/gfc-node.service" /etc/systemd/system/gfc-node.service
-install -m 644 "$APP_DIR/deploy/gfc-backup.service" /etc/systemd/system/gfc-backup.service
-install -m 644 "$APP_DIR/deploy/gfc-backup.timer" /etc/systemd/system/gfc-backup.timer
-install -m 755 "$APP_DIR/deploy/backup.sh" /usr/local/sbin/gfc-backup
-install -m 755 "$APP_DIR/deploy/update.sh" /usr/local/sbin/gfc-update
-sed "s#__DOMAIN__#$DOMAIN#g" "$APP_DIR/deploy/Caddyfile" > /etc/caddy/Caddyfile
+bash "$APP_DIR/deploy/install-files.sh" "$DOMAIN"
 
 echo "==> Firewall: SSH, HTTP(S), P2P sync"
 ufw allow OpenSSH >/dev/null
@@ -93,7 +88,6 @@ if [[ -s /root/.ssh/authorized_keys ]]; then
 fi
 
 echo "==> Starting services"
-systemctl daemon-reload
 systemctl enable --now gfc-node.service
 systemctl enable --now gfc-backup.timer
 systemctl restart caddy
@@ -115,7 +109,7 @@ cat <<EOF
 Done. Next steps (see deploy/README.md):
   1. Point DNS: A record  $DOMAIN  ->  $(curl -fsS -4 https://ifconfig.me 2>/dev/null || echo '<this server IP>')
      Caddy gets an HTTPS certificate automatically once DNS resolves.
-  2. Restore the treasury key and set secrets in $ETC_DIR/gfc.env, then:
-       systemctl restart gfc-node
-  3. Check:  curl https://$DOMAIN/health
+  2. Restore the treasury key:  gfc restore-treasury
+     Add Twilio/Turnstile secrets: gfc config
+  3. Check everything:           gfc check
 EOF

@@ -33,18 +33,28 @@ that account controls the treasury server.
 
 ## 2. Run the setup script
 
-From PowerShell on your PC (replace `SERVER_IP`):
+In PowerShell on your PC, save a shortcut so `ssh gfc-node` reaches the server
+with your key (replace `SERVER_IP`):
 
 ```powershell
-ssh root@SERVER_IP
+Add-Content "$env:USERPROFILE\.ssh\config" "`nHost gfc-node`n  HostName SERVER_IP`n  User root`n  IdentityFile ~/.ssh/id_ed25519_gfc`n"
 ```
 
-Then, on the server:
+To avoid typing the key's passphrase every time, load it into the Windows SSH
+agent. The first line opens an administrator prompt; click **Yes**:
 
-```bash
-apt-get update -q && apt-get install -y -q curl
-curl -fsSL https://raw.githubusercontent.com/subvertio/GFCCoin/master/deploy/setup.sh -o setup.sh
-bash setup.sh node.galacticfederation.tech
+```powershell
+Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command "Get-Service ssh-agent | Set-Service -StartupType Automatic; Start-Service ssh-agent"'
+```
+
+```powershell
+ssh-add "$env:USERPROFILE\.ssh\id_ed25519_gfc"
+```
+
+Then run the setup:
+
+```powershell
+ssh gfc-node "apt-get update -q && apt-get install -y -q curl && curl -fsSL https://raw.githubusercontent.com/subvertio/GFCCoin/master/deploy/setup.sh -o setup.sh && bash setup.sh node.galacticfederation.tech"
 ```
 
 The script does the following:
@@ -70,33 +80,33 @@ Manage DNS records**), add an **A record**:
 Once DNS resolves, which takes minutes to a few hours, Caddy gets an HTTPS
 certificate automatically. Check it with:
 
-```bash
-curl https://node.galacticfederation.tech/health
+```powershell
+Invoke-RestMethod https://node.galacticfederation.tech/health
 ```
+
+If Caddy tried before DNS existed, it retries with growing waits. To retry now,
+run `ssh gfc-node "systemctl restart caddy"`.
 
 ## 4. Restore the treasury key
 
 Copy the encrypted backup up from your PC (PowerShell):
 
 ```powershell
-scp F:\GFC\treasury.backup root@SERVER_IP:/var/lib/gfc/treasury.backup
+scp F:\GFC\treasury.backup gfc-node:/var/lib/gfc/treasury.backup
 ```
 
-On the server, restore it as the `gfc` user. It asks for the backup
-passphrase.
+Then restore it. It asks for the backup passphrase, deletes the uploaded copy,
+restarts the node and confirms the key is loaded:
 
-```bash
-chown gfc:gfc /var/lib/gfc/treasury.backup
-cd /opt/gfc/app
-runuser -u gfc -- env GFC_TREASURY_KEY_FILE=/var/lib/gfc/treasury_key.hex /opt/gfc/venv/bin/python signing.py restore /var/lib/gfc/treasury.backup
-rm /var/lib/gfc/treasury.backup
+```powershell
+ssh -t gfc-node gfc restore-treasury
 ```
 
-Optionally, encrypt the key file on disk. Then put the passphrase in
-`/etc/gfc/gfc.env` as `GFC_TREASURY_PASSPHRASE=...`:
+Optionally, encrypt the key file on disk. The command tells you to add the
+passphrase to the settings with `gfc config` (as `GFC_TREASURY_PASSPHRASE=...`):
 
-```bash
-runuser -u gfc -- env GFC_TREASURY_KEY_FILE=/var/lib/gfc/treasury_key.hex /opt/gfc/venv/bin/python signing.py encrypt
+```powershell
+ssh -t gfc-node gfc encrypt-treasury
 ```
 
 Encrypting means a leaked disk snapshot or backup doesn't expose the key. It
@@ -104,16 +114,9 @@ doesn't protect against someone who gets root on the running server, because
 the passphrase sits in the env file. The treasury limits (fixed grant size,
 capped rewards) bound the damage, and you can rotate to a new key.
 
-Check that the node loaded the key:
-
-```bash
-systemctl restart gfc-node
-runuser -u gfc -- bash -c 'set -a; . /etc/gfc/gfc.env; cd /opt/gfc/app; /opt/gfc/venv/bin/python -c "import signing; print(\"treasury key loaded:\", bool(signing.load_treasury_private_key()))"'
-```
-
 ## 5. Add the Twilio and Turnstile secrets
 
-Edit the config with `nano /etc/gfc/gfc.env`:
+Open the settings with `ssh -t gfc-node gfc config` (it restarts the node when you save):
 
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`: from
   the Twilio console (Verify → Services). While these are empty, the node uses
@@ -122,21 +125,26 @@ Edit the config with `nano /etc/gfc/gfc.env`:
   widget, domain `galacticfederation.tech`). The *site key* goes into the app
   or website; the *secret* goes here.
 
-Then restart:
+Then check everything at once:
 
-```bash
-systemctl restart gfc-node
-journalctl -u gfc-node -n 50
+```powershell
+ssh gfc-node gfc check
 ```
 
 ## Day to day
 
-| Task | Command (on the server) |
+Everything goes through one `gfc` command. Run it from PowerShell on your PC
+with `ssh gfc-node gfc ...`, adding `-t` for commands that prompt or open an
+editor:
+
+| Task | Command |
 |---|---|
-| Status / logs | `systemctl status gfc-node` / `journalctl -u gfc-node -f` |
-| Update to the latest `master` (backs up first) | `gfc-update` |
-| Back up now | `gfc-backup` |
-| Operator endpoints (blocked from the internet) | `curl http://127.0.0.1:8000/p2p/sync_debug` |
+| Plain-English status: services, HTTPS, treasury key, Twilio, Turnstile, last backup | `ssh gfc-node gfc check` |
+| Node log | `ssh gfc-node gfc logs` (or `gfc logs 200`) |
+| Edit settings and secrets, then restart | `ssh -t gfc-node gfc config` |
+| Update to the latest `master` (backs up first) | `ssh gfc-node gfc update` |
+| Back up now | `ssh gfc-node gfc backup` |
+| Restart | `ssh gfc-node gfc restart` |
 
 To copy the newest backup to your PC (PowerShell, from the repo folder):
 
