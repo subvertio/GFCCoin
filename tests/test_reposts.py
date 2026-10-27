@@ -417,7 +417,9 @@ class RepostTests(unittest.TestCase):
         self.assertNotIn("<b>x</b>", page)
         self.assertIn("&lt;b&gt;x&lt;/b&gt;&quot;&amp;", page)
         self.assertNotIn("Rewards verified", page)  # the reposter's wallet isn't the one paid
-        self.assertNotIn("Repost of", self.client.get(f"/p/{original['id']}").text)
+        original_page = self.client.get(f"/p/{original['id']}").text
+        top = original_page[original_page.index('<section class="featured"'):original_page.index('</section>')]
+        self.assertNotIn("Repost of", top)  # the copy may appear in the feed below, labelled
 
 
 if __name__ == "__main__":

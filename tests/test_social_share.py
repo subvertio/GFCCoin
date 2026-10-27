@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app_share  # noqa: E402
+import app_web  # noqa: E402
 import main  # noqa: E402
 import signing  # noqa: E402
 
@@ -67,6 +68,8 @@ class SharePageTests(unittest.TestCase):
             main.DB_PATH = saved_main
         cls.saved_share_db = saved_share
         app_share.DB_PATH = cls.db
+        cls.saved_web_db = app_web.DB_PATH
+        app_web.DB_PATH = cls.db  # the feed under a shared post reads the same database
         cls.env = {k: os.environ.get(k) for k in
                    ("GFC_PUBLIC_BASE_URL", "GFC_APP_LINK_BASE", "GFC_ANDROID_PACKAGE", "GFC_ANDROID_CERT_SHA256")}
         os.environ["GFC_PUBLIC_BASE_URL"] = BASE + "/"
@@ -87,6 +90,7 @@ class SharePageTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         app_share.DB_PATH = cls.saved_share_db
+        app_web.DB_PATH = cls.saved_web_db
         for k, v in cls.env.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -112,6 +116,37 @@ class SharePageTests(unittest.TestCase):
         conn.close()
         return seed["id"]
 
+    def featured(self, text):
+        """The shared post's section (the feed follows it on the same page)."""
+        start = text.index('<section class="featured"')
+        return text[start:text.index('</section>', start)]
+
+    def assert_page_scripts_only(self, r, viewer: bool):
+        """Only the feed's nonce'd inline script, plus the pinned 3D viewer when the post is glTF."""
+        csp = r.headers["content-security-policy"]
+        self.assertIn("default-src 'none'", csp)
+        self.assertIn("frame-ancestors 'none'", csp)
+        self.assertNotIn("unsafe-inline", csp)
+        script_src = csp.split("script-src ", 1)[1].split(";", 1)[0].split()
+        self.assertTrue(all(x.startswith("'nonce-") or x in (app_share.MODEL_VIEWER_SRC, "'wasm-unsafe-eval'")
+                            for x in script_src), script_src)
+        head = r.text.split("</head>", 1)[0]
+        self.assertEqual(f'src="{app_share.MODEL_VIEWER_SRC}"' in head, viewer)
+
+    def test_shared_post_on_top_then_feed_newest_first(self):
+        # Dated ahead of everything other tests add, so both land on the feed's first page
+        self.add_seed(owner="olga", title="Older post", created_at="2099-01-01T00:00:00+00:00")
+        self.add_seed(owner="nina", title="Newer post", created_at="2099-06-01T00:00:00+00:00")
+        shared = self.add_seed(title="The shared one", created_at="2025-01-01T00:00:00+00:00")
+        text = self.client.get(f"/p/{shared}").text
+        top = self.featured(text)
+        self.assertIn("The shared one", top)
+        feed = text[text.index('<div id="feed">'):]
+        self.assertLess(text.index('<section class="featured"'), text.index('<div id="feed">'))
+        self.assertLess(feed.index("Newer post"), feed.index("Older post"))  # newest on top
+        self.assertNotIn(f'data-id="{shared}"', feed)  # not repeated below
+        self.assertIn(f"exclude={shared}", feed) if 'class="more"' in feed else None
+
     def test_page_has_open_graph_and_twitter_tags(self):
         sid = self.add_seed(thumb_filename="ship_thumb.jpg")
         r = self.client.get(f"/p/{sid}")
@@ -130,36 +165,33 @@ class SharePageTests(unittest.TestCase):
         sid = self.add_seed(filename="walker.glb", thumb_filename="walker_thumb.jpg")
         r = self.client.get(f"/p/{sid}")
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertIn('<model-viewer class="media model" src="/originals/walker.glb"', r.text)
+        self.assertIn('<model-viewer class="hero" src="/originals/walker.glb"', self.featured(r.text))
         self.assertIn('poster="/thumbs/walker_thumb.jpg"', r.text)
         for attr in ('loading="lazy"', 'reveal="auto"', "camera-controls", "auto-rotate",
                      'rotation-per-second="14deg"', 'environment-image="neutral"', "autoplay"):
             self.assertIn(attr, r.text)
         self.assertIn(f'<script type="module" src="{app_share.MODEL_VIEWER_SRC}" '
                       f'integrity="{app_share.MODEL_VIEWER_SRI}" crossorigin="anonymous">', r.text)
-        self.assertEqual(parse(r.text).scripts, 1)
+        self.assert_page_scripts_only(r, viewer=True)
         # Open Graph and "Open in GFC" are unchanged.
         meta = parse(r.text).meta
         self.assertEqual(meta["og:image"], f"{BASE}/thumbs/walker_thumb.jpg")
         self.assertIn(f'href="gfc://seed/{sid}"', r.text)
         csp = r.headers["content-security-policy"]
-        self.assertIn(f"script-src {app_share.MODEL_VIEWER_SRC} 'wasm-unsafe-eval'", csp)
+        self.assertIn(f"{app_share.MODEL_VIEWER_SRC} 'wasm-unsafe-eval'", csp)
         self.assertIn(f"'{app_share.MODEL_VIEWER_STYLE_HASH}'", csp)  # its shadow-DOM <style>
-        self.assertIn("default-src 'none'", csp)
-        self.assertNotIn("unsafe-inline", csp)
         gltf = self.client.get(f"/p/{self.add_seed(filename='Ship.GLTF')}").text
-        self.assertIn('<model-viewer class="media model" src="/originals/Ship.GLTF"', gltf)
+        self.assertIn('<model-viewer class="hero" src="/originals/Ship.GLTF"', self.featured(gltf))
 
     def test_non_gltf_pages_load_no_viewer(self):
         # Other 3D formats keep the poster image, and never link the model file.
         fbx = self.client.get(f"/p/{self.add_seed(filename='ship.fbx', thumb_filename='ship.jpg')}")
-        self.assertIn('<img class="media" src="/thumbs/ship.jpg"', fbx.text)
-        self.assertNotIn("/originals/", fbx.text)
+        self.assertIn('<img class="hero" src="/thumbs/ship.jpg"', self.featured(fbx.text))
+        self.assertNotIn("/originals/", self.featured(fbx.text))
         img = self.client.get(f"/p/{self.add_seed(content_type='image', filename='pic.glb.png')}")
         for r in (fbx, img):
-            self.assertNotIn("model-viewer", r.text)
-            self.assertEqual(parse(r.text).scripts, 0)
-            self.assertNotIn("script-src", r.headers["content-security-policy"])
+            self.assertNotIn("model-viewer", self.featured(r.text))
+            self.assert_page_scripts_only(r, viewer=False)
 
     ANDROID_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36"
     DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"
@@ -205,7 +237,7 @@ class SharePageTests(unittest.TestCase):
 
     def test_media_preview_by_type(self):
         img = self.client.get(f"/p/{self.add_seed(content_type='image', filename='pic.png')}").text
-        self.assertIn('<img class="media" src="/originals/pic.png"', img)
+        self.assertIn('<img class="hero" src="/originals/pic.png"', self.featured(img))
         vid = self.client.get(f"/p/{self.add_seed(content_type='video', filename='clip.mp4')}").text
         self.assertIn('<video', vid)
         self.assertIn('src="/originals/clip.mp4"', vid)
@@ -222,16 +254,12 @@ class SharePageTests(unittest.TestCase):
         self.assertNotIn('"onerror="', r.text)
         self.assertIn("&lt;script&gt;", r.text)
         parsed = parse(r.text)
-        self.assertEqual(parsed.scripts, 0)
+        self.assertLessEqual(parsed.scripts, 1)  # only the feed's own nonce'd script
         self.assertEqual(parsed.meta["og:title"], XSS)  # round-trips as text, not markup
 
     def test_strict_csp(self):
         r = self.client.get(f"/p/{self.add_seed(content_type='image', filename='pic.png')}")
-        csp = r.headers["content-security-policy"]
-        self.assertIn("default-src 'none'", csp)
-        self.assertIn("frame-ancestors 'none'", csp)
-        self.assertNotIn("script-src", csp)  # default-src 'none' blocks all script
-        self.assertNotIn("unsafe-inline", csp)
+        self.assert_page_scripts_only(r, viewer=False)
 
     def test_unknown_seed_404(self):
         self.assertEqual(self.client.get("/p/does-not-exist").status_code, 404)
