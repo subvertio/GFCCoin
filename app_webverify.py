@@ -104,14 +104,21 @@ def _is_verified(username: str) -> bool:
 
 
 @router.post("/verify/link")
-def verify_link(caller: Caller = Depends(caller_from_form)):
+def verify_link(request: Request, caller: Caller = Depends(caller_from_form)):
     """A one-time link to verify the caller's phone in a browser."""
     username = caller.require("post")
     if _is_verified(username):
         return {"verified": True, "url": ""}
     code = create_link(username)
-    return {"verified": False, "url": f"{public_base_url()}/verify?c={code}",
+    return {"verified": False, "url": f"{_page_base(request)}/verify?c={code}",
             "expires_in": int(LINK_TTL.total_seconds())}
+
+
+def _page_base(request: Request) -> str:
+    """Where the app should open the page: the public domain, or this node itself when none is set (local nodes)."""
+    if os.environ.get("GFC_PUBLIC_BASE_URL", "").strip():
+        return public_base_url()
+    return str(request.base_url).rstrip("/")
 
 
 # ---------- pages ----------
