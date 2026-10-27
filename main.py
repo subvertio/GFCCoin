@@ -6,7 +6,8 @@ Features: wallets, transactions, seeds, feed, search, profiles, engagement,
           blockchain (hybrid SQLite chain), PoDT rewards, P2P sync.
 """
 
-from fastapi import FastAPI, HTTPException, Form, File, UploadFile, Depends
+from fastapi import FastAPI, HTTPException, Form, File, UploadFile, Depends, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import json
@@ -27,6 +28,7 @@ from app_share import router as share_router
 from app_referrals import router as referrals_router
 from app_echohunt import router as echohunt_router
 from app_tokens import router as tokens_router
+from app_web import router as web_router, feed_html_response, wants_html
 import blockchain
 import keystore
 import first_post
@@ -62,6 +64,7 @@ app.include_router(share_router)
 app.include_router(referrals_router)
 app.include_router(echohunt_router)
 app.include_router(tokens_router)
+app.include_router(web_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
@@ -262,9 +265,11 @@ async def auth_login(
 # ============================================================================
 
 @app.get("/")
-def root():
-    """API root - service info"""
-    return {
+def root(request: Request):
+    """API root - service info; browsers (Accept: text/html) get the web feed instead."""
+    if wants_html(request):
+        return feed_html_response(request)
+    return JSONResponse({
         "service": "Galactic Federation Coin API",
         "version": "4.0.0",
         "features": [
@@ -277,7 +282,7 @@ def root():
             "Proof-of-Data-Transfer (PoDT)"
         ],
         "documentation": "/docs",
-    }
+    }, headers={"Vary": "Accept"})
 
 
 @app.get("/health")

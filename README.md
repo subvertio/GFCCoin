@@ -88,6 +88,7 @@ python -m unittest discover -s tests -v
 Home nodes sit behind routers, so X and other sites can't fetch a post from them. A **gateway node** runs on the public domain (galacticfederation.tech) and serves a read-only share page for every seed it has synced:
 
 - `GET /p/{seed_id}`: an HTML page with the title, creator, description and a media preview. 3D seeds show their poster image only. The page has Open Graph and Twitter Card tags (`summary_large_image`), so X, Discord, messaging apps and others show a preview card. A "rewards verified" badge appears only on seeds signed by their reward wallet.
+- `GET /web` (also `/explore`, and `/` for browsers): the whole feed as a web page, newest first, 20 posts per page with infinite scroll, at most 2 posts in a row from one creator. Each card links to its `/p/{seed_id}` page; 3D cards load their model only when scrolled into view or tapped. API clients that ask `/` for JSON (anything without `text/html` in `Accept`) still get the service description.
 - `GET /p/{seed_id}/share`: JSON with `url`, suggested `text`, `x_intent_url` and `app_link`.
 - `GET /.well-known/assetlinks.json`: Android App Links verification, so `https://galacticfederation.tech/p/...` links open straight in the app once it's installed.
 
