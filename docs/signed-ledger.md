@@ -160,6 +160,20 @@ small interface in `phone_verify.py` (`start(phone)`, `check(phone, code)`):
   node's console, so it is for development and tests only. A treasury node
   must have Twilio configured, or anyone can verify any number.
 
+**Bot check (Cloudflare Turnstile).** When `GFC_TURNSTILE_SECRET` is set,
+`/verify/phone/start` also needs a `turnstile_token` form field. The node
+checks it with Cloudflare's `siteverify` (secret, token and client IP, 5 s
+timeout) and returns 403 if Cloudflare rejects it or can't be reached (fail
+closed). This runs before rate limiting and before the SMS provider, so a
+failed challenge never costs a text. This guards against SMS pumping (bots
+requesting texts to premium numbers) and scripted signups. If the secret is
+unset, the check is skipped with a one-time warning, so local nodes keep
+working. Turnstile belongs on the hosted treasury/verification endpoint,
+where the secret stays private. An ordinary local node can't keep a secret
+from the person running it, so the check means nothing there. The client
+(the Unreal web view or a website) needs the matching Turnstile **site key**
+to render the widget and get a token.
+
 **Privacy.** The number is normalized to E.164 and only
 `HMAC-SHA256(key, number)` is stored, keyed with a per-node secret in
 `DATA_DIR/phone_hmac_key.hex` (override with `GFC_PHONE_HMAC_KEY_FILE`). The

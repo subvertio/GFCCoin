@@ -8,6 +8,7 @@ Run from the repository root:
 """
 
 import hashlib
+import os
 import sqlite3
 import unittest
 import uuid
@@ -290,6 +291,93 @@ class PlayRewardTests(PhoneVerifyTestCase):
         self.assertEqual(self.play(vtoken, seed1)["reason"], "already credited")
         self.assertTrue(self.play(vtoken, seed2)["credited"])
         self.assertEqual(self.balance(cwallet["id"]) - before, 2 * paid)
+
+
+# Cloudflare's documented Turnstile test secrets
+TURNSTILE_PASS_SECRET = "1x0000000000000000000000000000000AA"
+TURNSTILE_FAIL_SECRET = "2x0000000000000000000000000000000AA"
+
+
+class TurnstileTests(PhoneVerifyTestCase):
+    """Turnstile in front of /verify/phone/start, against a mocked siteverify (no network)."""
+
+    def setUp(self):
+        self.calls = []
+
+        def siteverify(request):
+            form = dict(httpx.QueryParams(request.content.decode()))
+            self.calls.append((str(request.url), form))
+            # Mirrors Cloudflare: the "1x" test secret always passes, the "2x" one always fails
+            ok = form.get("secret") == TURNSTILE_PASS_SECRET and bool(form.get("response"))
+            return httpx.Response(200, json={"success": ok, "error-codes": [] if ok else ["invalid-input-response"]})
+
+        phone_verify.set_turnstile_client(httpx.Client(transport=httpx.MockTransport(siteverify)))
+        self.addCleanup(phone_verify.set_turnstile_client, httpx.Client(timeout=5.0))
+        self.addCleanup(os.environ.pop, "GFC_TURNSTILE_SECRET", None)
+
+    def start_with(self, token, phone, turnstile_token=None):
+        data = {"api_token": token, "phone": phone}
+        if turnstile_token is not None:
+            data["turnstile_token"] = turnstile_token
+        return self.client.post("/verify/phone/start", data=data)
+
+    def starts_logged(self, user):
+        conn = sqlite3.connect(main.DB_PATH)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM phone_verify_starts WHERE username = ?", (user,)).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_pass(self):
+        os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_PASS_SECRET
+        _, token = self.register()
+        phone = unique_phone()
+        r = self.start_with(token, phone, "XXXX.DUMMY.TOKEN.XXXX")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn(phone, FAKE_SMS.sent)
+        url, form = self.calls[0]
+        self.assertEqual(url, phone_verify.TURNSTILE_VERIFY_URL)
+        self.assertEqual(form["response"], "XXXX.DUMMY.TOKEN.XXXX")
+        self.assertIn("remoteip", form)
+
+    def test_fail_sends_nothing_and_uses_no_rate_limit(self):
+        os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_FAIL_SECRET
+        user, token = self.register()
+        phone = unique_phone()
+        r = self.start_with(token, phone, "XXXX.DUMMY.TOKEN.XXXX")
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertNotIn(phone, FAKE_SMS.sent)
+        self.assertEqual(self.starts_logged(user), 0)
+
+    def test_missing_token(self):
+        os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_PASS_SECRET
+        user, token = self.register()
+        phone = unique_phone()
+        self.assertEqual(self.start_with(token, phone).status_code, 403)
+        self.assertEqual(self.start_with(token, phone, "").status_code, 403)
+        self.assertEqual(self.calls, [])  # rejected without calling Cloudflare
+        self.assertNotIn(phone, FAKE_SMS.sent)
+        self.assertEqual(self.starts_logged(user), 0)
+
+    def test_cloudflare_unreachable_fails_closed(self):
+        os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_PASS_SECRET
+
+        def down(request):
+            raise httpx.ConnectTimeout("timed out", request=request)
+
+        phone_verify.set_turnstile_client(httpx.Client(transport=httpx.MockTransport(down)))
+        _, token = self.register()
+        phone = unique_phone()
+        self.assertEqual(self.start_with(token, phone, "XXXX.DUMMY.TOKEN.XXXX").status_code, 403)
+        self.assertNotIn(phone, FAKE_SMS.sent)
+
+    def test_secret_unset_skips_check(self):
+        os.environ.pop("GFC_TURNSTILE_SECRET", None)
+        _, token = self.register()
+        phone = unique_phone()
+        self.assertEqual(self.start_with(token, phone).status_code, 200)
+        self.assertEqual(self.calls, [])
+        self.assertIn(phone, FAKE_SMS.sent)
 
 
 class TwilioAdapterTests(unittest.TestCase):

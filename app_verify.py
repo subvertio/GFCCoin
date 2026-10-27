@@ -4,7 +4,7 @@ and play rewards. See phone_verify.py for storage and limits.
 """
 import sqlite3
 
-from fastapi import APIRouter, HTTPException, Form
+from fastapi import APIRouter, HTTPException, Form, Request
 
 import blockchain
 import phone_verify
@@ -16,10 +16,14 @@ router = APIRouter()
 
 
 @router.post("/verify/phone/start")
-async def verify_phone_start(api_token: str = Form(...), phone: str = Form(...)):
-    """Send a one-time code by SMS to `phone` (E.164, e.g. +14155550123)."""
+async def verify_phone_start(request: Request, api_token: str = Form(...), phone: str = Form(...),
+                             turnstile_token: str = Form("")):
+    """Send a one-time code by SMS to `phone` (E.164, e.g. +14155550123).
+    Requires a Cloudflare Turnstile token when the node has GFC_TURNSTILE_SECRET set."""
     username = require_user(api_token)
     try:
+        # Bot check first: a failed challenge never counts against limits or costs an SMS
+        phone_verify.check_turnstile(turnstile_token, request.client.host if request.client else "")
         return phone_verify.start_verification(DB_PATH, username, phone)
     except phone_verify.FlowError as ex:
         raise HTTPException(status_code=ex.status, detail=ex.detail)

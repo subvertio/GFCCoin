@@ -179,6 +179,48 @@ def set_verifier(verifier):
 
 
 # ============================================================================
+# CLOUDFLARE TURNSTILE (bot check before any SMS is sent)
+# ============================================================================
+
+TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+_turnstile_client = httpx.Client(timeout=5.0)
+_turnstile_warned = False
+
+
+def set_turnstile_client(client: httpx.Client):
+    """Replace the HTTP client used for siteverify (tests)."""
+    global _turnstile_client
+    _turnstile_client = client
+
+
+def check_turnstile(token: str, remoteip: str = ""):
+    """
+    Raise FlowError(403) unless Cloudflare accepts the Turnstile token. Uses the
+    secret in GFC_TURNSTILE_SECRET; if unset, the check is skipped (warned once),
+    so local nodes work without it. Fails closed if Cloudflare can't be reached.
+    """
+    global _turnstile_warned
+    secret = os.environ.get("GFC_TURNSTILE_SECRET", "")
+    if not secret:
+        if not _turnstile_warned:
+            print("[PhoneVerify] GFC_TURNSTILE_SECRET not set: skipping the Turnstile bot check")
+            _turnstile_warned = True
+        return
+    if not token:
+        raise FlowError(403, "bot check required (turnstile_token missing)")
+    data = {"secret": secret, "response": token}
+    if remoteip:
+        data["remoteip"] = remoteip
+    try:
+        r = _turnstile_client.post(TURNSTILE_VERIFY_URL, data=data)
+        success = r.status_code == 200 and (r.json() or {}).get("success") is True
+    except (httpx.HTTPError, ValueError):
+        raise FlowError(403, "bot check unavailable, try again later")
+    if not success:
+        raise FlowError(403, "bot check failed")
+
+
+# ============================================================================
 # STORAGE (local only, never synced)
 # ============================================================================
 
