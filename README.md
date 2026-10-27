@@ -82,6 +82,53 @@ python -m unittest discover -s tests -v
 - To sync with peers, TCP port 6881 and UDP port 6882 must be reachable.
 - `gfc_backend.spec` builds a single-file Windows executable with PyInstaller.
 
+## Sharing posts (gateway node and share pages)
+
+Home nodes sit behind routers, so X and other sites can't fetch a post from them. A **gateway node** runs on the public domain (galacticfederation.tech) and serves a read-only share page for every seed it has synced:
+
+- `GET /p/{seed_id}`: an HTML page with the title, creator, description and a media preview. 3D seeds show their poster image only. The page has Open Graph and Twitter Card tags (`summary_large_image`), so X, Discord, messaging apps and others show a preview card. A "rewards verified" badge appears only on seeds signed by their reward wallet.
+- `GET /p/{seed_id}/share`: JSON with `url`, suggested `text`, `x_intent_url` and `app_link`.
+- `GET /.well-known/assetlinks.json`: Android App Links verification, so `https://galacticfederation.tech/p/...` links open straight in the app once it's installed.
+
+Seed fields come from peers and are untrusted. The page escapes every field, runs no script and sends a strict Content-Security-Policy. It shows only public user fields.
+
+Gateway settings (environment variables):
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `GFC_PUBLIC_BASE_URL` | Absolute base for `og:url`, `og:image` and share links | `https://galacticfederation.tech` |
+| `GFC_APP_LINK_BASE` | Prefix of the "Open in GFC" deep link (`{base}/{seed_id}`) | `gfc://seed` |
+| `GFC_ANDROID_PACKAGE` | Android package name for `assetlinks.json` | none |
+| `GFC_ANDROID_CERT_SHA256` | Comma-separated SHA-256 signing cert fingerprints (`AB:CD:...`) | none |
+
+`assetlinks.json` returns `[]` until both Android settings are set. Run the gateway behind HTTPS. X only fetches cards over HTTPS, and App Links require it.
+
+### Sharing from the Unreal Android app
+
+The share link is always `{GFC_PUBLIC_BASE_URL}/p/{seed_id}`. The seed must have synced to the gateway before the card renders, so sync first and then share. Two ways to share:
+
+1. **Android share sheet (recommended).** Add a small Java method through a UPL (Unreal Plugin Language) `.xml` in your plugin, and call it from C++ via JNI (`FJavaWrapper::CallVoidMethod`):
+
+   ```java
+   public void AndroidThunkJava_ShareText(String text, String url) {
+       Intent send = new Intent(Intent.ACTION_SEND);
+       send.setType("text/plain");
+       send.putExtra(Intent.EXTRA_TEXT, text + " " + url);
+       startActivity(Intent.createChooser(send, "Share"));
+   }
+   ```
+
+   The user picks X or any other app.
+2. **Direct "Post to X" button.** Open the X web intent with `FPlatformProcess::LaunchURL`. If the X app is installed, it handles the link:
+
+   ```
+   https://x.com/intent/post?text=<url-encoded text>&url=<url-encoded share link>
+   ```
+
+   `GET /p/{seed_id}/share` returns this URL ready-made in `x_intent_url`.
+
+To open shared links in the app, add an `intent-filter` with `android:autoVerify="true"` for `https://galacticfederation.tech/p/*` (App Links), and/or one for the `gfc://seed/*` scheme used by "Open in GFC".
+
 ## Current limitations
 
 These are known gaps, listed so you can make an informed choice:
