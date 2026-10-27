@@ -43,11 +43,11 @@ While `GFC_REQUIRE_ECHOHUNT=0`, its users' plays are protected by phone verifica
 
 ## Protocol
 
-Both endpoints take form fields, and `api_token` is the usual session token.
+Both endpoints take form fields. Authenticate with `Authorization: Bearer <token>` (or the legacy `api_token` form field). The token needs the **`post`** scope: a pass unlocks rewarded plays, which also need `post`, so a read-only third-party token can't collect passes. Without a valid token the response is `401`, and with a token lacking `post` it is `403`.
 
 ### 1. `POST /echohunt/start`
 
-The only field is `api_token`.
+It takes no fields besides the token.
 
 The server allows 5 starts per user per 10 minutes. Beyond that it returns `429`.
 
@@ -95,7 +95,7 @@ Request it **after** `/echohunt/start`.
 
 Fields:
 
-- `api_token`
+- the token (header, or the legacy `api_token` field)
 - `challenge_id`
 - `integrity_token`: optional, but required when the node has Play Integrity configured.
 - `rounds`: a JSON list with one entry per round, in order.

@@ -393,6 +393,52 @@ class EchoHuntApiTests(EchoHuntApiTestCase):
         self.assertEqual(r.status_code, 400)
 
 
+class EchoHuntAuthTests(EchoHuntApiTestCase):
+    """Bearer header and legacy api_token both work; the token needs the 'post' scope."""
+
+    def mint(self, username, token, scopes):
+        r = self.client.post("/auth/tokens", headers={"Authorization": f"Bearer {token}"},
+                             data={"password": "pw-" + username, "scopes": scopes})
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()["token"]
+
+    def test_bearer_token(self):
+        user, token = self.register()
+        headers = {"Authorization": f"Bearer {self.mint(user, token, 'read post')}"}
+        r = self.client.post("/echohunt/start", headers=headers)
+        self.assertEqual(r.status_code, 200, r.text)
+        challenge = r.json()
+        self.age_challenge(challenge["challenge_id"])
+        r = self.client.post("/echohunt/submit", headers=headers, data={
+            "challenge_id": challenge["challenge_id"], "rounds": json.dumps(human_rounds(challenge["rounds"]))})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["passed"])
+        self.assertTrue(self.has_pass(user))
+
+    def test_legacy_api_token(self):
+        user, token = self.register()
+        _, r = self.play_challenge(token)  # api_token form field
+        self.assertTrue(r.json()["passed"])
+        self.assertTrue(self.has_pass(user))
+
+    def test_token_without_post_scope_forbidden(self):
+        user, token = self.register()
+        read_only = self.mint(user, token, "read")
+        headers = {"Authorization": f"Bearer {read_only}"}
+        r = self.client.post("/echohunt/start", headers=headers)
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("'post' scope", r.json()["detail"])
+        self.assertEqual(self.eh_start(read_only).status_code, 403)  # same via api_token
+
+        # A challenge started with a full token can't be submitted with the read-only one
+        challenge = self.eh_start(token).json()
+        self.age_challenge(challenge["challenge_id"])
+        r = self.client.post("/echohunt/submit", headers=headers, data={
+            "challenge_id": challenge["challenge_id"], "rounds": json.dumps(human_rounds(challenge["rounds"]))})
+        self.assertEqual(r.status_code, 403)
+        self.assertFalse(self.has_pass(user))
+
+
 class PlayIntegrityApiTests(EchoHuntApiTestCase):
 
     def setUp(self):

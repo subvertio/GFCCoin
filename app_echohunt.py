@@ -6,20 +6,24 @@ play_integrity.py; the protocol is described in docs/echo-hunt.md.
 import json
 import sqlite3
 
-from fastapi import APIRouter, HTTPException, Form
+from fastapi import APIRouter, Depends, HTTPException, Form
 
 import echohunt
 import play_integrity
 from config import DB_PATH
-from security import require_user
+from security import Caller, caller_from_form
 
 router = APIRouter()
 
+# A pass unlocks rewarded plays, which also need "post", so a read-only
+# third-party token can't collect passes on the user's behalf.
+ECHOHUNT_SCOPE = "post"
+
 
 @router.post("/echohunt/start")
-async def echohunt_start(api_token: str = Form(...)):
-    """Issue a single-use challenge (valid for 60s). Rate-limited per user."""
-    username = require_user(api_token)
+async def echohunt_start(caller: Caller = Depends(caller_from_form)):
+    """Issue a single-use challenge (valid for 60s). Rate-limited per user. Needs the 'post' scope."""
+    username = caller.require(ECHOHUNT_SCOPE)
     challenge = echohunt.new_challenge()
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -34,15 +38,15 @@ async def echohunt_start(api_token: str = Form(...)):
 
 
 @router.post("/echohunt/submit")
-async def echohunt_submit(api_token: str = Form(...), challenge_id: str = Form(...), rounds: str = Form(...),
-                          integrity_token: str = Form("")):
+async def echohunt_submit(challenge_id: str = Form(...), rounds: str = Form(...),
+                          integrity_token: str = Form(""), caller: Caller = Depends(caller_from_form)):
     """
     Score a challenge. `rounds` is a JSON list, one entry per round:
     {"tap_ms": ..., "facing": {"azimuth": ..., "elevation": ...}, "samples": [[t_ms, az, el], ...]}.
     `integrity_token` is a Play Integrity token whose requestHash is the challenge id
-    (required when the node has Play Integrity configured).
+    (required when the node has Play Integrity configured). Needs the 'post' scope.
     """
-    username = require_user(api_token)
+    username = caller.require(ECHOHUNT_SCOPE)
     conn = sqlite3.connect(DB_PATH)
     try:
         echohunt.init_echohunt_tables(conn)
