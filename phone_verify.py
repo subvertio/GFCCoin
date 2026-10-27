@@ -42,7 +42,13 @@ E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 
 
 class VerifyError(Exception):
-    """A verification request the provider refused (bad number, VoIP, provider error)."""
+    """
+    A verification request the provider refused (bad number, VoIP, provider error).
+    provider_code is the provider's own error code when it gave one (Twilio's, e.g. 60410).
+    """
+    def __init__(self, message: str, provider_code: Optional[int] = None):
+        super().__init__(message)
+        self.provider_code = provider_code
 
 
 def normalize_phone(phone: str) -> str:
@@ -146,7 +152,7 @@ class TwilioVerifier:
         if r.status_code == 404 and path == "VerificationCheck":
             return {"status": "expired"}  # Twilio: no pending verification (expired or used up)
         if r.status_code >= 400:
-            raise VerifyError(f"verification provider error ({r.status_code})")
+            raise _twilio_error(f"Verify {path}", r)
         return r.json()
 
     def _refuse_voip(self, phone: str):
@@ -156,7 +162,7 @@ class TwilioVerifier:
         except httpx.HTTPError as ex:
             raise VerifyError(f"lookup unreachable: {type(ex).__name__}")
         if r.status_code >= 400:
-            raise VerifyError(f"lookup error ({r.status_code})")
+            raise _twilio_error("Lookup", r)
         line_type = ((r.json() or {}).get("line_type_intelligence") or {}).get("type")
         if line_type in self.VOIP_TYPES:
             raise VerifyError("VoIP numbers can't be used for verification")
@@ -168,6 +174,26 @@ class TwilioVerifier:
 
     def check(self, phone: str, code: str) -> bool:
         return self._post("VerificationCheck", {"To": phone, "Code": code}).get("status") == "approved"
+
+
+def _twilio_error(what: str, r: httpx.Response) -> VerifyError:
+    """
+    Logs a Twilio refusal with Twilio's own error code and message (its JSON body), which say
+    why: 60410 Fraud Guard, 60605 country not allowed, 21608 trial account, 20003 bad key...
+    logredact masks any phone number in the message.
+    """
+    try:
+        body = r.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    code = body.get("code") if isinstance(body.get("code"), int) else None
+    message = str(body.get("message") or "")[:300]
+    logger.warning("Twilio %s refused: HTTP %s, Twilio error %s: %s %s", what, r.status_code,
+                   code if code is not None else "-", message or "(no message)", body.get("more_info") or "")
+    detail = f"verification provider error ({r.status_code}" + (f", Twilio {code}" if code is not None else "") + ")"
+    return VerifyError(detail, code)
 
 
 _verifier = None
@@ -353,6 +379,13 @@ class FlowError(Exception):
         self.reason = reason
 
 
+PROVIDER_REASON = "provider"  # FlowError.reason when the SMS provider refused: "provider" or "provider:<code>"
+
+
+def _provider_reason(ex: VerifyError) -> str:
+    return PROVIDER_REASON + (f":{ex.provider_code}" if ex.provider_code is not None else "")
+
+
 def start_verification(db_path: str, username: str, phone: str) -> dict:
     try:
         number = normalize_phone(phone)
@@ -382,7 +415,7 @@ def start_verification(db_path: str, username: str, phone: str) -> dict:
         try:
             get_verifier().start(number)
         except VerifyError as ex:
-            raise FlowError(400, str(ex))
+            raise FlowError(400, str(ex), _provider_reason(ex))
         conn.execute("INSERT OR REPLACE INTO phone_verify_pending (username, phone_hash, started_at, failed_checks) "
                      "VALUES (?, ?, ?, 0)", (username, hashed, now))
         conn.commit()
@@ -414,7 +447,7 @@ def check_verification(db_path: str, username: str, phone: str, code: str) -> di
         try:
             approved = get_verifier().check(number, (code or "").strip())
         except VerifyError as ex:
-            raise FlowError(502, str(ex))
+            raise FlowError(502, str(ex), _provider_reason(ex))
         if not approved:
             conn.execute("UPDATE phone_verify_pending SET failed_checks = failed_checks + 1 WHERE username = ?",
                          (username,))
