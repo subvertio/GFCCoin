@@ -33,6 +33,7 @@ usage: gfc <command>
                         other (up to 10,000). Public, permanent: listed at
                         /treasury/grants. Asks to confirm unless --yes.
   grants                list every operator grant
+  wallets NAME          a user's wallet IDs and balances (to find who to grant to)
   rotate-treasury --activate
                         step 2, after the pin is merged and 'gfc update' has run:
                         switch the node to the new key (rolls back on failure)
@@ -246,8 +247,9 @@ cmd_grant() {
     need_root
     local yes=0 args=()
     for a in "$@"; do if [[ "$a" == "--yes" ]]; then yes=1; else args+=("$a"); fi; done
-    [[ ${#args[@]} -eq 4 ]] || die 'usage: gfc grant WALLET AMOUNT PURPOSE "MEMO" [--yes]'
-    local wallet="${args[0]}" amount="${args[1]}" purpose="${args[2]}" memo="${args[3]}"
+    [[ ${#args[@]} -ge 4 ]] || die 'usage: gfc grant WALLET AMOUNT PURPOSE "MEMO" [--yes]  (find wallets with: gfc wallets NAME)'
+    # Everything after PURPOSE is the memo: ssh drops the quotes around it on the way here
+    local wallet="${args[0]}" amount="${args[1]}" purpose="${args[2]}" memo="${args[*]:3}"
     echo "About to grant $amount GFC from the treasury"
     echo "  to:      $wallet"
     echo "  purpose: $purpose"
@@ -259,6 +261,22 @@ cmd_grant() {
         [[ "$answer" =~ ^[Yy]$ ]] || { echo "cancelled"; return 1; }
     fi
     as_gfc "$VENV/bin/python" treasury_grants.py grant "$wallet" "$amount" "$purpose" "$memo"
+}
+
+cmd_wallets() {
+    need_root
+    [[ -n "${1:-}" ]] || die "usage: gfc wallets NAME"
+    as_gfc "$VENV/bin/python" -c '
+import sqlite3, sys, blockchain
+from config import DB_PATH
+conn = sqlite3.connect(DB_PATH)
+rows = conn.execute("SELECT id, name, owner, created_at FROM wallets WHERE LOWER(owner) = LOWER(?) ORDER BY created_at", (sys.argv[1],)).fetchall()
+conn.close()
+if not rows:
+    print("no wallets for that user on this node")
+for wid, name, owner, created in rows:
+    print(f"{wid}  {blockchain.get_balance_cents(DB_PATH, wid) / 100:>12,.2f} GFC  {owner}  {name or str()}  {(created or str())[:10]}")
+' "$1"
 }
 
 cmd_config() {
@@ -282,6 +300,7 @@ case "${1:-}" in
     rotate-treasury)  shift; cmd_rotate_treasury "$@" ;;
     grant)            shift; cmd_grant "$@" ;;
     grants)           need_root; as_gfc "$VENV/bin/python" treasury_grants.py list ;;
+    wallets)          shift; cmd_wallets "$@" ;;
     reports)          need_root; as_gfc "$VENV/bin/python" moderation.py list ;;
     moderate)         need_root; [[ $# -eq 3 ]] || { usage; exit 2; }; as_gfc "$VENV/bin/python" moderation.py "$2" "$3" ;;
     ""|-h|--help|help) usage ;;
