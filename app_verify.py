@@ -7,6 +7,7 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Form, Request, Depends
 
 import blockchain
+import first_post
 import phone_verify
 import signing
 from config import DB_PATH
@@ -48,4 +49,7 @@ async def verify_phone_check(phone: str = Form(...), code: str = Form(...),
             grant = blockchain.process_user_grant(DB_PATH, username, wallet_id)
             if grant:
                 result["grant"] = grant["amount"]
+            bonus = first_post.pay_pending(DB_PATH, username)
+            if bonus:
+                result["first_post_bonus"] = bonus["amount"]
     return result

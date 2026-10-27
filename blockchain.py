@@ -39,7 +39,8 @@ TX_TYPE_TRANSFER = "TRANSFER"  # User -> User
 TX_TYPE_REWARD   = "REWARD"    # Treasury -> Seeder (PoDT)
 TX_TYPE_REFERRAL = "REFERRAL"  # Treasury -> inviter (friend became active) or invited friend (bonus)
 TX_TYPE_REPOST   = "REPOST"    # Treasury -> original creator (a verified user reposted their content)
-MINT_TX_TYPES = (TX_TYPE_GRANT, TX_TYPE_REWARD, TX_TYPE_REFERRAL, TX_TYPE_REPOST)
+TX_TYPE_FIRST_POST = "FIRST_POST"  # Treasury -> creator's first original post (see first_post.py)
+MINT_TX_TYPES = (TX_TYPE_GRANT, TX_TYPE_REWARD, TX_TYPE_REFERRAL, TX_TYPE_REPOST, TX_TYPE_FIRST_POST)
 
 # Invite rewards: the only two amounts a REFERRAL mint may carry (see referrals.py)
 REFERRAL_REWARD_CENTS = 100_000         # 1,000 GFC to the inviter per friend who becomes active
@@ -47,6 +48,10 @@ REFERRAL_BONUS_CENTS = 10_000           # 100 GFC extra to the invited friend
 
 # Repost credit: the only amount a REPOST mint may carry (see reposts.py)
 REPOST_CREDIT_CENTS = 1_500             # 15 GFC to the original creator per verified reposter
+
+# First post bonus: the amount is node config (first_post.py), but a FIRST_POST mint may
+# carry at most this, and each wallet may receive only one
+FIRST_POST_BONUS_MAX_CENTS = 100_000    # 1,000 GFC
 
 # Limits applied to transactions received from peers
 MAX_REASON_LEN = 500
@@ -672,6 +677,37 @@ def process_repost_mint(db_path: str, wallet_id: str, reason: str) -> Optional[d
     return tx
 
 
+def process_first_post_mint(db_path: str, wallet_id: str, amount_cents: int, reason: str) -> Optional[dict]:
+    """
+    Mint the first post bonus (FIRST_POST, at most FIRST_POST_BONUS_MAX_CENTS) from the
+    treasury. The caller (first_post.py) decides eligibility and makes sure each account
+    is paid once. None if the treasury is short.
+    """
+    if not 0 < amount_cents <= FIRST_POST_BONUS_MAX_CENTS:
+        raise ValueError("first post mints are 1..FIRST_POST_BONUS_MAX_CENTS")
+    if get_balance_cents(db_path, TREASURY_WALLET_ID) < amount_cents:
+        print(f"[Blockchain] WARNING: Treasury depleted, cannot pay first post bonus {amount_cents / 100:.2f} GFC")
+        return None
+    tx = {
+        "id": str(uuid.uuid4()),
+        "sender": TREASURY_WALLET_ID,
+        "recipient": wallet_id,
+        "amount": amount_cents / 100.0,
+        "amount_cents": amount_cents,
+        "reason": reason[:MAX_REASON_LEN],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tx_type": TX_TYPE_FIRST_POST,
+    }
+    tx["tx_hash"] = compute_tx_hash(tx)
+    _sign_mint(tx)
+    conn = sqlite3.connect(db_path)
+    _insert_tx(conn, tx)
+    conn.commit()
+    conn.close()
+    tx["block_index"] = create_block(db_path, [tx["id"]])["block_index"]
+    return tx
+
+
 def play_reward_block_reason(conn: sqlite3.Connection, viewer: str) -> Optional[str]:
     """Why `viewer`'s plays can't earn credit for anyone (None if they can)."""
     if not phone_verify.is_verified(conn, viewer):
@@ -718,10 +754,11 @@ def release_play_slot(db_path: str, proof_id: str):
 #   - tx_hash must equal compute_tx_hash() of the row's contents, and must be new
 #   - TRANSFER: sender is an Ed25519 public key and signed the tx_hash, and has
 #     enough balance on this node (otherwise the row waits in pending_sync_tx)
-#   - GRANT / REWARD / REFERRAL / REPOST: sender is the treasury wallet and the
+#   - GRANT / REWARD / REFERRAL / REPOST / FIRST_POST: sender is the treasury wallet and the
 #     signature is from a pinned treasury key; GRANT is exactly NEW_USER_GRANT_CENTS,
 #     once per wallet; REFERRAL is exactly REFERRAL_REWARD_CENTS or
-#     REFERRAL_BONUS_CENTS; REPOST is exactly REPOST_CREDIT_CENTS
+#     REFERRAL_BONUS_CENTS; REPOST is exactly REPOST_CREDIT_CENTS; FIRST_POST is at
+#     most FIRST_POST_BONUS_MAX_CENTS, once per wallet
 #   - PREMINE: never accepted; every node creates its own genesis
 # The peer's block_index is ignored: accepted rows go into a new local block.
 
@@ -793,6 +830,8 @@ def check_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
             return REJECTED, "wrong referral amount"
         if tx_type == TX_TYPE_REPOST and amount_cents != REPOST_CREDIT_CENTS:
             return REJECTED, "wrong repost credit amount"
+        if tx_type == TX_TYPE_FIRST_POST and amount_cents > FIRST_POST_BONUS_MAX_CENTS:
+            return REJECTED, "first post bonus too large"
     if not signing.verify_tx_signature(signer, tx_hash, signature):
         return REJECTED, "bad signature"
 
@@ -806,6 +845,10 @@ def check_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
                 "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ?",
                 (TX_TYPE_GRANT, recipient)).fetchone():
             return REJECTED, "wallet already received a grant"
+        if tx_type == TX_TYPE_FIRST_POST and conn.execute(
+                "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ?",
+                (TX_TYPE_FIRST_POST, recipient)).fetchone():
+            return REJECTED, "wallet already received a first post bonus"
     finally:
         conn.close()
 
@@ -972,8 +1015,8 @@ def get_blockchain_stats(db_path: str = DB_PATH) -> dict:
 
     rewarded = conn.execute(
         "SELECT COALESCE(SUM(amount_cents), 0) FROM transactions "
-        "WHERE tx_type IN (?, ?, ?) AND block_index IS NOT NULL",
-        (TX_TYPE_REWARD, TX_TYPE_REFERRAL, TX_TYPE_REPOST)
+        "WHERE tx_type IN (?, ?, ?, ?) AND block_index IS NOT NULL",
+        (TX_TYPE_REWARD, TX_TYPE_REFERRAL, TX_TYPE_REPOST, TX_TYPE_FIRST_POST)
     ).fetchone()[0]
 
     circulation_cents = granted + rewarded
