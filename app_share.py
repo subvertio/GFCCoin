@@ -16,7 +16,10 @@ A repost (reposts.py) is labelled "Repost of @original", linking to the original
 page, and its share text credits the original creator.
 
 Seed rows arrive from peers and are untrusted: every field is HTML-escaped and
-every path segment is URL-quoted. The pages run no script.
+every path segment is URL-quoted. The pages run no script of their own; a 3D seed's
+page (.glb / .gltf) loads Google's <model-viewer> web component, pinned with SRI, to
+show the model like the app's viewer does (turntable, orbit, neutral lighting, looping
+animation). Other pages load no script at all.
 
 Environment:
 - GFC_PUBLIC_BASE_URL       absolute base for og:url / og:image (default https://galacticfederation.tech)
@@ -50,6 +53,14 @@ router = APIRouter()
 DEFAULT_PUBLIC_BASE_URL = "https://galacticfederation.tech"
 DEFAULT_APP_LINK_BASE = "gfc://seed"
 DESCRIPTION_LIMIT = 200
+
+# <model-viewer> for 3D seeds. Pinned version + SRI hash; bump both together.
+MODEL_VIEWER_SRC = "https://cdn.jsdelivr.net/npm/@google/model-viewer@4.4.0/dist/model-viewer.min.js"
+MODEL_VIEWER_SRI = "sha384-wjsPzEO+lXOf7d9csIDfAQpPt2OKuUU3m0K9qsdKIuzX4N8czSF6hdh23eAbZa3p"
+# Hash of the <style> model-viewer puts in its shadow DOM (fixed per version), so the CSP
+# can allow it without 'unsafe-inline'. The browser console prints the new one after a bump.
+MODEL_VIEWER_STYLE_HASH = "sha256-PXtZZkJMMyc18o/DN1ZEFOJ2qEGq95IQbVaJFMOXOb0="
+MODEL_VIEWER_EXTENSIONS = (".glb", ".gltf")
 
 
 # ---------- config (read per request so a gateway can change it without code edits) ----------
@@ -185,6 +196,8 @@ def share_page(seed_id: str, request: Request):
     intent = x_intent_url(share_text(seed), url)
 
     ctype = seed["content_type"]
+    viewer_3d = (ctype == "3d" and bool(media_path)
+                 and seed["filename"].lower().endswith(MODEL_VIEWER_EXTENSIONS))
     poster = f' poster="{e(thumb_path)}"' if thumb_path else ""
     if ctype == "image" and media_path:
         media = f'<img class="media" src="{e(media_path)}" alt="{e(title)}">'
@@ -193,7 +206,16 @@ def share_page(seed_id: str, request: Request):
     elif ctype == "audio" and media_path:
         cover = f'<img class="media" src="{e(thumb_path)}" alt="{e(title)}">' if thumb_path else ""
         media = f'{cover}<audio controls preload="metadata" src="{e(media_path)}"></audio>'
-    elif thumb_path:  # 3D and anything else: poster image only
+    elif viewer_3d:
+        # Like the app's viewer: slow turntable that resumes after the user lets go,
+        # orbit/pinch zoom, neutral lighting, first animation looping. The poster shows
+        # at once; the model only downloads when the viewer scrolls into view.
+        media = (f'<model-viewer class="media model" src="{e(media_path)}"{poster} alt="{e(title)}" '
+                 'loading="lazy" reveal="auto" camera-controls touch-action="pan-y" '
+                 'auto-rotate auto-rotate-delay="3000" rotation-per-second="14deg" '
+                 'environment-image="neutral" exposure="1" shadow-intensity="0.5" autoplay>'
+                 '</model-viewer>')
+    elif thumb_path:  # other 3D formats and anything else: poster image only
         media = f'<img class="media" src="{e(thumb_path)}" alt="{e(title)}">'
     else:
         media = '<div class="media placeholder">Open in GFC to view</div>'
@@ -214,6 +236,8 @@ def share_page(seed_id: str, request: Request):
               if seed["owner_avatar"] else "")
 
     nonce = secrets.token_urlsafe(16)
+    viewer_script = (f'<script type="module" src="{MODEL_VIEWER_SRC}" integrity="{MODEL_VIEWER_SRI}" '
+                     'crossorigin="anonymous"></script>\n' if viewer_3d else "")
     page = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -230,10 +254,11 @@ def share_page(seed_id: str, request: Request):
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{e(title)}">
 <meta name="twitter:description" content="{e(og_description)}">
-{image_tags}<style nonce="{nonce}">
+{image_tags}{viewer_script}<style nonce="{nonce}">
 body{{margin:0;font-family:system-ui,sans-serif;background:#0b0d17;color:#e8e9f0}}
 main{{max-width:720px;margin:0 auto;padding:16px}}
 .media{{display:block;width:100%;max-height:70vh;object-fit:contain;background:#000;border-radius:8px}}
+.model{{height:70vh;--poster-color:#000}}
 .placeholder{{padding:64px 0;text-align:center;color:#9aa}}
 audio{{width:100%;margin-top:8px}}
 h1{{font-size:1.4rem;margin:16px 0 4px}}
@@ -260,6 +285,13 @@ h1{{font-size:1.4rem;margin:16px 0 4px}}
 """
     csp = ("default-src 'none'; img-src 'self'; media-src 'self'; "
            f"style-src 'nonce-{nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+    if viewer_3d:
+        # model-viewer fetches the model from this node, decodes textures to blob: URLs and
+        # loads Draco/KTX2 decoders (wasm, run in blob: workers) from gstatic when a model needs them.
+        csp = ("default-src 'none'; img-src 'self' blob: data:; media-src 'self'; "
+               f"script-src {MODEL_VIEWER_SRC} 'wasm-unsafe-eval'; "
+               "connect-src 'self' blob: data: https://www.gstatic.com; worker-src blob:; "
+               f"style-src 'nonce-{nonce}' '{MODEL_VIEWER_STYLE_HASH}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
     return HTMLResponse(page, headers={
         "Content-Security-Policy": csp,
         "X-Content-Type-Options": "nosniff",

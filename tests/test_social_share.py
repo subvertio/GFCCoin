@@ -125,8 +125,41 @@ class SharePageTests(unittest.TestCase):
         self.assertEqual(meta["og:image"], f"{BASE}/thumbs/ship_thumb.jpg")
         self.assertEqual(meta["twitter:card"], "summary_large_image")
         self.assertIn(f'href="gfc://seed/{sid}"', r.text)
-        # 3D seeds get a poster image only, never the model file.
-        self.assertNotIn("/originals/", r.text)
+
+    def test_3d_seed_gets_model_viewer(self):
+        sid = self.add_seed(filename="walker.glb", thumb_filename="walker_thumb.jpg")
+        r = self.client.get(f"/p/{sid}")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn('<model-viewer class="media model" src="/originals/walker.glb"', r.text)
+        self.assertIn('poster="/thumbs/walker_thumb.jpg"', r.text)
+        for attr in ('loading="lazy"', 'reveal="auto"', "camera-controls", "auto-rotate",
+                     'rotation-per-second="14deg"', 'environment-image="neutral"', "autoplay"):
+            self.assertIn(attr, r.text)
+        self.assertIn(f'<script type="module" src="{app_share.MODEL_VIEWER_SRC}" '
+                      f'integrity="{app_share.MODEL_VIEWER_SRI}" crossorigin="anonymous">', r.text)
+        self.assertEqual(parse(r.text).scripts, 1)
+        # Open Graph and "Open in GFC" are unchanged.
+        meta = parse(r.text).meta
+        self.assertEqual(meta["og:image"], f"{BASE}/thumbs/walker_thumb.jpg")
+        self.assertIn(f'href="gfc://seed/{sid}"', r.text)
+        csp = r.headers["content-security-policy"]
+        self.assertIn(f"script-src {app_share.MODEL_VIEWER_SRC} 'wasm-unsafe-eval'", csp)
+        self.assertIn(f"'{app_share.MODEL_VIEWER_STYLE_HASH}'", csp)  # its shadow-DOM <style>
+        self.assertIn("default-src 'none'", csp)
+        self.assertNotIn("unsafe-inline", csp)
+        gltf = self.client.get(f"/p/{self.add_seed(filename='Ship.GLTF')}").text
+        self.assertIn('<model-viewer class="media model" src="/originals/Ship.GLTF"', gltf)
+
+    def test_non_gltf_pages_load_no_viewer(self):
+        # Other 3D formats keep the poster image, and never link the model file.
+        fbx = self.client.get(f"/p/{self.add_seed(filename='ship.fbx', thumb_filename='ship.jpg')}")
+        self.assertIn('<img class="media" src="/thumbs/ship.jpg"', fbx.text)
+        self.assertNotIn("/originals/", fbx.text)
+        img = self.client.get(f"/p/{self.add_seed(content_type='image', filename='pic.glb.png')}")
+        for r in (fbx, img):
+            self.assertNotIn("model-viewer", r.text)
+            self.assertEqual(parse(r.text).scripts, 0)
+            self.assertNotIn("script-src", r.headers["content-security-policy"])
 
     ANDROID_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36"
     DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"
@@ -193,7 +226,7 @@ class SharePageTests(unittest.TestCase):
         self.assertEqual(parsed.meta["og:title"], XSS)  # round-trips as text, not markup
 
     def test_strict_csp(self):
-        r = self.client.get(f"/p/{self.add_seed()}")
+        r = self.client.get(f"/p/{self.add_seed(content_type='image', filename='pic.png')}")
         csp = r.headers["content-security-policy"]
         self.assertIn("default-src 'none'", csp)
         self.assertIn("frame-ancestors 'none'", csp)
