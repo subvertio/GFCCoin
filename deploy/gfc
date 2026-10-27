@@ -112,6 +112,11 @@ cmd_check() {
         line --  "Twilio not configured - using the fake test provider (gfc config)"
     fi
     if [[ -n "$(env_value GFC_TURNSTILE_SECRET)" ]]; then line ok "Turnstile configured"; else line -- "Turnstile not configured - bot check skipped (gfc config)"; fi
+    if command -v ffmpeg >/dev/null 2>&1; then
+        line ok "audio streaming copies on ($(ls "$DATA_DIR/seeds/streams" 2>/dev/null | grep -c '\.m4a$') made)"
+    else
+        line --  "ffmpeg missing - big audio is served as uploaded (gfc update installs it)"
+    fi
     local sa_file; sa_file="$(env_value GFC_PLAY_INTEGRITY_SA_FILE)"
     if [[ -n "$sa_file" && -n "$(env_value GFC_ANDROID_PACKAGE)" ]]; then
         if [[ -r "$sa_file" ]]; then line ok "Play Integrity configured for $(env_value GFC_ANDROID_PACKAGE)"

@@ -43,6 +43,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+import audio_stream
 import moderation
 import reposts
 import signing
@@ -159,6 +160,7 @@ def load_seed(seed_id: str) -> dict:
         seed["owner_avatar"] = public_user.get("avatar_filename") or ""
         seed["reward_wallet"] = signing.seed_reward_wallet(conn, seed_id) or ""
         seed["repost_of"] = reposts.public_info(reposts.repost_of(conn, seed_id))
+        seed["stream"] = audio_stream.stream_url(seed_id) if seed["content_type"] == "audio" else None
         return seed
     finally:
         conn.close()
@@ -208,7 +210,8 @@ def share_page(seed_id: str, request: Request):
         media = f'<video class="hero" controls preload="metadata"{poster} src="{e(media_path)}"></video>'
     elif ctype == "audio" and media_path:
         cover = f'<img class="hero" src="{e(thumb_path)}" alt="{e(title)}">' if thumb_path else ""
-        media = f'{cover}<audio controls preload="metadata" src="{e(media_path)}"></audio>'
+        play_path = seed["stream"] or media_path  # prefer the compressed streaming copy
+        media = f'{cover}<audio controls preload="metadata" src="{e(play_path)}"></audio>'
     elif viewer_3d:
         # Like the app's viewer: slow turntable that resumes after the user lets go,
         # orbit/pinch zoom, neutral lighting, first animation looping. The poster shows

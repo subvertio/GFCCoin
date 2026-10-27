@@ -34,7 +34,7 @@ esac
 echo "==> Installing packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q python3 python3-venv python3-pip git sqlite3 ufw caddy curl ca-certificates unattended-upgrades
+apt-get install -y -q python3 python3-venv python3-pip git sqlite3 ufw caddy curl ca-certificates unattended-upgrades ffmpeg
 if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
     echo "Python 3.11+ required, found $(python3 --version)" >&2
     exit 1

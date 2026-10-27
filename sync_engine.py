@@ -25,6 +25,7 @@ import logging
 from typing import Dict, List, Optional, Set, TYPE_CHECKING
 from pathlib import Path
 
+import audio_stream
 import reposts
 from sync_ingest import SYNCABLE_TABLES, TABLE_COLUMNS, TABLE_TIMESTAMP_COL, ingest_rows, select_rows_since
 from config import DB_PATH, DATA_DIR, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR
@@ -674,6 +675,14 @@ class SyncEngine:
                 reposts.process_seed(DB_PATH, seed_id)
             except Exception as e:
                 logger.warning(f"Repost check failed for seed {seed_id}: {e}")
+            try:  # synced audio gets the same compressed streaming copy as uploads
+                conn = sqlite3.connect(DB_PATH)
+                row = conn.execute("SELECT content_type FROM seeds WHERE id = ?", (seed_id,)).fetchone()
+                conn.close()
+                if row:
+                    audio_stream.enqueue(seed_id, filename, row[0], len(file_data))
+            except Exception as e:
+                logger.warning(f"Audio stream queueing failed for seed {seed_id}: {e}")
         if file_type != "thumbnail" and len(file_data) >= 1024:
             self._award_podt_credits(seed_id, filename, len(file_data), pending)
 

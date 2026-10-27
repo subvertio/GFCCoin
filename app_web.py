@@ -162,8 +162,9 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
                  f'{poster}<span class="play" aria-hidden="true">&#9654;</span></button>')
     elif ctype == "audio" and media_path:
         cover = f'<img src="{e(thumb_path)}" alt="" loading="lazy">' if thumb_path else ""
+        play_path = seed.get("stream") or media_path  # prefer the compressed streaming copy
         media = (f'<div class="media audio">{cover}'
-                 f'<audio controls preload="none" src="{e(media_path)}"></audio></div>')
+                 f'<audio controls preload="none" src="{e(play_path)}"></audio></div>')
     elif ctype == "3d" and media_path and filename.lower().endswith(MODEL_VIEWER_EXTENSIONS):
         # The model-viewer is created by the page script once this card is near the screen or tapped.
         poster = f'<img src="{e(thumb_path)}" alt="" loading="lazy">' if thumb_path else ""
