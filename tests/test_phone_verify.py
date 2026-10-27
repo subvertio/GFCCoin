@@ -108,7 +108,7 @@ class VerificationFlowTests(PhoneVerifyTestCase):
 
     def test_bad_number_and_voip_refused(self):
         _, token = self.register()
-        self.assertEqual(self.start(token, "4155550123").status_code, 400)  # no country code
+        self.assertEqual(self.start(token, "555-0123").status_code, 400)  # too short (10 digits are taken as +1)
         voip = unique_phone()
         FAKE_SMS.voip_numbers.add(voip)
         self.assertEqual(self.start(token, voip).status_code, 400)
@@ -117,7 +117,11 @@ class VerificationFlowTests(PhoneVerifyTestCase):
     def test_normalize_phone(self):
         self.assertEqual(phone_verify.normalize_phone("+1 (415) 555-0123"), "+14155550123")
         self.assertEqual(phone_verify.normalize_phone("0044 20 7946 0958"), "+442079460958")
-        for bad in ("", "+0123456789", "+1", "+1415555012x", "415-555-0123"):
+        # No + means US/Canada
+        self.assertEqual(phone_verify.normalize_phone("415-555-0123"), "+14155550123")
+        self.assertEqual(phone_verify.normalize_phone("(415) 555 0123"), "+14155550123")
+        self.assertEqual(phone_verify.normalize_phone("1 415 555 0123"), "+14155550123")
+        for bad in ("", "+0123456789", "+1", "+1415555012x", "555-0123", "4155550123x", "2415550123456"):
             with self.assertRaises(phone_verify.VerifyError, msg=bad):
                 phone_verify.normalize_phone(bad)
         self.assertEqual(phone_verify.phone_hash("+1 415 555 0123"), phone_verify.phone_hash("+14155550123"))

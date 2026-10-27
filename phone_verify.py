@@ -43,12 +43,19 @@ class VerifyError(Exception):
 
 
 def normalize_phone(phone: str) -> str:
-    """Normalize to E.164 (+ and 8-15 digits). Spaces, dashes, dots and brackets are dropped."""
+    """
+    Normalize to E.164 (+ and 8-15 digits). Spaces, dashes, dots and brackets are dropped.
+    Without a + (or 00), the number is taken as US/Canada: 10 digits, or 11 starting with 1.
+    """
     cleaned = re.sub(r"[\s\-.()]", "", phone or "")
     if cleaned.startswith("00"):
         cleaned = "+" + cleaned[2:]
+    elif cleaned.isdigit() and len(cleaned) == 10:
+        cleaned = "+1" + cleaned
+    elif cleaned.isdigit() and len(cleaned) == 11 and cleaned.startswith("1"):
+        cleaned = "+" + cleaned
     if not E164_RE.match(cleaned):
-        raise VerifyError("phone must be in international format, e.g. +14155550123")
+        raise VerifyError("enter a 10-digit US number, e.g. 415 555 0123 (or + and a country code)")
     return cleaned
 
 
