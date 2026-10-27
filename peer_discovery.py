@@ -37,6 +37,22 @@ BOOTSTRAP_TRACKERS: List[str] = [
     "https://www.galacticfederation.tech/_functions/peers",
 ]
 
+# Always-on peers every node tries to sync with ("host:port"). The public
+# treasury/gateway node is the network's hub. Override with GFC_BOOTSTRAP_PEERS
+# (comma-separated; set it empty to disable, e.g. on a private test network).
+DEFAULT_BOOTSTRAP_PEERS = "node.galacticfederation.tech:6881"
+
+
+def bootstrap_peers() -> List[tuple]:
+    """(host, port) pairs from GFC_BOOTSTRAP_PEERS, or the defaults. Bad entries are skipped."""
+    raw = os.environ.get("GFC_BOOTSTRAP_PEERS", DEFAULT_BOOTSTRAP_PEERS)
+    peers = []
+    for item in raw.split(","):
+        host, _, port = item.strip().rpartition(":")
+        if host and port.isdigit() and 0 < int(port) < 65536:
+            peers.append((host, int(port)))
+    return peers
+
 LAN_DISCOVERY_PORT = 6882
 PEER_LISTEN_PORT = 6881
 GFC_MAGIC = b"GFC_PEER_V1"
@@ -118,6 +134,7 @@ class PeerDiscovery:
 
         # Load previously known peers from disk
         self._load_peers()
+        await self._add_bootstrap_peers()
 
         self._tasks = [
             asyncio.create_task(self._bootstrap_from_trackers()),
@@ -701,6 +718,22 @@ class PeerDiscovery:
                 del self.known_peers[k]
             if stale:
                 logger.info(f"Cleaned up {len(stale)} stale peers")
+            # Built-in peers are never dropped for being quiet, and DNS changes are picked up
+            await self._add_bootstrap_peers()
+
+    async def _add_bootstrap_peers(self):
+        """Resolve the built-in peers to IPs and add them (skipping ourselves)."""
+        loop = asyncio.get_running_loop()
+        for host, port in bootstrap_peers():
+            try:
+                infos = await loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
+            except (socket.gaierror, OSError) as e:
+                logger.debug(f"Bootstrap peer {host} did not resolve: {e}")
+                continue
+            # Sync keys peers by IP:port, so store the resolved IP rather than the hostname
+            for ip in sorted({info[4][0] for info in infos}):
+                if not self._is_self(ip, port):
+                    self._add_peer(ip, port)
 
     # ---------- Status ----------
 
