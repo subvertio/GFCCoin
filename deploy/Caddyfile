@@ -15,7 +15,8 @@ __DOMAIN__ {
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options nosniff
-		Referrer-Policy strict-origin-when-cross-origin
+		# A default: pages that set a stricter policy keep theirs (/verify sends no-referrer)
+		?Referrer-Policy strict-origin-when-cross-origin
 		-Server
 	}
 
