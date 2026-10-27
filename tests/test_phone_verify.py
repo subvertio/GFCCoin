@@ -426,3 +426,48 @@ class TwilioAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TwilioCredentialTests(unittest.TestCase):
+    """A restricted API key is preferred over the account auth token."""
+
+    VARS = ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_API_KEY_SID",
+            "TWILIO_API_KEY_SECRET", "TWILIO_VERIFY_SERVICE_SID")
+
+    def setUp(self):
+        self.saved = {v: os.environ.pop(v, None) for v in self.VARS}
+        self.saved_verifier = phone_verify._verifier
+
+    def tearDown(self):
+        for v, val in self.saved.items():
+            os.environ.pop(v, None)
+            if val is not None:
+                os.environ[v] = val
+        phone_verify._verifier = self.saved_verifier
+
+    def build(self, **env):
+        os.environ.update(env)
+        phone_verify._verifier = None
+        return phone_verify.get_verifier()
+
+    def test_api_key_preferred(self):
+        v = self.build(TWILIO_ACCOUNT_SID="AC1", TWILIO_AUTH_TOKEN="tok", TWILIO_API_KEY_SID="SK1",
+                       TWILIO_API_KEY_SECRET="sec", TWILIO_VERIFY_SERVICE_SID="VA1")
+        self.assertIsInstance(v, phone_verify.TwilioVerifier)
+        self.assertEqual(v.auth_user, "SK1")
+
+    def test_api_key_without_auth_token(self):
+        v = self.build(TWILIO_ACCOUNT_SID="AC1", TWILIO_API_KEY_SID="SK1",
+                       TWILIO_API_KEY_SECRET="sec", TWILIO_VERIFY_SERVICE_SID="VA1")
+        self.assertEqual(v.auth_user, "SK1")
+
+    def test_auth_token_fallback(self):
+        v = self.build(TWILIO_ACCOUNT_SID="AC1", TWILIO_AUTH_TOKEN="tok", TWILIO_VERIFY_SERVICE_SID="VA1")
+        self.assertEqual(v.auth_user, "AC1")
+
+    def test_incomplete_key_or_missing_service_uses_fake(self):
+        self.assertIsInstance(self.build(TWILIO_API_KEY_SID="SK1", TWILIO_VERIFY_SERVICE_SID="VA1"),
+                              phone_verify.FakeVerifier)
+        os.environ.pop("TWILIO_VERIFY_SERVICE_SID")
+        self.assertIsInstance(self.build(TWILIO_API_KEY_SID="SK1", TWILIO_API_KEY_SECRET="sec"),
+                              phone_verify.FakeVerifier)

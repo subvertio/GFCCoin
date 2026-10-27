@@ -31,7 +31,8 @@ NO_KEY_FILE = Path(_TMP) / "no_treasury_key.hex"  # never created: nodes without
 os.environ["GFC_DATA_DIR"] = _TMP
 os.environ["GFC_TREASURY_PUBKEYS"] = TREASURY_PUB
 os.environ["GFC_TREASURY_KEY_FILE"] = str(NO_KEY_FILE)
-for _var in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_VERIFY_SERVICE_SID", "GFC_TURNSTILE_SECRET"):
+for _var in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_API_KEY_SID", "TWILIO_API_KEY_SECRET",
+             "TWILIO_VERIFY_SERVICE_SID", "GFC_TURNSTILE_SECRET"):
     os.environ.pop(_var, None)  # tests never reach real Twilio or Cloudflare
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
