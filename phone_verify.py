@@ -4,6 +4,8 @@ GFC Phone Verification - makes each rewarded account cost a phone number.
 - A verifier sends and checks one-time SMS codes: `start(phone)` / `check(phone, code)`.
   TwilioVerifier is used when TWILIO_* credentials (an API key, or the account
   SID and auth token) and the Verify service SID are set, else FakeVerifier.
+- Or Firebase phone sign-in (GFC_FIREBASE_CONFIG): the browser texts and checks the code
+  with Firebase, and the node checks the Google-signed ID token it returns (see FIREBASE).
 - Only an HMAC-SHA256 of the normalized E.164 number is stored, keyed with a
   secret in the data dir (phone_hmac_key.hex). The raw number is never written
   to the database, and none of these tables are synced to peers.
@@ -11,18 +13,25 @@ GFC Phone Verification - makes each rewarded account cost a phone number.
   and per phone hash.
 """
 
+import base64
 import datetime
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
 import secrets
 import sqlite3
+import time
 from pathlib import Path
 from typing import Optional
 
 import httpx
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 
 from config import DATA_DIR
 
@@ -386,7 +395,12 @@ def _provider_reason(ex: VerifyError) -> str:
     return PROVIDER_REASON + (f":{ex.provider_code}" if ex.provider_code is not None else "")
 
 
-def start_verification(db_path: str, username: str, phone: str) -> dict:
+def start_verification(db_path: str, username: str, phone: str, send: bool = True) -> dict:
+    """
+    Checks and counts a start, then sends the code. send=False is for Firebase, where the
+    browser sends the code itself: everything else (limits, the pending row) is the same,
+    and complete_firebase_verification requires that pending row.
+    """
     try:
         number = normalize_phone(phone)
     except VerifyError as ex:
@@ -412,16 +426,17 @@ def start_verification(db_path: str, username: str, phone: str) -> dict:
         conn.execute("INSERT INTO phone_verify_starts (username, phone_hash, created_at) VALUES (?, ?, ?)",
                      (username, hashed, now))
         conn.commit()
-        try:
-            get_verifier().start(number)
-        except VerifyError as ex:
-            raise FlowError(400, str(ex), _provider_reason(ex))
+        if send:
+            try:
+                get_verifier().start(number)
+            except VerifyError as ex:
+                raise FlowError(400, str(ex), _provider_reason(ex))
         conn.execute("INSERT OR REPLACE INTO phone_verify_pending (username, phone_hash, started_at, failed_checks) "
                      "VALUES (?, ?, ?, 0)", (username, hashed, now))
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "sent": True}
+    return {"ok": True, "sent": send, "phone": number}
 
 
 def check_verification(db_path: str, username: str, phone: str, code: str) -> dict:
@@ -461,3 +476,151 @@ def check_verification(db_path: str, username: str, phone: str, code: str) -> di
     finally:
         conn.close()
     return {"ok": True, "verified": True}
+
+
+def complete_firebase_verification(db_path: str, username: str, id_token: str) -> dict:
+    """
+    Firebase sent and checked the code in the browser; id_token is the Firebase ID token it
+    returned. The number comes from the token (Google-signed), and must be the one this user
+    started with start_verification(send=False) within CODE_TTL.
+    """
+    number = verify_firebase_token(id_token)
+    hashed = phone_hash(number)
+    conn = sqlite3.connect(db_path)
+    try:
+        init_phone_tables(conn)
+        if is_verified(conn, username):
+            return {"ok": True, "verified": True}
+        pending = conn.execute("SELECT phone_hash, started_at FROM phone_verify_pending WHERE username = ?",
+                               (username,)).fetchone()
+        if not pending or pending[0] != hashed:
+            raise FlowError(400, "no verification started for this number")
+        if _now() - datetime.datetime.fromisoformat(pending[1]) > CODE_TTL:
+            conn.execute("DELETE FROM phone_verify_pending WHERE username = ?", (username,))
+            conn.commit()
+            raise FlowError(400, "code expired or too many attempts, request a new code")
+        if not record_verified(conn, username, hashed):
+            conn.rollback()
+            raise FlowError(409, "this phone number is already verified on another account")
+        conn.execute("DELETE FROM phone_verify_pending WHERE username = ?", (username,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "verified": True}
+
+
+# ============================================================================
+# FIREBASE (the browser sends and checks the SMS code; the node checks the result)
+# ============================================================================
+#
+# GFC_FIREBASE_CONFIG is the web app's public config from the Firebase console, as JSON:
+#   {"apiKey": "...", "authDomain": "<project>.firebaseapp.com", "projectId": "<project>", "appId": "..."}
+# When it's set, the browser verification page sends codes with Firebase phone sign-in
+# instead of Twilio, and the node accepts the Firebase ID token Firebase hands back. The
+# token is checked here against Google's published keys: no service account is needed.
+
+FIREBASE_CERTS_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com"
+FIREBASE_MAX_AUTH_AGE = datetime.timedelta(minutes=10)  # the sign-in must be this fresh
+FIREBASE_LEEWAY = 60  # seconds of clock skew allowed on iat/exp
+_firebase_client = httpx.Client(timeout=5.0)
+_firebase_certs = {"keys": {}, "expires": 0.0}
+
+
+def firebase_config() -> Optional[dict]:
+    """The web config from GFC_FIREBASE_CONFIG, or None when Firebase isn't set up (or the JSON is bad)."""
+    raw = os.environ.get("GFC_FIREBASE_CONFIG", "").strip()
+    if not raw:
+        return None
+    try:
+        cfg = json.loads(raw)
+    except ValueError:
+        logger.error("GFC_FIREBASE_CONFIG isn't valid JSON: Firebase phone verification is off")
+        return None
+    if not isinstance(cfg, dict) or not all(isinstance(cfg.get(k), str) and cfg[k]
+                                            for k in ("apiKey", "authDomain", "projectId")):
+        logger.error("GFC_FIREBASE_CONFIG needs apiKey, authDomain and projectId: Firebase phone verification is off")
+        return None
+    return cfg
+
+
+def set_firebase_client(client: httpx.Client):
+    """Replace the HTTP client that fetches Google's signing certificates (tests). Clears the cache."""
+    global _firebase_client
+    _firebase_client = client
+    _firebase_certs.update(keys={}, expires=0.0)
+
+
+def _firebase_keys() -> dict:
+    """kid -> public key, cached for as long as Google's Cache-Control says."""
+    if _firebase_certs["keys"] and time.time() < _firebase_certs["expires"]:
+        return _firebase_certs["keys"]
+    try:
+        r = _firebase_client.get(FIREBASE_CERTS_URL)
+        certs = r.json() if r.status_code == 200 else None
+    except (httpx.HTTPError, ValueError) as ex:
+        logger.warning("Firebase signing keys unreachable: %s", type(ex).__name__)
+        certs = None
+    if not isinstance(certs, dict) or not certs:
+        raise FlowError(503, "verification service unavailable, try again later")
+    keys = {}
+    for kid, pem in certs.items():
+        try:
+            keys[kid] = x509.load_pem_x509_certificate(pem.encode()).public_key()
+        except (ValueError, TypeError, AttributeError):
+            continue
+    max_age = re.search(r"max-age=(\d+)", r.headers.get("cache-control", ""))
+    _firebase_certs.update(keys=keys, expires=time.time() + min(int(max_age.group(1)) if max_age else 3600, 86400))
+    return keys
+
+
+def _b64url(part: str) -> bytes:
+    return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+
+
+def verify_firebase_token(id_token: str) -> str:
+    """
+    The E.164 phone number a Firebase ID token proves, or FlowError(400). Checks the RS256
+    signature against Google's keys, the audience and issuer for this project, expiry, that
+    the user signed in with phone just now, and that the token carries a phone number.
+    """
+
+    cfg = firebase_config()
+    if not cfg:
+        raise FlowError(503, "phone verification isn't set up on this node")
+    bad = FlowError(400, "phone sign-in didn't verify, request a new code")
+    parts = (id_token or "").split(".")
+    if len(parts) != 3 or len(id_token) > 8192:
+        raise bad
+    try:
+        header = json.loads(_b64url(parts[0]))
+        claims = json.loads(_b64url(parts[1]))
+        signature = _b64url(parts[2])
+    except (ValueError, TypeError):
+        raise bad
+    if not isinstance(header, dict) or not isinstance(claims, dict) or header.get("alg") != "RS256":
+        raise bad
+    key = _firebase_keys().get(header.get("kid"))
+    if key is None:
+        raise bad
+    try:
+        key.verify(signature, f"{parts[0]}.{parts[1]}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    except (InvalidSignature, ValueError, TypeError):
+        raise bad
+
+    project = cfg["projectId"]
+    now = time.time()
+    numbers_ok = all(isinstance(claims.get(k), (int, float)) for k in ("exp", "iat", "auth_time"))
+    if (not numbers_ok
+            or claims.get("aud") != project
+            or claims.get("iss") != f"https://securetoken.google.com/{project}"
+            or not isinstance(claims.get("sub"), str) or not claims["sub"]
+            or claims["exp"] < now - FIREBASE_LEEWAY
+            or claims["iat"] > now + FIREBASE_LEEWAY
+            or claims["auth_time"] > now + FIREBASE_LEEWAY
+            or now - claims["auth_time"] > FIREBASE_MAX_AUTH_AGE.total_seconds()
+            or (claims.get("firebase") or {}).get("sign_in_provider") != "phone"):
+        raise bad
+    try:
+        return normalize_phone(str(claims.get("phone_number") or ""))
+    except VerifyError:
+        raise bad
