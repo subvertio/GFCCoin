@@ -119,6 +119,12 @@ cmd_check() {
         line --  "Twilio not configured - using the fake test provider (gfc config)"
     fi
     if [[ -n "$(env_value GFC_TURNSTILE_SECRET)" ]]; then line ok "Turnstile configured"; else line -- "Turnstile not configured - bot check skipped (gfc config)"; fi
+    local fb_project
+    fb_project="$(as_gfc env GFC_FIREBASE_CONFIG="$(set -a; . "$ENV_FILE" 2>/dev/null; printf '%s' "${GFC_FIREBASE_CONFIG:-}")" \
+        "$VENV/bin/python" -c 'import phone_verify as p; c = p.firebase_config(); print(c["projectId"] if c else "")' 2>/dev/null || true)"
+    if [[ -n "$fb_project" ]]; then line ok "Firebase phone verification on (project $fb_project)"
+    elif [[ -n "$(env_value GFC_FIREBASE_CONFIG)" ]]; then line FAIL "GFC_FIREBASE_CONFIG is set but not valid JSON with apiKey, authDomain, projectId (single quotes around it?)"
+    else line -- "Firebase not configured - the browser page uses Twilio for SMS (gfc config)"; fi
     if command -v ffmpeg >/dev/null 2>&1; then
         line ok "media streaming copies on ($(ls "$DATA_DIR/seeds/streams" 2>/dev/null | grep -c '\.m4a$') audio, $(ls "$DATA_DIR/seeds/streams" 2>/dev/null | grep -c '\.mp4$') video)"
     else
