@@ -31,7 +31,7 @@ def seed_row_to_dict(row, owner_for_engagement: str = "") -> Dict[str, Any]:
     """Convert a seeds DB row to a JSON-friendly dict.
     Row columns: id, title, description, tags, filename, thumb_filename,
                  content_type, file_size, gfc_earned, likes, comments, views, created_at, owner,
-                 owner_avatar_filename
+                 owner_avatar_filename, edited_at
     """
     avatar_filename = row[14] if len(row) > 14 else ""
     owner_avatar = f"/avatars/{avatar_filename}" if avatar_filename else ""
@@ -44,6 +44,7 @@ def seed_row_to_dict(row, owner_for_engagement: str = "") -> Dict[str, Any]:
         "gfc_earned": row[8], "likes": row[9], "comments": row[10],
         "views": row[11], "created_at": row[12], "owner": row[13],
         "owner_avatar": owner_avatar,
+        "edited_at": (row[15] if len(row) > 15 else "") or "",
     }
     # Streaming copy (compressed audio, or upright 720p H.264 video) when the node has
     # made one; players should prefer it over "full" (the untouched original)
@@ -61,7 +62,8 @@ SEED_SELECT = (
     "(SELECT COUNT(*) FROM likes WHERE likes.seed_id = seeds.id) AS live_likes, "
     "(SELECT COUNT(*) FROM comments WHERE comments.seed_id = seeds.id) AS live_comments, "
     "seeds.views, seeds.created_at, seeds.owner, "
-    "COALESCE(users.avatar_filename, '') AS owner_avatar_filename "
+    "COALESCE(users.avatar_filename, '') AS owner_avatar_filename, "
+    "COALESCE(seeds.edited_at, '') "
     "FROM seeds LEFT JOIN users ON LOWER(seeds.owner) = LOWER(users.username)"
 )
 

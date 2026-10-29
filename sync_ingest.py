@@ -12,6 +12,8 @@ Shared by the TCP sync engine (sync_engine.py) and the tracker relay
   wallet, so they earn nothing on this node.
 - `originality_receipts` must be signed by a pinned treasury key (reposts.py), or
   they are dropped. New ones re-check local seeds (the earliest receipt wins).
+- `seed_edits` must be signed by their signer; each node applies a seed's newest
+  edit signed by that seed's reward wallet (seed_edits.py).
 - `wallets` rows are accepted as directory entries only. Balances are never taken
   from a peer; they are always computed from validated transactions.
 - `blocks`, `user_grants`, `podt_proofs` and the local repost tables
@@ -25,19 +27,21 @@ from typing import Dict, List
 
 import blockchain
 import reposts
+import seed_edits
 import signing
 from config import DB_PATH
 from security import PUBLIC_USER_COLUMNS, sanitize_incoming_rows
 
 logger = logging.getLogger("gfc.sync")
 
-SYNCABLE_TABLES = ["users", "seeds", "transactions", "likes", "comments", "bookmarks", "wallets",
+SYNCABLE_TABLES = ["users", "seeds", "seed_edits", "transactions", "likes", "comments", "bookmarks", "wallets",
                    "originality_receipts"]
 
 # Columns for each table (sent to peers, and the only ones accepted from them)
 TABLE_COLUMNS = {
     "users": PUBLIC_USER_COLUMNS,  # never share passwords, email, phone or names
     "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet, signature",
+    "seed_edits": "id, seed_id, title, description, tags, edited_at, signer, signature",
     "transactions": "id, sender, recipient, amount, reason, timestamp, amount_cents, tx_hash, tx_type, signature, signer",
     "likes": "id, seed_id, owner, created_at",
     "comments": "id, seed_id, owner, text, created_at",
@@ -50,6 +54,7 @@ TABLE_COLUMNS = {
 TABLE_TIMESTAMP_COL = {
     "users": "created_at",
     "seeds": "created_at",
+    "seed_edits": "edited_at",
     "transactions": "timestamp",
     "likes": "created_at",
     "comments": "created_at",
@@ -62,6 +67,8 @@ TABLE_TIMESTAMP_COL = {
 # mints from nodes without the treasury key) are local-only.
 TABLE_SEND_FILTER = {
     "transactions": "signature != '' AND tx_type != 'PREMINE'",
+    # Edits of unsigned seeds can't be verified elsewhere, so they stay local
+    "seed_edits": "signature != ''",
 }
 
 
@@ -104,6 +111,12 @@ def ingest_rows(table: str, columns: List[str], rows: list, db_path: str = DB_PA
 
     if table == "originality_receipts":
         counts = reposts.ingest_receipts(db_path, columns, rows)
+        result.update(inserted=counts["inserted"], duplicates=counts["duplicates"],
+                      rejected=counts["rejected"], new_ids=counts["new_ids"])
+        return result
+
+    if table == "seed_edits":
+        counts = seed_edits.ingest_edits(db_path, columns, rows)
         result.update(inserted=counts["inserted"], duplicates=counts["duplicates"],
                       rejected=counts["rejected"], new_ids=counts["new_ids"])
         return result
@@ -158,4 +171,6 @@ def ingest_rows(table: str, columns: List[str], rows: list, db_path: str = DB_PA
         conn.commit()
     finally:
         conn.close()
+    if table == "seeds":
+        seed_edits.apply_pending_for_seeds(db_path, result["new_ids"])
     return result

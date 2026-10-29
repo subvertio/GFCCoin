@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
+import signing
 from config import DB_PATH
 from blockchain import (
     process_podt_reward,
@@ -103,6 +104,30 @@ async def report_transfer(request: TransferReportRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _account_name(conn: sqlite3.Connection, wallet: str) -> str:
+    """
+    The account name behind a wallet, only when it can be trusted: the wallet's key is
+    on this node, or the wallet signed a seed naming its owner. Synced wallet rows
+    alone aren't enough (anyone can send one with a borrowed name). "" if unknown.
+    """
+    signing.init_wallet_keys_table(conn)
+    row = conn.execute(
+        "SELECT wallets.owner FROM wallets JOIN wallet_keys ON wallet_keys.wallet_id = wallets.id "
+        "WHERE wallets.id = ? AND wallets.owner != ''", (wallet,)
+    ).fetchone()
+    if row:
+        return row[0]
+    fields = signing.SEED_SIGNED_FIELDS + ("signature",)
+    for seed_row in conn.execute(
+        f"SELECT {', '.join(fields)} FROM seeds WHERE reward_wallet = ? AND signature != '' "
+        "ORDER BY created_at LIMIT 5", (wallet,)
+    ).fetchall():
+        seed = dict(zip(fields, seed_row))
+        if seed.get("owner") and signing.verify_seed(seed):
+            return seed["owner"]
+    return ""
+
+
 @podt_router.get("/stats")
 async def podt_stats():
     """Get network-wide PoDT statistics."""
@@ -123,6 +148,7 @@ async def podt_stats():
             "SUM(file_size_bytes) as total_bytes "
             "FROM podt_proofs GROUP BY seeder_wallet ORDER BY total_reward DESC LIMIT 10"
         ).fetchall()
+        names = {row[0]: _account_name(conn, row[0]) for row in top_seeders}
 
         conn.close()
 
@@ -137,6 +163,7 @@ async def podt_stats():
             "top_seeders": [
                 {
                     "wallet": row[0],
+                    "owner": names.get(row[0], ""),
                     "total_earned_gfc": row[1] / 100.0,
                     "transfer_count": row[2],
                     "total_bytes_mb": row[3] / (1024 * 1024) if row[3] else 0.0,

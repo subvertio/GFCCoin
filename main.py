@@ -40,6 +40,7 @@ import logredact
 import moderation
 import keystore
 import first_post
+import seed_edits
 import referrals
 import reposts
 import signing
@@ -197,6 +198,7 @@ def init_db():
     keystore.init_keystore(conn)
     reposts.init_repost_tables(conn)
     first_post.init_first_post_tables(conn)
+    seed_edits.init_seed_edit_tables(conn)
     migrate_plaintext_passwords(conn)
 
     conn.commit()
