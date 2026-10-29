@@ -118,7 +118,7 @@ class WebFeedTests(unittest.TestCase):
         self.assertTrue(r.headers["content-type"].startswith("text/html"))
         self.assertEqual(cards(r.text).ids, [b, a])  # newest first
         self.assertIn(f'href="/p/{a}"', r.text)
-        self.assertIn("Open in GFC", r.text)
+        self.assertIn("Get GFC for Android", r.text)  # the download header (test_app_release covers it)
         self.assertIn('<meta property="og:title"', r.text)
         self.assertIn("Accept", r.headers["vary"])
 

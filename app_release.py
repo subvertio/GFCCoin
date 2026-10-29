@@ -1,13 +1,17 @@
 """
-GFC Android app download - the public APK, straight from the node.
+GFC app downloads - the Android APK and the Windows installer, straight from the node.
 
-- GET /app               download page: version, size, date, checksums, how to install
+- GET /app               download page: both apps, version, size, date, checksums, how to install
 - GET /app/gfc.apk       the APK itself (Range supported, so big downloads resume)
 - GET /app/release.json  version, size, SHA-256 and signing certificate, for clients that
                          check for updates
+- GET /app/windows       the Windows installer (the .exe, or the .zip holding it)
+- GET /app/windows.json  its version, size and SHA-256
 
-Publishing (on the node, as root, normally through `gfc publish-app FILE VERSION`):
+Publishing (on the node, as root, normally through `gfc publish-app FILE VERSION` and
+`gfc publish-windows FILE VERSION`):
     python app_release.py publish /tmp/gfc.apk 0.1.0
+    python app_release.py publish-windows /tmp/GFC-Setup-0.1.0-Windows.zip 0.1.0
     python app_release.py info
 
 publish refuses an APK unless its signing certificate is one of GFC_ANDROID_CERT_SHA256 (the
@@ -16,7 +20,11 @@ can't be published by mistake: phones that installed it could never take a relea
 This reads the certificate from the APK Signature Scheme v2/v3 block (or the v1 JAR signature);
 Android itself checks the signature when installing.
 
-The APK lives in DATA_DIR/app/ (not in git, not in backups); a publish replaces it atomically.
+The Windows installer isn't code-signed yet, so there's no signature to check: publish-windows
+only checks that it's a Windows program (or a zip holding exactly one), so a wrong file can't go
+out by mistake. Its SHA-256 is shown on the download page.
+
+Both live in DATA_DIR/app/ (not in git, not in backups); a publish replaces them atomically.
 """
 
 import datetime
@@ -45,6 +53,10 @@ APP_DIR = DATA_DIR / "app"
 APK_PATH = APP_DIR / "gfc.apk"
 INFO_PATH = APP_DIR / "release.json"
 MAX_APK_BYTES = 512 * 1024 * 1024
+WINDOWS_INFO_PATH = APP_DIR / "windows.json"
+WINDOWS_EXTENSIONS = (".exe", ".zip")
+MAX_WINDOWS_BYTES = 1024 * 1024 * 1024
+SITE_URL = "https://galacticfederation.tech"
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$")
 
 _SIG_BLOCK_MAGIC = b"APK Sig Block 42"
@@ -195,6 +207,80 @@ def publish(src: str, version: str) -> dict:
     return release
 
 
+# ---------- Windows ----------
+
+def _windows_path(ext: str) -> Path:
+    return APP_DIR / f"gfc-windows{ext}"
+
+
+def windows_info() -> Optional[dict]:
+    """The published Windows installer, or None."""
+    try:
+        data = json.loads(WINDOWS_INFO_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    ext = data.get("ext")
+    return data if ext in WINDOWS_EXTENSIONS and _windows_path(ext).is_file() else None
+
+
+def _is_windows_program(head: bytes) -> bool:
+    return head[:2] == b"MZ"
+
+
+def _check_windows_file(path: Path) -> str:
+    """The file's kind (.exe or .zip) if it's a Windows installer, else ReleaseError."""
+    ext = path.suffix.lower()
+    if ext not in WINDOWS_EXTENSIONS:
+        raise ReleaseError("the Windows installer should be the .exe or the .zip holding it")
+    if ext == ".exe":
+        with open(path, "rb") as f:
+            if not _is_windows_program(f.read(2)):
+                raise ReleaseError("that .exe isn't a Windows program")
+        return ext
+    try:
+        with zipfile.ZipFile(path) as zf:
+            entries = [i for i in zf.infolist() if not i.is_dir()]
+            if len(entries) != 1 or not entries[0].filename.lower().endswith(".exe"):
+                raise ReleaseError("the zip should hold just the installer (one .exe)")
+            with zf.open(entries[0]) as f:
+                if not _is_windows_program(f.read(2)):
+                    raise ReleaseError("the .exe in that zip isn't a Windows program")
+    except zipfile.BadZipFile:
+        raise ReleaseError("that .zip can't be read")
+    return ext
+
+
+def publish_windows(src: str, version: str) -> dict:
+    """Check src is a Windows installer (or a zip of one), then make it the public download."""
+    path = Path(src)
+    if not path.is_file():
+        raise ReleaseError(f"no such file: {src}")
+    if not VERSION_RE.match(version or ""):
+        raise ReleaseError("version should look like 0.1.0 (letters, digits, . + -)")
+    size = path.stat().st_size
+    if not 1024 < size <= MAX_WINDOWS_BYTES:
+        raise ReleaseError("that file is too small or too big to be the GFC installer")
+    ext = _check_windows_file(path)
+    digest = hashlib.sha256()
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = APP_DIR / f"gfc-windows{ext}.part"
+    with open(path, "rb") as fin, open(tmp, "wb") as fout:
+        for chunk in iter(lambda: fin.read(1024 * 1024), b""):
+            digest.update(chunk)
+            fout.write(chunk)
+    os.chmod(tmp, 0o644)
+    release = {"version": version, "size": size, "sha256": digest.hexdigest(), "ext": ext,
+               "published_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+    os.replace(tmp, _windows_path(ext))
+    for other in WINDOWS_EXTENSIONS:  # a .zip replacing an .exe (or the reverse) leaves no stale file
+        if other != ext and _windows_path(other).exists():
+            _windows_path(other).unlink()
+    info_tmp = APP_DIR / "windows.json.part"
+    info_tmp.write_text(json.dumps(release, indent=2), encoding="utf-8")
+    os.replace(info_tmp, WINDOWS_INFO_PATH)
+    return release
+
+
 # ---------- HTTP ----------
 
 @router.get("/app/release.json")
@@ -215,12 +301,33 @@ def download_apk():
                         headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
 
 
+@router.get("/app/windows.json")
+def windows_json():
+    rel = windows_info()
+    if not rel:
+        return JSONResponse({"published": False}, headers={"Cache-Control": "no-cache"})
+    return JSONResponse({"published": True, "url": "/app/windows", **rel}, headers={"Cache-Control": "no-cache"})
+
+
+@router.get("/app/windows")
+def download_windows():
+    rel = windows_info()
+    if not rel:
+        raise HTTPException(status_code=404, detail="the Windows app isn't published yet")
+    media = "application/zip" if rel["ext"] == ".zip" else "application/vnd.microsoft.portable-executable"
+    return FileResponse(_windows_path(rel["ext"]), media_type=media,
+                        filename=f"GFC-Setup-{rel['version']}-Windows{rel['ext']}",
+                        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
+
+
 @router.get("/app")
 def download_page():
     rel = info()
+    win = windows_info()
     e = lambda s: html.escape(str(s), quote=True)  # noqa: E731
     if rel:
-        body = f"""<a class="button" href="/app/gfc.apk" download>Download GFC for Android</a>
+        body = f"""<h2 id="android">Android</h2>
+<a class="button" href="/app/gfc.apk" download>Download GFC for Android</a>
 <p class="meta">Version {e(rel['version'])} &middot; {rel['size'] / 1048576:.0f} MB &middot; {e(rel['published_at'][:10])}</p>
 <h2>Installing</h2>
 <ol>
@@ -235,7 +342,29 @@ def download_page():
 <p class="hash">APK SHA-256<br><code>{e(rel['sha256'])}</code></p>
 <p class="hash">Signing certificate SHA-256<br><code>{e(rel['cert_sha256'])}</code></p>"""
     else:
-        body = """<p>The Android app is coming soon. Meanwhile everything works on the <a href="/web">web feed</a>.</p>"""
+        body = """<h2 id="android">Android</h2>
+<p>The Android app is coming soon. Meanwhile everything works on the <a href="/web">web feed</a>.</p>"""
+    if win:
+        zipped = win["ext"] == ".zip"
+        first_step = ("<li>Open the downloaded .zip and run the GFC-Setup file inside it.</li>" if zipped
+                      else "<li>Run the downloaded GFC-Setup file.</li>")
+        body += f"""
+<h2 id="windows">Windows</h2>
+<a class="button" href="/app/windows" download>Download GFC for Windows</a>
+<p class="meta">Version {e(win['version'])} &middot; {win['size'] / 1048576:.0f} MB &middot; {e(win['published_at'][:10])}</p>
+<ol>
+{first_step}
+<li>The installer isn't code-signed yet, so Windows SmartScreen may warn about it. Choose <b>More info</b>, then <b>Run anyway</b>: the checksum below matches what this node published.</li>
+<li>Updates install over the old version; your account and wallet stay on the network.</li>
+</ol>
+<p>Windows 10 or 11, 64-bit.</p>
+<p class="hash">{"Zip" if zipped else "Installer"} SHA-256<br><code>{e(win['sha256'])}</code></p>"""
+    else:
+        body += """
+<h2 id="windows">Windows</h2>
+<p>The Windows app is coming soon.</p>"""
+    body += f"""
+<p class="site">Learn more about GFC at <a href="{SITE_URL}" rel="noopener">GalacticFederation.tech</a></p>"""
     nonce = secrets.token_urlsafe(16)
     page = f"""<!doctype html>
 <html lang="en">
@@ -243,7 +372,7 @@ def download_page():
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Get the GFC app</title>
-<meta name="description" content="Download the GFC app for Android: post, play and earn GFC.">
+<meta name="description" content="Download the GFC app for Android and Windows: post, play and earn GFC.">
 <style nonce="{nonce}">
 *{{box-sizing:border-box}}
 body{{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#000;color:#e7e9ea;line-height:1.5}}
@@ -254,12 +383,13 @@ p,li{{color:#a9b0b6}}
 .button{{display:block;margin:20px 0 8px;padding:16px;border-radius:999px;background:#3b4fd8;color:#fff;text-align:center;font-weight:700;text-decoration:none;font-size:1.1rem}}
 .meta{{margin:0;text-align:center;color:#71767b;font-size:.9rem}}
 .hash code{{display:block;margin-top:4px;color:#e7e9ea;font-size:.75rem;overflow-wrap:anywhere}}
+.site{{margin-top:32px;text-align:center}}
 a{{color:#7f8ce0}}
 </style>
 </head>
 <body>
 <main>
-<h1>GFC for Android</h1>
+<h1>Get the GFC app</h1>
 <p>Post music, video, photos and 3D. Earn GFC when people play what you share.</p>
 {body}
 </main>
@@ -281,9 +411,17 @@ def _cli(argv: List[str]) -> int:
             print(f"Signed with the release key {rel['cert_sha256']}")
             print("Download page: /app")
             return 0
+        if len(argv) == 3 and argv[0] == "publish-windows":
+            rel = publish_windows(argv[1], argv[2])
+            print(f"Published GFC {rel['version']} for Windows ({rel['size'] / 1048576:.1f} MB, {rel['ext']})")
+            print(f"SHA-256: {rel['sha256']}")
+            print("Download: /app/windows  (page: /app#windows)")
+            return 0
         if argv == ["info"]:
             rel = info()
             print(json.dumps(rel, indent=2) if rel else "no Android release published")
+            win = windows_info()
+            print(json.dumps(win, indent=2) if win else "no Windows release published")
             return 0
         if len(argv) == 2 and argv[0] == "fingerprint":
             for f in signing_fingerprints(Path(argv[1])):

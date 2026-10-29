@@ -86,7 +86,8 @@ class AppReleaseTests(unittest.TestCase):
             os.environ.pop(k, None)
             if v is not None:
                 os.environ[k] = v
-        for p in (app_release.APK_PATH, app_release.INFO_PATH):
+        for p in (app_release.APK_PATH, app_release.INFO_PATH, app_release.WINDOWS_INFO_PATH,
+                  app_release.APP_DIR / "gfc-windows.exe", app_release.APP_DIR / "gfc-windows.zip"):
             p.unlink(missing_ok=True)
 
     def test_reads_the_signing_certificate(self):
@@ -135,16 +136,94 @@ class AppReleaseTests(unittest.TestCase):
         self.assertNotIn("<script", page.text)
         self.assertIn("default-src 'none'", page.headers["content-security-policy"])
 
-    def test_pages_link_to_the_download_once_published(self):
+    def test_header_downloads_are_always_there(self):
+        # Nothing published yet: the buttons still show, and open the "coming soon" page
         web = self.client.get("/web", headers={"Accept": "text/html"}).text
-        self.assertNotIn('href="/app"', web)
+        self.assertIn('<a href="/app#android">Get GFC for Android</a>', web)
+        self.assertIn('<a href="/app#windows">Get GFC for Windows</a>', web)
+        self.assertIn('href="https://galacticfederation.tech" rel="noopener">Learn more about GFC</a>', web)
+        self.assertIn("1,100 GFC for signing up and your first post!", web)
+        self.assertIn("position:sticky", web)
+
+        # Published: direct downloads, on the feed and on a share page (where people from X land)
         app_release.publish(make_apk("release2.apk", self.release_cert), "0.1.1")
+        app_release.publish_windows(make_windows("GFC-Setup.zip", zipped=True), "0.1.1")
         web = self.client.get("/web", headers={"Accept": "text/html"}).text
-        self.assertIn('<a class="get" href="/app">Get the app</a>', web)
+        self.assertIn('<a href="/app/gfc.apk" download>Get GFC for Android</a>', web)
+        self.assertIn('<a href="/app/windows" download>Get GFC for Windows</a>', web)
+        import app_web
+        self.assertIn('<a href="/app/windows" download>Get GFC for Windows</a>', app_web.site_header())
+
         # Android without the app: "Open in GFC" falls back to the download page
         import app_share
         link = app_share.android_open_link("abc123", "https://example.org/p/abc123")
         self.assertIn("S.browser_fallback_url=" + app_share.quote(app_share.public_base_url() + "/app", safe=""), link)
+
+    def test_bonus_line_follows_the_node_settings(self):
+        import app_web
+        saved = {k: os.environ.get(k) for k in ("GFC_FIRST_POST_BONUS_GFC", "GFC_FIRST_POST_BONUS_ENABLED")}
+        try:
+            os.environ["GFC_FIRST_POST_BONUS_GFC"] = "500"
+            self.assertEqual(app_web.bonus_text(), "600 GFC for signing up and your first post!")
+            os.environ["GFC_FIRST_POST_BONUS_ENABLED"] = "0"
+            self.assertEqual(app_web.bonus_text(), "100 GFC for signing up!")
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None)
+                if v is not None:
+                    os.environ[k] = v
+
+    def test_windows_publish_and_download(self):
+        for zipped in (False, True):
+            src = make_windows("GFC-Setup-0.1.5" + (".zip" if zipped else ".exe"), zipped=zipped)
+            self.assertEqual(app_release._cli(["publish-windows", src, "0.1.5"]), 0)
+            body = open(src, "rb").read()
+            rel = self.client.get("/app/windows.json").json()
+            self.assertTrue(rel["published"])
+            self.assertEqual((rel["version"], rel["ext"]), ("0.1.5", ".zip" if zipped else ".exe"))
+            self.assertEqual(rel["sha256"], hashlib.sha256(body).hexdigest())
+            r = self.client.get("/app/windows")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.content, body)
+            self.assertIn("GFC-Setup-0.1.5-Windows" + rel["ext"], r.headers["content-disposition"])
+            page = self.client.get("/app").text
+            self.assertIn('href="/app/windows"', page)
+            self.assertIn(rel["sha256"], page)
+            self.assertIn("SmartScreen", page)
+        # Switching from .exe to .zip leaves no stale .exe behind
+        self.assertFalse((app_release.APP_DIR / "gfc-windows.exe").exists())
+
+    def test_windows_publish_refuses_wrong_files(self):
+        notes = TMP / "notes.exe"
+        notes.write_bytes(b"hello" * 1000)
+        with self.assertRaisesRegex(app_release.ReleaseError, "isn't a Windows program"):
+            app_release.publish_windows(str(notes), "0.1.5")
+        two = TMP / "two.zip"
+        with zipfile.ZipFile(two, "w") as zf:
+            zf.writestr("a.exe", b"MZ" + os.urandom(4096))
+            zf.writestr("b.exe", b"MZ" + os.urandom(4096))
+        with self.assertRaisesRegex(app_release.ReleaseError, "one .exe"):
+            app_release.publish_windows(str(two), "0.1.5")
+        apk = make_apk("wrong.apk", self.release_cert)
+        with self.assertRaisesRegex(app_release.ReleaseError, ".exe or the .zip"):
+            app_release.publish_windows(apk, "0.1.5")
+        with self.assertRaisesRegex(app_release.ReleaseError, "version"):
+            app_release.publish_windows(make_windows("ok.exe"), "../1")
+        self.assertIsNone(app_release.windows_info())
+        self.assertEqual(self.client.get("/app/windows").status_code, 404)
+        self.assertIn("Windows app is coming soon", self.client.get("/app").text)
+
+
+def make_windows(name: str, zipped: bool = False) -> str:
+    """A stand-in installer: an .exe starting with the Windows "MZ" header, or a zip of one."""
+    exe = b"MZ" + os.urandom(8192)
+    path = TMP / name
+    if zipped:
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("GFC-Setup-0.1.5-abc1234.exe", exe)
+    else:
+        path.write_bytes(exe)
+    return str(path)
 
 
 if __name__ == "__main__":

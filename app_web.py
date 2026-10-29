@@ -33,7 +33,7 @@ import moderation
 import reposts
 from app_engagement import SEED_SELECT, seed_row_to_dict
 from app_share import (MODEL_VIEWER_EXTENSIONS, MODEL_VIEWER_SRC, MODEL_VIEWER_SRI,
-                       MODEL_VIEWER_STYLE_HASH, _app_link, _with_ref, clean_ref, public_base_url)
+                       MODEL_VIEWER_STYLE_HASH, public_base_url)
 from config import DB_PATH
 
 router = APIRouter()
@@ -305,6 +305,33 @@ SCRIPT = """
 """
 
 
+def bonus_text() -> str:
+    """What a new account gets, from the node's own settings, so the header never over-promises."""
+    import blockchain
+    import first_post
+    grant = blockchain.NEW_USER_GRANT_CENTS // 100
+    bonus = first_post.amount_cents() // 100 if first_post.enabled() else 0
+    if bonus:
+        return f"{grant + bonus:,} GFC for signing up and your first post!"
+    return f"{grant:,} GFC for signing up!"
+
+
+def site_header() -> str:
+    """
+    Always at the top of the web feed and share pages (people arriving from X): the app
+    downloads, GalacticFederation.tech, and the sign-up bonus. A download that isn't published
+    yet links to the /app page, which says it's coming soon.
+    """
+    e = lambda s: html.escape(s, quote=True)  # noqa: E731
+    android = '<a href="/app/gfc.apk" download>' if app_release.info() else '<a href="/app#android">'
+    windows = '<a href="/app/windows" download>' if app_release.windows_info() else '<a href="/app#windows">'
+    return (f'<header class="top">\n<nav aria-label="Get GFC">'
+            f'{android}Get GFC for Android</a>'
+            f'{windows}Get GFC for Windows</a>'
+            f'<a class="learn" href="{e(app_release.SITE_URL)}" rel="noopener">Learn more about GFC</a>'
+            f'</nav>\n<p class="promo">{e(bonus_text())}</p>\n</header>')
+
+
 def _security_headers(nonce: str) -> dict:
     # model-viewer fetches models from this node, decodes textures to blob: URLs and loads
     # Draco/KTX2 decoders (wasm in blob: workers) from gstatic when a model needs them.
@@ -331,19 +358,16 @@ def feed_html_response(request: Request, page: int = 1, featured: dict = None) -
     e = lambda s: html.escape(s, quote=True)  # noqa: E731
     base = public_base_url()
     url = f"{base}/" if page == 1 else f"{base}/web?page={page}"
-    ref = clean_ref(request.query_params.get("ref"))
-    app_link = _app_link(_with_ref("feed", ref), url, request.headers.get("user-agent", ""))
     cards, any_cards = render_cards(page, exclude=featured["id"] if featured else "")
     if not any_cards:
         cards = '<p class="end">No posts here yet.</p>'
     title = page_title = FEED_TITLE
     description = FEED_DESCRIPTION
     card_type, image_tags, extra_head, top = "summary", "", "", ""
-    get_app = '<a class="get" href="/app">Get the app</a>' if app_release.info() else ""
+    header = site_header()
     if featured:
         title, description, url = featured["title"], featured["description"], featured["url"]
         page_title = featured.get("page_title", title)
-        app_link = featured["app_link"]
         extra_head = featured.get("head", "")
         if featured.get("image"):
             card_type = "summary_large_image"
@@ -374,11 +398,14 @@ def feed_html_response(request: Request, page: int = 1, featured: dict = None) -
 html{{background:#000}}
 body{{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#000;color:#e7e9ea;overflow-x:hidden}}
 a{{color:inherit}}
-.top{{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:12px;
-max-width:640px;margin:0 auto;padding:10px 16px;background:rgba(0,0,0,.85);backdrop-filter:blur(8px);border-bottom:1px solid #2f3336}}
-.top h1{{margin:0;font-size:1.2rem}}
-.get{{flex:none;margin-left:auto;padding:8px 14px;border-radius:999px;border:1px solid #536471;color:#e7e9ea;text-decoration:none;font-weight:600}}
-.open{{flex:none;padding:8px 14px;border-radius:999px;background:#3b4cca;color:#fff;text-decoration:none;font-weight:600}}
+.top{{position:sticky;top:0;z-index:2;max-width:640px;margin:0 auto;padding:10px 16px 8px;
+background:rgba(0,0,0,.9);backdrop-filter:blur(8px);border-bottom:1px solid #2f3336}}
+.top nav{{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}}
+.top nav a{{flex:1 1 auto;padding:8px 14px;border-radius:999px;background:#3b4cca;color:#fff;text-align:center;
+text-decoration:none;font-weight:600;font-size:.95rem;white-space:nowrap}}
+.top nav a.learn{{background:transparent;border:1px solid #536471;color:#e7e9ea}}
+.top nav a:hover{{filter:brightness(1.15)}}
+.top .promo{{margin:8px 0 0;text-align:center;color:#ffd400;font-weight:700}}
 main{{max-width:640px;margin:0 auto}}
 .card{{display:flex;gap:12px;padding:12px 16px;border-bottom:1px solid #2f3336}}
 .avatar{{flex:none;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;
@@ -425,7 +452,7 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 </style>
 </head>
 <body>
-<header class="top"><h1>GFC</h1>{get_app}<a class="open" href="{e(app_link)}">Open in GFC</a></header>
+{header}
 <main>
 {top}<div id="feed" tabindex="-1">
 {cards}
@@ -436,7 +463,7 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 </html>
 """
     headers = _security_headers(nonce)
-    headers["Vary"] = "Accept, User-Agent"  # / is JSON for API clients; "Open in GFC" differs on Android
+    headers["Vary"] = "Accept, User-Agent"  # / is JSON for API clients; a shared post's "Open in GFC" differs on Android
     return HTMLResponse(body, headers=headers)
 
 
