@@ -6,6 +6,8 @@ python -m bridge <command>
   release                pay finalized BridgedOut events from escrow
   reconcile              check backing; pauses the bridge if a pauser key is set
   approve-release NONCE  let a held release past the per-release / daily limits
+  refund TX_HASH         send a deposit marked refund/held back to its sender
+  new-escrow-key FILE    create an encrypted escrow key file; prints only its public key
   run [--interval S]     relay, release and reconcile in a loop
 
 Configuration is GFC_BRIDGE_* environment variables (bridge/config.py). In this
@@ -23,15 +25,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # node modules (blockchain, signing)
 
-from bridge import relayer, releases  # noqa: E402
-from bridge.attester import Attester  # noqa: E402
-from bridge.chain import BridgeContract, Chain  # noqa: E402
+# status, refund, approve-release and new-escrow-key work without the EVM dependencies;
+# relay, release, reconcile and run need bridge/requirements.txt.
+from bridge import releases  # noqa: E402
 from bridge.config import BridgeConfig, read_escrow_key, read_evm_key  # noqa: E402
-from bridge.reconcile import reconcile  # noqa: E402
 from bridge.store import Store  # noqa: E402
 
 
 def _attesters(cfg: BridgeConfig) -> list:
+    from bridge.attester import Attester
     files = [cfg.attester_key_file] if cfg.attester_key_file else []
     files += [f for f in os.environ.get("GFC_BRIDGE_EXTRA_ATTESTER_KEY_FILES", "").split(",") if f]
     return [Attester(cfg, key=read_evm_key(f)) for f in files]
@@ -44,11 +46,31 @@ def main(argv=None) -> int:
         sub.add_parser(name)
     ap = sub.add_parser("approve-release")
     ap.add_argument("nonce", type=int)
+    fp = sub.add_parser("refund")
+    fp.add_argument("tx_hash")
+    kp = sub.add_parser("new-escrow-key")
+    kp.add_argument("file")
     rp = sub.add_parser("run")
     rp.add_argument("--interval", type=float, default=30.0)
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    if args.cmd == "new-escrow-key":
+        import json
+        import keystore
+        import signing
+        path = Path(args.file)
+        if path.exists():
+            print(f"{path} already exists; not overwriting it", file=sys.stderr)
+            return 1
+        priv, pub = signing.generate_keypair()  # never written to disk in plaintext
+        passphrase = os.environ.get("GFC_BRIDGE_ESCROW_PASSPHRASE") or \
+            signing._passphrase("Passphrase for the escrow key file (12+ chars): ", True)
+        sealed = keystore.seal_backup(passphrase, {"private_key": priv, "public_key": pub}, "treasury")
+        signing._write_secret(path, json.dumps(sealed, indent=2))
+        print(f"Encrypted escrow key written to {path}. Run the bridge with GFC_BRIDGE_ESCROW_PASSPHRASE set.")
+        print(f"Pin this public key in config.PINNED_BRIDGE_ESCROWS for its chain:\n  {pub}")
+        return 0
     cfg = BridgeConfig.from_env()
     store = Store(cfg.state_db)
 
@@ -59,10 +81,20 @@ def main(argv=None) -> int:
                 counts[r["status"]] = counts.get(r["status"], 0) + 1
             print(f"{table}: {counts or 'none'}")
         return 0
+    if args.cmd == "refund":
+        if not cfg.escrow_key_file:
+            raise SystemExit("GFC_BRIDGE_ESCROW_KEY_FILE is not set")
+        ledger_tx = releases.refund_deposit(cfg, store, read_escrow_key(cfg.escrow_key_file), args.tx_hash)
+        print(f"refunded: ledger tx {ledger_tx}")
+        return 0
     if args.cmd == "approve-release":
         ok = store.approve_release(args.nonce)
         print("approved" if ok else "no held release with that nonce")
         return 0 if ok else 1
+
+    from bridge import relayer
+    from bridge.chain import BridgeContract, Chain
+    from bridge.reconcile import reconcile
 
     chain = Chain(cfg.rpc_url)
     if chain.chain_id() != cfg.chain_id:

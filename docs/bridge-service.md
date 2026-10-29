@@ -61,7 +61,7 @@ limits stop people from farming free GFC to spend our gas, or to dump it into th
 |---|---|---|
 | `GFC_BRIDGE_MIN_DEPOSIT_CENTS` | 100 GFC | Smaller deposits are never minted. They are marked `refund` |
 | `GFC_BRIDGE_RELAY_FEE_CENTS` | 0 | Taken out of the minted amount and kept in escrow. It pays for gas |
-| `GFC_BRIDGE_FAUCET_HOLD_DAYS` | 14 | A wallet whose newest GRANT, REFERRAL, FIRST_POST or REPOST credit is younger than this waits |
+| `GFC_BRIDGE_FAUCET_HOLD_DAYS` | 14 | GRANT, REFERRAL, FIRST_POST and REPOST credit younger than this can't be bridged, even after it's passed through other wallets (see below) |
 | `GFC_BRIDGE_MAX_MINTS_PER_SENDER_PER_DAY` | 3 | Per ledger wallet |
 | `GFC_BRIDGE_RELAYER_DAILY_GAS` | 5,000,000 | When the budget is used up, mints wait until the next UTC day |
 | `GFC_BRIDGE_MANUAL_REVIEW_CENTS` | 10,000 GFC | Larger deposits need their `tx_hash` in the approvals file |
@@ -69,6 +69,67 @@ limits stop people from farming free GFC to spend our gas, or to dump it into th
 
 The contract has its own caps on top of these: a per-mint cap, a per-window cap, and the
 token's supply cap.
+
+## Ledger side: pinned escrows and the rules every node enforces
+
+`config.BRIDGE_ESCROWS` maps each EVM chain ID to its escrow wallet. Tests and testnets
+set it with `GFC_BRIDGE_ESCROWS="84532:<pubkey>"`. It is empty until an escrow key exists.
+For any pinned escrow, `blockchain.bridge_rule_violation()` applies to REST transfers
+(`process_transfer`) and to synced rows (`check_synced_transaction`) alike:
+
+| Rule | Why |
+|---|---|
+| A transfer *to* an escrow needs the reason `bridge:v1:<that escrow's chain>:<0x address>`, and the address can't be zero | A typo or a wrong chain can't strand GFC in escrow waiting for a manual refund |
+| A transfer *from* an escrow needs the reason `bridge-out:v1:<chain>:<nonce>:<evm tx>` or `bridge-refund:v1:<deposit tx_hash>` | Every escrow outflow can be traced to a burn on chain or to a refund |
+| No mints to an escrow, and no escrow-to-escrow transfers | Escrow only changes through deposits, payouts and refunds |
+
+**This is a consensus change.** Nodes on an older release still accept rows that newer
+nodes reject (for example a deposit with a bad reason), so pin an escrow only in a
+release every node has taken. With no escrow pinned, nothing changes.
+
+Create an escrow key with `python -m bridge new-escrow-key FILE`. It writes an encrypted
+key file and prints only the public key, which is what you pin. The passphrase comes from
+`GFC_BRIDGE_ESCROW_PASSPHRASE`, or a prompt.
+
+### Free credit passed through other wallets
+
+The hold on fresh free credit follows funds backwards (`deposits.fresh_faucet_cents`):
+
+- Any GRANT, REFERRAL, FIRST_POST or REPOST credit a wallet received within the hold
+  period is fresh.
+- Each incoming transfer within the hold period is fresh up to the amount of fresh
+  credit its sender held when it was sent. This is followed up to 3 hops back.
+- Past 3 hops, or once a 500-lookup budget runs out, incoming transfers count as fresh.
+  That way a long chain of wallets, or a huge history, can't be used to get around the
+  check.
+- Payouts from an escrow are clean.
+
+A deposit can only use the part of the balance that isn't fresh. Fresh credit is assumed
+to be spent last.
+
+Attesters judge the balance as it was just before the deposit's block. The node's
+`/bridge/deposit` endpoint makes the same check up front and refuses a deposit it
+couldn't mint, with the message "only X GFC can be bridged now".
+
+## Bridge to Base: the API front ends use
+
+| Endpoint | What it does |
+|---|---|
+| `GET /bridge/info` | Pinned chains (name, escrow, and the token address once `GFC_BRIDGE_TOKENS` is set), the minimum deposit, the fee, the hold, and a not-an-investment notice |
+| `GET /bridge/quote?wallet_id=W` | `balance_cents`, `bridgeable_cents` and `held_cents` |
+| `POST /bridge/deposit` (Bearer, `spend` scope) | Body `{wallet_id, chain_id, evm_address, amount}`. The node signs the escrow deposit with the exact reason. Returns `tx_hash` and `mint_cents` |
+
+The deposit endpoint uses the same per-token spend limit as `/transactions/create`. The
+node's minimum, fee and hold settings (`GFC_BRIDGE_MIN_DEPOSIT_CENTS`,
+`GFC_BRIDGE_RELAY_FEE_CENTS`, `GFC_BRIDGE_FAUCET_HOLD_DAYS`) should match the bridge
+service's.
+
+## Refunds
+
+A deposit marked `refund` (under the minimum) or `held` (above the contract's per-mint
+cap) goes back to its sender with `python -m bridge refund TX_HASH`. That sends a
+`bridge-refund:v1:<tx_hash>` transfer, which happens at most once per deposit. Refunds
+work without the EVM dependencies.
 
 ## Configuration
 
@@ -99,6 +160,8 @@ python -m bridge relay
 python -m bridge release
 python -m bridge reconcile
 python -m bridge approve-release 12
+python -m bridge refund <deposit tx_hash>
+python -m bridge new-escrow-key D:\keys\escrow-84532.json
 python -m bridge run --interval 30
 ```
 
@@ -135,17 +198,17 @@ python -m unittest tests.test_bridge -v
 
 ## Known gaps (before any public deployment)
 
-- **The faucet hold only looks at the depositing wallet.** A farmer can move fresh grant
-  GFC to a second wallet and deposit from there. Following funds through wallets, or
-  holding back any deposit funded by recent faucet credit, is the next step. Phone
-  verification (one account per number) is still the main Sybil gate.
+- **The free-credit hold can be diluted.** It follows funds 3 hops back, but someone who
+  mixes fresh credit with enough clean GFC in the same wallet can bridge the clean part
+  first, and fresh credit becomes bridgeable once it ages. Phone verification (one
+  account per number) is still the main defence against fake accounts.
 - **Attesters run in-process.** The relayer calls `Attester` objects directly, so one
   operator holds every key, which is only acceptable on a testnet. Production attesters
   need a small signing endpoint each, on separate machines and operators.
 - **Ledger finality is time-based.** It still relies on this node's ordering (see the
   double-spend note in `dex-plan.md`). Treasury-signed checkpoints should replace it.
-- **Refunds are manual.** Deposits in `refund`, and held releases with a bad wallet, need
-  a person to fix them.
+- **Refunds are run by hand.** `python -m bridge refund` handles deposits. A held release
+  to a bad wallet still needs a person: those tokens are already burned.
 - **The escrow key is hot.** It signs releases on the bridge host. Keep the release limits
   low, and move the key to an HSM or KMS with Ed25519 support if one is available.
 - **The service writes to the live node's SQLite DB.** Payouts go into the same file the

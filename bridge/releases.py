@@ -17,14 +17,16 @@ import logging
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import blockchain
 import signing
-from bridge.chain import BridgeContract
 from bridge.config import BridgeConfig
 from bridge.deposits import RELEASE_REASON_PREFIX
-from bridge.store import HELD, PAID, SEEN, WAITING, Store
+from bridge.store import HELD, PAID, REFUND, REFUNDED, SEEN, WAITING, Store
+
+if TYPE_CHECKING:  # payouts and refunds work without the EVM dependencies
+    from bridge.chain import BridgeContract
 
 logger = logging.getLogger("gfc.bridge.releases")
 
@@ -36,7 +38,7 @@ def release_tx_id(chain_id: int, nonce: int) -> str:
     return str(uuid.uuid5(RELEASE_ID_NAMESPACE, f"{chain_id}:{nonce}"))
 
 
-def scan_bridged_out(cfg: BridgeConfig, store: Store, bridge: BridgeContract) -> int:
+def scan_bridged_out(cfg: BridgeConfig, store: Store, bridge: "BridgeContract") -> int:
     """Record BridgedOut events up to the final block. Returns how many were new."""
     final = bridge.chain.final_block(cfg.chain_finality)
     start = int(store.get_meta(CURSOR_KEY, str(cfg.start_block)))
@@ -113,3 +115,46 @@ def pay_releases(cfg: BridgeConfig, store: Store, escrow_key: str,
         else:
             mark(nonce, HELD, f"ledger rejected the payout: {why}")
     return counts
+
+
+def refund_deposit(cfg: BridgeConfig, store: Store, escrow_key: str, tx_hash: str,
+                   now: Optional[datetime] = None) -> str:
+    """
+    Send a deposit that will never be minted (status refund or held) back to its sender,
+    with reason bridge-refund:v1:<tx_hash>. Returns the refund's ledger tx id. At most
+    once per deposit: an existing refund row is reused.
+    """
+    if signing.public_key_of(escrow_key) != cfg.escrow_wallet:
+        raise ValueError("escrow key does not match GFC_BRIDGE_ESCROW_WALLET")
+    d = store.deposit(tx_hash)
+    if d is None or d["status"] not in (REFUND, HELD):
+        raise ValueError("only deposits marked refund or held can be refunded")
+    reason = f"bridge-refund:v1:{tx_hash}"
+    conn = sqlite3.connect(cfg.ledger_db)
+    try:
+        row = conn.execute("SELECT id FROM transactions WHERE sender = ? AND reason = ?",
+                           (cfg.escrow_wallet, reason)).fetchone()
+    finally:
+        conn.close()
+    if row:
+        store.set_deposit(tx_hash, REFUNDED, "already refunded")
+        return row[0]
+    now = now or datetime.now(timezone.utc)
+    tx = {
+        "id": str(uuid.uuid5(RELEASE_ID_NAMESPACE, f"refund:{tx_hash}")),
+        "sender": cfg.escrow_wallet,
+        "recipient": d["sender"],
+        "amount": d["amount_cents"] / 100.0,
+        "amount_cents": d["amount_cents"],
+        "reason": reason,
+        "timestamp": now.isoformat(),
+        "tx_type": blockchain.TX_TYPE_TRANSFER,
+    }
+    tx["tx_hash"] = blockchain.compute_tx_hash(tx)
+    tx["signer"] = cfg.escrow_wallet
+    tx["signature"] = signing.sign_tx_hash(escrow_key, tx["tx_hash"])
+    status, why = blockchain.accept_synced_transaction(cfg.ledger_db, tx)
+    if status not in (blockchain.ACCEPTED, blockchain.DUPLICATE):
+        raise ValueError(f"ledger refused the refund: {why}")
+    store.set_deposit(tx_hash, REFUNDED)
+    return tx["id"]

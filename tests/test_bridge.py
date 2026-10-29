@@ -311,6 +311,18 @@ class BridgeServiceTest(unittest.TestCase):
         self.cfg = replace(self.cfg, faucet_hold_days=0.5)
         self.assertEqual(self.relay(self.attesters())[MINTED], 1)
 
+    def test_faucet_credit_passed_to_another_wallet_is_held(self):
+        farmer_priv, farmer_pub = signing.generate_keypair()
+        mule_priv, mule_pub = signing.generate_keypair()
+        treasury_mint(self.ledger, farmer_pub, blockchain.NEW_USER_GRANT_CENTS, blockchain.TX_TYPE_GRANT,
+                      when=datetime.now(timezone.utc) - timedelta(days=1))
+        transfer(self.ledger, farmer_priv, farmer_pub, mule_pub, 100_00, "gift",
+                 when=datetime.now(timezone.utc) - timedelta(hours=3))
+        dep = transfer(self.ledger, mule_priv, mule_pub, self.escrow_pub, 100_00,
+                       f"bridge:v1:{CHAIN_ID}:{self.user_evm.address}")
+        self.assertEqual(self.relay()[WAITING], 1)
+        self.assertIn("faucet credit on hold", self.store.deposit(dep["tx_hash"])["detail"])
+
     def test_sender_daily_limit_and_gas_budget(self):
         self.cfg = replace(self.cfg, max_mints_per_sender_per_day=1)
         self.deposit(100_00)

@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
+import config as _config
 from config import DB_PATH
 import phone_verify
 import signing
@@ -62,6 +63,17 @@ OPERATOR_GRANT_MAX_CENTS = 1_000_000    # 10,000 GFC
 NODE_HOST_GRANT_CENTS = 1_000_000       # a node host's one-time grant: exactly 10,000 GFC
 OPERATOR_PURPOSES = ("hackathon", "node-host", "other")
 OPERATOR_REASON_RE = re.compile(r"^Operator grant \((hackathon|node-host|other)\): \S.{2,}$", re.S)
+
+# Bridge escrow wallets (config.BRIDGE_ESCROWS: one per EVM chain; see docs/bridge-service.md).
+# Every node enforces these rules, so a typo can't strand GFC in escrow and escrow funds
+# can only leave as bridge payouts or refunds:
+# - a deposit is a TRANSFER to an escrow with reason bridge:v1:<that escrow's chain>:<0xaddress>
+# - escrow outflows are TRANSFERs with reason bridge-out:v1:<chain>:<nonce>:<evm tx> or
+#   bridge-refund:v1:<deposit tx_hash>
+# - no mints to an escrow, and no escrow-to-escrow transfers
+BRIDGE_DEPOSIT_RE = re.compile(r"^bridge:v1:(\d{1,12}):(0x[0-9a-fA-F]{40})$")
+BRIDGE_PAYOUT_RE = re.compile(r"^bridge-out:v1:(\d{1,12}):\d{1,20}:0x[0-9a-fA-F]{64}$")
+BRIDGE_REFUND_RE = re.compile(r"^bridge-refund:v1:[0-9a-f]{64}$")
 
 # Limits applied to transactions received from peers
 MAX_REASON_LEN = 500
@@ -201,6 +213,36 @@ def _sign_mint(tx: dict):
     else:
         tx["signer"] = ""
         tx["signature"] = ""  # Local-only: peers will not accept this mint
+
+
+def bridge_escrow_chain(wallet_id: str) -> Optional[int]:
+    """The EVM chain ID whose bridge escrow this wallet is, or None."""
+    for chain_id, escrow in _config.BRIDGE_ESCROWS.items():
+        if escrow == wallet_id:
+            return chain_id
+    return None
+
+
+def bridge_rule_violation(sender: str, recipient: str, reason: str,
+                          tx_type: str = TX_TYPE_TRANSFER) -> Optional[str]:
+    """Why a transaction breaks the escrow rules above, or None if it doesn't touch an escrow."""
+    to_chain = bridge_escrow_chain(recipient)
+    from_chain = bridge_escrow_chain(sender)
+    if to_chain is None and from_chain is None:
+        return None
+    if tx_type != TX_TYPE_TRANSFER:
+        return "bridge escrow wallets only send and receive transfers"
+    if to_chain is not None and from_chain is not None:
+        return "escrow-to-escrow transfers aren't allowed"
+    if to_chain is not None:
+        m = BRIDGE_DEPOSIT_RE.match(reason or "")
+        if not m or int(m.group(1)) != to_chain or int(m.group(2), 16) == 0:
+            return f"a bridge deposit needs the reason bridge:v1:{to_chain}:<0x EVM address>"
+        return None
+    m = BRIDGE_PAYOUT_RE.match(reason or "")
+    if (m and int(m.group(1)) == from_chain) or BRIDGE_REFUND_RE.match(reason or ""):
+        return None
+    return "bridge escrow funds only leave as bridge payouts or refunds"
 
 
 # ============================================================================
@@ -502,6 +544,9 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
 
     if sender_wallet == TREASURY_WALLET_ID or recipient_wallet == TREASURY_WALLET_ID:
         raise ValueError("Treasury funds move only through grants and rewards")
+    violation = bridge_rule_violation(sender_wallet, recipient_wallet, reason)
+    if violation:
+        raise ValueError(violation)
 
     # Check sender balance
     sender_balance = get_balance_cents(db_path, sender_wallet)
@@ -845,6 +890,9 @@ def check_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
     if not isinstance(sender, str) or not isinstance(recipient, str) or not recipient \
             or recipient == sender or recipient == TREASURY_WALLET_ID:
         return REJECTED, "bad sender or recipient"
+    violation = bridge_rule_violation(sender, recipient, reason, tx_type)
+    if violation:
+        return REJECTED, violation
     ts = _parse_timestamp(tx.get("timestamp"))
     if ts is None or ts > datetime.now(timezone.utc) + MAX_CLOCK_SKEW:
         return REJECTED, "bad timestamp"

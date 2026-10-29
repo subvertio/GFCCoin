@@ -8,8 +8,9 @@ attester sign anything the attester's own ledger doesn't show.
 
 Policy (on top of validity):
 - the destination address and the sender wallet aren't on the denylist;
-- the sender's newest faucet credit (grant, referral, first post, repost) is
-  at least faucet_hold_days old, so fresh free GFC can't go straight to a pool;
+- the deposit is covered by GFC that isn't fresh free credit: grants, referrals,
+  first-post and repost bonuses younger than faucet_hold_days don't count, also
+  when they were passed through other wallets (deposits.fresh_faucet_cents);
 - deposits above manual_review_cents need their tx_hash in the approvals file.
 """
 
@@ -59,10 +60,13 @@ class Attester:
             denied = read_lines(self.cfg.denylist_file)
             if evm_to.lower() in denied or dep["sender"].lower() in denied:
                 return Attestation(self.address, None, "denylisted")
-            hold = deposits.faucet_hold_until(conn, dep["sender"], self.cfg.faucet_hold_days)
-            if hold and now < hold:
-                return Attestation(self.address, None, f"faucet credit on hold until {hold.isoformat()}",
-                                   retry=True)
+            _, clean = deposits.clean_cents(conn, dep["sender"], now, self.cfg.faucet_hold_days,
+                                            before_block=dep["block_index"],
+                                            exclude=frozenset([self.cfg.escrow_wallet]))
+            if dep["amount_cents"] > clean:
+                return Attestation(self.address, None,
+                                   f"faucet credit on hold: only {clean / 100:.2f} GFC of the sender's balance "
+                                   f"is older than {self.cfg.faucet_hold_days:g} days", retry=True)
             if dep["amount_cents"] > self.cfg.manual_review_cents and \
                     tx_hash.lower() not in read_lines(self.cfg.approvals_file):
                 return Attestation(self.address, None, "needs manual approval", retry=True)

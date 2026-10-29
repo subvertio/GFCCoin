@@ -3,6 +3,7 @@ Bridge state: a SQLite file of its own, never the node's ledger DB.
 
 deposits: ledger -> chain, keyed by the deposit's ledger tx_hash
   seen -> minted, or waiting (retried), or held (needs a person), or refund (never minted)
+  refund/held -> refunded (`python -m bridge refund TX_HASH`)
 releases: chain -> ledger, keyed by BridgedOut nonce
   seen -> paid, or waiting (retried), or held (needs a person)
 """
@@ -49,7 +50,7 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 # Deposit statuses
-SEEN, MINTED, WAITING, HELD, REFUND = "seen", "minted", "waiting", "held", "refund"
+SEEN, MINTED, WAITING, HELD, REFUND, REFUNDED = "seen", "minted", "waiting", "held", "refund", "refunded"
 # Release statuses (also SEEN, WAITING, HELD)
 PAID = "paid"
 
