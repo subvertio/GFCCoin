@@ -124,9 +124,9 @@ evm/                          # Foundry project (this branch)
   src/interfaces/IGFCToken.sol, IGFCBridge.sol
   script/Deploy.s.sol         # deploy + wire roles + begin admin handover (not run on any network)
   test/GFCToken.t.sol  GFCBridge.t.sol  GFCBridgeInvariant.t.sol  Deploy.t.sol
-bridge/                       # NEXT PHASE: off-chain service (section 4), not built yet
-  config.py  store.py  deposits.py  attester.py  relayer.py  releases.py  reconcile.py  cli.py
-tests/test_bridge_*.py        # Python tests: ledger test DB + anvil
+bridge/                       # off-chain service (section 4); see docs/bridge-service.md
+  config.py  chain.py  eip712.py  store.py  deposits.py  attester.py  relayer.py  releases.py  reconcile.py  __main__.py
+tests/test_bridge.py          # Python tests: ledger test DB + anvil
 docs/dex-plan.md              # this file
 ```
 
@@ -237,7 +237,10 @@ Run (PowerShell, from `evm\`): `forge test`, `forge test --gas-report`, `forge c
 
 ---
 
-## 4. Off-chain bridge service (outline)
+## 4. Off-chain bridge service
+
+Built in `bridge/`, with its runbook, settings and known gaps in
+[bridge-service.md](bridge-service.md). The outline it implements:
 
 **The trust rule:** rows synced from peers are untrusted. The service never takes a
 balance, a block or a deposit from a peer's word. It acts only on rows that its own node

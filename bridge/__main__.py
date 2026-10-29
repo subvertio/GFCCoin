@@ -1,0 +1,115 @@
+"""
+python -m bridge <command>
+
+  status                 deposit and release counts by status, and the last reconcile
+  relay                  scan escrow deposits and mint the ones attesters sign
+  release                pay finalized BridgedOut events from escrow
+  reconcile              check backing; pauses the bridge if a pauser key is set
+  approve-release NONCE  let a held release past the per-release / daily limits
+  run [--interval S]     relay, release and reconcile in a loop
+
+Configuration is GFC_BRIDGE_* environment variables (bridge/config.py). In this
+version the relayer calls attesters in-process: GFC_BRIDGE_ATTESTER_KEY_FILE,
+plus GFC_BRIDGE_EXTRA_ATTESTER_KEY_FILES (comma-separated) for a single-operator
+testnet. Production attesters run on separate machines; see docs/bridge-service.md.
+"""
+
+import argparse
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # node modules (blockchain, signing)
+
+from bridge import relayer, releases  # noqa: E402
+from bridge.attester import Attester  # noqa: E402
+from bridge.chain import BridgeContract, Chain  # noqa: E402
+from bridge.config import BridgeConfig, read_escrow_key, read_evm_key  # noqa: E402
+from bridge.reconcile import reconcile  # noqa: E402
+from bridge.store import Store  # noqa: E402
+
+
+def _attesters(cfg: BridgeConfig) -> list:
+    files = [cfg.attester_key_file] if cfg.attester_key_file else []
+    files += [f for f in os.environ.get("GFC_BRIDGE_EXTRA_ATTESTER_KEY_FILES", "").split(",") if f]
+    return [Attester(cfg, key=read_evm_key(f)) for f in files]
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m bridge")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    for name in ("status", "relay", "release", "reconcile"):
+        sub.add_parser(name)
+    ap = sub.add_parser("approve-release")
+    ap.add_argument("nonce", type=int)
+    rp = sub.add_parser("run")
+    rp.add_argument("--interval", type=float, default=30.0)
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    cfg = BridgeConfig.from_env()
+    store = Store(cfg.state_db)
+
+    if args.cmd == "status":
+        for table, rows in (("deposits", store.deposits()), ("releases", store.releases())):
+            counts = {}
+            for r in rows:
+                counts[r["status"]] = counts.get(r["status"], 0) + 1
+            print(f"{table}: {counts or 'none'}")
+        return 0
+    if args.cmd == "approve-release":
+        ok = store.approve_release(args.nonce)
+        print("approved" if ok else "no held release with that nonce")
+        return 0 if ok else 1
+
+    chain = Chain(cfg.rpc_url)
+    if chain.chain_id() != cfg.chain_id:
+        print(f"RPC is chain {chain.chain_id()}, config says {cfg.chain_id}", file=sys.stderr)
+        return 2
+    bridge = BridgeContract(chain, cfg.bridge_address)
+    relayer_key = read_evm_key(cfg.relayer_key_file) if cfg.relayer_key_file else None
+    escrow_key = read_escrow_key(cfg.escrow_key_file) if cfg.escrow_key_file else None
+    pauser_key = read_evm_key(cfg.pauser_key_file) if cfg.pauser_key_file else None
+
+    def do_relay():
+        if not relayer_key:
+            raise SystemExit("GFC_BRIDGE_RELAYER_KEY_FILE is not set")
+        print("scan:", relayer.scan_deposits(cfg, store))
+        print("relay:", relayer.relay(cfg, store, bridge, _attesters(cfg), relayer_key))
+
+    def do_release():
+        if not escrow_key:
+            raise SystemExit("GFC_BRIDGE_ESCROW_KEY_FILE is not set")
+        print("new BridgedOut events:", releases.scan_bridged_out(cfg, store, bridge))
+        print("release:", releases.pay_releases(cfg, store, escrow_key))
+
+    def do_reconcile() -> bool:
+        report = reconcile(cfg, store, bridge, pauser_key)
+        print(f"reconcile: {'ok' if report.ok else 'PROBLEMS'} outstanding={report.outstanding_cents} "
+              f"escrow={report.escrow_cents} unpaid={report.unpaid_release_cents}"
+              + (" (bridge paused)" if report.paused else ""))
+        for p in report.problems:
+            print("  -", p)
+        return report.ok
+
+    if args.cmd == "relay":
+        do_relay()
+    elif args.cmd == "release":
+        do_release()
+    elif args.cmd == "reconcile":
+        return 0 if do_reconcile() else 1
+    elif args.cmd == "run":
+        while True:
+            if do_reconcile():  # never move funds while the books don't balance
+                if relayer_key:
+                    do_relay()
+                if escrow_key:
+                    do_release()
+            time.sleep(args.interval)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
