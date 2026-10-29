@@ -15,6 +15,7 @@ import config
 import phone_verify
 import seed_edits
 import signing
+import verified_wallets
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH, SEEDS_ORIG_DIR as ORIG_DIR, SEEDS_THUMB_DIR as THUMB_DIR
 
@@ -212,6 +213,8 @@ async def seeds_upload(
     if reward_wallet.strip() and not signer_wallet:
         raise HTTPException(status_code=400, detail="reward_wallet must be one of your wallets on this node")
     reward_wallet = signer_wallet or ""
+    if reward_wallet and config.REQUIRE_PHONE_TO_POST:
+        verified_wallets.attest(DB_PATH, owner)  # treasury node: so peers accept this post
     private_key = None
     if reward_wallet:
         private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet, caller.data_key())
