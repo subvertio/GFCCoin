@@ -136,11 +136,12 @@ Operator grants are listed publicly at `/treasury/grants`.
 - Each node keeps its own hash-chained ledger: every accepted transaction goes into a block with a
   Merkle root, linked to the previous block.
 - **Nodes don't trust each other.** Before accepting a transaction from a peer, a node checks:
-  - the hash matches its contents;
-  - the signature matches the sender;
-  - the amount and type are valid, and mints are signed by the pinned treasury key and within their
-    caps;
-  - the timestamp isn't more than an hour in the future, and the transaction isn't a replay.
+
+    - the hash matches its contents;
+    - the signature matches the sender;
+    - the amount and type are valid, and mints are signed by the pinned treasury key and within their
+      caps;
+    - the timestamp isn't more than an hour in the future, and the transaction isn't a replay.
 
   A transfer whose sender can't afford it yet waits in a queue for up to seven days.
 - **Balances come only from transactions the node has checked itself.** A balance number sent by
@@ -220,7 +221,8 @@ Being clear about what isn't solved yet:
 
 ## Part 3: Roadmap
 
-**Done**
+### Done
+
 - Signed ledger: Ed25519 wallets, signed transfers, rule-checked mints, a pinned treasury key.
 - Creator rewards: sign-up grant, first post bonus, view rewards, invites, repost credit.
 - Fair play: phone verification, a network-wide proof of verification, originality receipts,
@@ -230,27 +232,31 @@ Being clear about what isn't solved yet:
 - Accounts: encrypted keys, backups, recovery codes, password reset.
 - An open API for third-party apps.
 
-**Next**
+### Next
+
 - Switch on the device checks (Echo Hunt and Play Integrity) for view rewards.
 - Ask the treasury node to sign rewards earned on other nodes, so they count everywhere.
 - Repost appeals, and repost matching for video and audio.
 - Code-signed app installers, and the app in the Google Play store.
 
-**Then**
+### Then
+
 - Network-wide agreement on transaction order (consensus).
 - More independent nodes, with thank-you grants for people who run them.
 - Community governance of the treasury rules.
 
-**Final milestone: DEX listing (Planned)**
+### Final milestone: DEX listing (Planned)
+
 - **Bridge to Base.** GFC moves 1:1 between the GFC ledger and an ERC-20 token on Base, a low-fee
   Ethereum layer-2 network. Coins are locked in an escrow on the GFC side, and the token contract
   can only mint against signed attestations, with per-mint and per-period caps and a pause switch.
 - **Listing.** A GFC/ETH pool on Uniswap, a decentralised exchange, with no sell tax.
 - **Before launch:**
-  - a public test on test networks;
-  - an independent security audit of the contracts and bridge;
-  - legal review of the escrow and liquidity details;
-  - a clear plan for initial liquidity.
+
+    - a public test on test networks;
+    - an independent security audit of the contracts and bridge;
+    - legal review of the escrow and liquidity details;
+    - a clear plan for initial liquidity.
 
   Nothing about the bridge or the pool has been deployed or audited yet.
 
