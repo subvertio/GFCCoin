@@ -28,6 +28,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
+import app_release
 import moderation
 import reposts
 from app_engagement import SEED_SELECT, seed_row_to_dict
@@ -338,6 +339,7 @@ def feed_html_response(request: Request, page: int = 1, featured: dict = None) -
     title = page_title = FEED_TITLE
     description = FEED_DESCRIPTION
     card_type, image_tags, extra_head, top = "summary", "", "", ""
+    get_app = '<a class="get" href="/app">Get the app</a>' if app_release.info() else ""
     if featured:
         title, description, url = featured["title"], featured["description"], featured["url"]
         page_title = featured.get("page_title", title)
@@ -375,6 +377,7 @@ a{{color:inherit}}
 .top{{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:12px;
 max-width:640px;margin:0 auto;padding:10px 16px;background:rgba(0,0,0,.85);backdrop-filter:blur(8px);border-bottom:1px solid #2f3336}}
 .top h1{{margin:0;font-size:1.2rem}}
+.get{{flex:none;margin-left:auto;padding:8px 14px;border-radius:999px;border:1px solid #536471;color:#e7e9ea;text-decoration:none;font-weight:600}}
 .open{{flex:none;padding:8px 14px;border-radius:999px;background:#3b4cca;color:#fff;text-decoration:none;font-weight:600}}
 main{{max-width:640px;margin:0 auto}}
 .card{{display:flex;gap:12px;padding:12px 16px;border-bottom:1px solid #2f3336}}
@@ -422,7 +425,7 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 </style>
 </head>
 <body>
-<header class="top"><h1>GFC</h1><a class="open" href="{e(app_link)}">Open in GFC</a></header>
+<header class="top"><h1>GFC</h1>{get_app}<a class="open" href="{e(app_link)}">Open in GFC</a></header>
 <main>
 {top}<div id="feed" tabindex="-1">
 {cards}
