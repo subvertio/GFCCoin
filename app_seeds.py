@@ -11,6 +11,8 @@ import first_post
 import moderation
 import reposts
 import audio_stream
+import config
+import phone_verify
 import signing
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH, SEEDS_ORIG_DIR as ORIG_DIR, SEEDS_THUMB_DIR as THUMB_DIR
@@ -141,6 +143,25 @@ def list_rows() -> List[Dict[str, Any]]:
 
 # ---------- routes ----------
 
+PHONE_REQUIRED_DETAIL = "Verify your phone number to post on the GFC network."
+
+
+def require_phone_to_post(owner: str):
+    """On the real network, only logged-in, phone-verified accounts can post (see config.py)."""
+    if not config.REQUIRE_PHONE_TO_POST:
+        return
+    if owner == "anonymous":
+        raise HTTPException(status_code=401, detail="Log in to post.")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        phone_verify.init_phone_tables(conn)
+        verified = phone_verify.is_verified(conn, owner)
+    finally:
+        conn.close()
+    if not verified:
+        raise HTTPException(status_code=403, detail=PHONE_REQUIRED_DETAIL)
+
+
 @router.post("/seeds/upload")
 async def seeds_upload(
     file: UploadFile = File(...),
@@ -168,6 +189,9 @@ async def seeds_upload(
     seed is still shared but becomes a repost: `repost_of` names the original, and
     all its earnings go to the original creator.
 
+    On the real network (config.REQUIRE_PHONE_TO_POST) the account must be logged in
+    (401 otherwise) and phone-verified (403 otherwise). Test networks allow anyone.
+
     The account's first original seed earns the first post bonus (see first_post.py):
     the response then has `first_post_bonus` (GFC), plus `first_post_bonus_pending: true`
     when it's waiting for a wallet or a verified phone. Both are absent otherwise.
@@ -176,6 +200,7 @@ async def seeds_upload(
         raise HTTPException(status_code=400, detail="file missing")
 
     owner = caller.owner("post")
+    require_phone_to_post(owner)
 
     # Pick the signing wallet: must be the owner's, with its key on this node
     conn = sqlite3.connect(DB_PATH)
