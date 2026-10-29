@@ -33,6 +33,10 @@ usage: gfc <command>
                         other (up to 10,000). Public, permanent: listed at
                         /treasury/grants. Asks to confirm unless --yes.
   grants                list every operator grant
+  publish-app FILE VERSION
+                        make FILE the public Android download at /app (refuses
+                        anything not signed with the release key in
+                        GFC_ANDROID_CERT_SHA256)
   wallets NAME          a user's wallet IDs and balances (to find who to grant to)
   rotate-treasury --activate
                         step 2, after the pin is merged and 'gfc update' has run:
@@ -126,6 +130,13 @@ cmd_check() {
         line ok "media streaming copies on ($(ls "$DATA_DIR/seeds/streams" 2>/dev/null | grep -c '\.m4a$') audio, $(ls "$DATA_DIR/seeds/streams" 2>/dev/null | grep -c '\.mp4$') video)"
     else
         line --  "ffmpeg missing - big audio is served as uploaded (gfc update installs it)"
+    fi
+    if [[ -f "$DATA_DIR/app/release.json" && -f "$DATA_DIR/app/gfc.apk" ]]; then
+        line ok "Android app $(grep -o '"version": "[^"]*"' "$DATA_DIR/app/release.json" | cut -d'"' -f4) published at /app"
+    elif [[ -n "$(env_value GFC_ANDROID_CERT_SHA256)" ]]; then
+        line --  "Android app not published yet (gfc publish-app FILE VERSION)"
+    else
+        line --  "Android app not published; set GFC_ANDROID_CERT_SHA256 to the release key first"
     fi
     local sa_file; sa_file="$(env_value GFC_PLAY_INTEGRITY_SA_FILE)"
     if [[ -n "$sa_file" && -n "$(env_value GFC_ANDROID_PACKAGE)" ]]; then
@@ -306,6 +317,9 @@ case "${1:-}" in
     rotate-treasury)  shift; cmd_rotate_treasury "$@" ;;
     grant)            shift; cmd_grant "$@" ;;
     grants)           need_root; as_gfc "$VENV/bin/python" treasury_grants.py list ;;
+    publish-app)      need_root; [[ $# -eq 3 ]] || die "usage: gfc publish-app FILE VERSION  (e.g. gfc publish-app /tmp/gfc.apk 0.1.0)"
+                      [[ -r "$2" ]] || die "can't read $2"
+                      as_gfc "$VENV/bin/python" app_release.py publish "$(readlink -f "$2")" "$3" ;;
     wallets)          shift; cmd_wallets "$@" ;;
     reports)          need_root; as_gfc "$VENV/bin/python" moderation.py list ;;
     moderate)         need_root; [[ $# -eq 3 ]] || { usage; exit 2; }; as_gfc "$VENV/bin/python" moderation.py "$2" "$3" ;;

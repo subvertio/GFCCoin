@@ -158,6 +158,7 @@ editor:
 | Restart | `ssh gfc-node gfc restart` |
 | Grant GFC (hackathon prize, node host, other); checks every rule, then asks to confirm; public | `ssh -t gfc-node gfc grant WALLET AMOUNT PURPOSE "MEMO"` |
 | List every operator grant (also public at `/treasury/grants`) | `ssh gfc-node gfc grants` |
+| Publish a new Android app version at `/app` (release-signed APKs only) | see [Publishing the Android app](#publishing-the-android-app) |
 
 To copy the newest backup to your PC (PowerShell, from the repo folder):
 
@@ -168,6 +169,30 @@ To copy the newest backup to your PC (PowerShell, from the repo folder):
 That saves it to `F:\GFC\server-backups`. Backups contain the phone-hash key
 unencrypted, so keep them private. Wallet keys inside them stay encrypted with
 each user's password.
+
+## Publishing the Android app
+
+The node serves the app at `https://YOUR_DOMAIN/app`: a download page, the APK at
+`/app/gfc.apk` and `/app/release.json` for update checks. Share pages and the web feed
+show "Get the app" once a version is published, and "Open in GFC" on a phone without
+the app goes there.
+
+Only APKs signed with the release key can be published, so a development build never
+reaches people (they couldn't install later updates over it).
+
+1. Once: put the release key's fingerprint (printed by `Scripts\CreateReleaseKey.ps1`
+   in GFC-Client) in `GFC_ANDROID_CERT_SHA256` with `ssh -t gfc-node gfc config`. It's
+   public; App Links use it too.
+2. Each release, from PowerShell after `.\Scripts\PackageAndroid.ps1 -Release`:
+
+```powershell
+$apk = Get-ChildItem D:\projects\GFC-Client\Packaged\Release -Recurse -Filter *.apk | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+scp $apk.FullName gfc-node:/tmp/gfc.apk
+ssh gfc-node "gfc publish-app /tmp/gfc.apk 0.1.0 && rm /tmp/gfc.apk"
+```
+
+Use a new version number each time. The APK lives in `/var/lib/gfc/app/` and isn't in
+the nightly backups (it's rebuilt from GFC-Client).
 
 ## What's exposed
 

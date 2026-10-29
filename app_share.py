@@ -43,6 +43,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+import app_release
 import audio_stream
 import moderation
 import reposts
@@ -66,6 +67,10 @@ MODEL_VIEWER_EXTENSIONS = (".glb", ".gltf")
 
 
 # ---------- config (read per request so a gateway can change it without code edits) ----------
+
+# Shown next to "Open in GFC" once an Android release is published (app_release.py)
+GET_APP_LINK = '<a class="secondary" href="/app">Get the app</a>'
+
 
 def public_base_url() -> str:
     return (os.environ.get("GFC_PUBLIC_BASE_URL") or DEFAULT_PUBLIC_BASE_URL).rstrip("/")
@@ -104,7 +109,9 @@ def _intent_link(route: str, page_url: str) -> str:
     """intent://<route>#Intent;scheme=gfc;package=<pkg>;S.browser_fallback_url=<url>;end"""
     scheme = urlsplit(app_link_base()).scheme or "gfc"
     package = os.environ.get("GFC_ANDROID_PACKAGE", "").strip()
-    fallback = os.environ.get("GFC_ANDROID_FALLBACK_URL", "").strip() or page_url
+    # No app installed: the download page once a release is published, else the page itself
+    fallback = (os.environ.get("GFC_ANDROID_FALLBACK_URL", "").strip()
+                or (f"{public_base_url()}/app" if app_release.info() else page_url))
     return (f"intent://{route}#Intent;scheme={scheme};package={package};"
             f"S.browser_fallback_url={quote(fallback, safe='')};end")
 
@@ -244,7 +251,8 @@ def share_page(seed_id: str, request: Request):
                      f'<p class="creator">{avatar}<span>by {e(seed["owner"])}</span></p>\n'
                      f'{repost}{badge}\n<p class="desc">{e(seed["description"])}</p>\n'
                      f'<p class="actions"><a href="{e(app_link)}">Open in GFC</a>'
-                     f'<a class="secondary" href="{e(intent)}" rel="noopener" target="_blank">Post to X</a></p>\n'
+                     f'<a class="secondary" href="{e(intent)}" rel="noopener" target="_blank">Post to X</a>'
+                     f'{GET_APP_LINK if app_release.info() else ""}</p>\n'
                      '<a class="next" href="#feed">More on GFC <span aria-hidden="true">&#8595;</span></a>')
     image = base + (thumb_path or media_path) if (thumb_path or (ctype == "image" and media_path)) else ""
 
@@ -300,7 +308,7 @@ p{{line-height:1.5;color:#b8bccc}}
 <main>
 <h1>{e(title)}</h1>
 <p>{e(description)}</p>
-<p class="actions"><a href="{e(app_link)}">Open in GFC</a></p>
+<p class="actions"><a href="{e(app_link)}">Open in GFC</a>{GET_APP_LINK if app_release.info() else ""}</p>
 </main>
 </body>
 </html>
