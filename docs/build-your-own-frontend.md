@@ -190,6 +190,25 @@ curl -X POST $NODE/seeds/upload -H "Authorization: Bearer $T" \
 - Media is served from the returned `full` (`/originals/...`) and `thumb`
   (`/thumbs/...`) paths, relative to the node.
 
+### Editing a post
+
+```bash
+curl -X POST $NODE/seeds/$ID/edit -H "Authorization: Bearer $T" \
+  -F title='My ship (fixed)'
+```
+
+- Posters can change the `title`, `description` and `tags` of their own posts.
+  Fields you leave out keep their current value. Media can't be changed.
+- Needs the post scope, on the node that holds the post's wallet key (403
+  otherwise). The node signs the edit, and peers show the newest one.
+- Feed items and `GET /seeds/{id}` have `edited_at` (`""` if never edited). Show
+  an "Edited" label when it's set. `GET /seeds/{id}/edits` lists every version,
+  newest first.
+- `synced: false` in the response means an older unsigned post: the edit shows
+  only on this node.
+- `GET /podt/stats` top earners have `owner`, the account name (`""` when the
+  node can't confirm it; show the wallet ID then).
+
 ## The feed
 
 - `GET /feed`: every seed, newest first. With a `read` token, each item also
