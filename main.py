@@ -42,6 +42,7 @@ import moderation
 import keystore
 import first_post
 import seed_edits
+import verified_wallets
 import referrals
 import reposts
 import signing
@@ -200,6 +201,7 @@ def init_db():
     reposts.init_repost_tables(conn)
     first_post.init_first_post_tables(conn)
     seed_edits.init_seed_edit_tables(conn)
+    verified_wallets.init_tables(conn)
     migrate_plaintext_passwords(conn)
 
     conn.commit()
@@ -357,6 +359,7 @@ async def create_wallet(name: str = Form("Default Wallet"), caller: Caller = Dep
     # Unverified owners get it when they verify (POST /verify/web/fb/check) instead.
     grant_balance = 0.0
     if owner:
+        verified_wallets.attest(DB_PATH, owner)  # treasury node: proof for peers, if verified
         grant_result = blockchain.process_user_grant(DB_PATH, owner, wallet_id)
         if grant_result:
             grant_balance = grant_result["amount"]  # 100.0
@@ -664,6 +667,13 @@ from p2p_service import start_p2p, stop_p2p, p2p_status
 async def startup_event():
     """Start P2P services when the server starts."""
     logredact.install()  # no phone numbers or verify link codes in the logs
+    # Treasury node: proof of verification for verified accounts that don't have one yet
+    try:
+        issued = verified_wallets.backfill(DB_PATH)
+        if issued:
+            print(f"[Verified] Issued {issued} verified wallet records")
+    except Exception as e:
+        print(f"[Verified] Backfill failed: {e}")
     # Ensure firewall rules exist for P2P ports (best-effort, requires admin)
     _ensure_firewall_rules()
     # Fingerprint seeds stored before the repost check existed (a treasury node also

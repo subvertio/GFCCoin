@@ -11,6 +11,7 @@ import blockchain
 import first_post
 import phone_verify
 import signing
+import verified_wallets
 from config import DB_PATH
 from security import Caller, caller_from_query
 
@@ -20,6 +21,7 @@ router = APIRouter()
 def pay_on_verified(username: str) -> dict:
     """Once the account is verified: the new-user grant and any pending first post bonus, if there's a wallet."""
     paid = {"grant": 0.0}
+    verified_wallets.attest(DB_PATH, username)  # treasury node: proof for peers that this account verified
     conn = sqlite3.connect(DB_PATH)
     wallet_id = signing.local_wallet_for(conn, username)
     conn.close()
