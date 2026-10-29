@@ -15,10 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_signed_ledger  # noqa: F401  (sets up the isolated data dir first)
-from test_signed_ledger import new_node
+from test_signed_ledger import mark_verified, new_node
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import config  # noqa: E402
 import keystore  # noqa: E402
 import main  # noqa: E402
 import seed_edits  # noqa: E402
@@ -270,7 +271,48 @@ class TopEarnerNameTests(unittest.TestCase):
                     [[pub, "main", "famous_creator", datetime.datetime.utcnow().isoformat()]],
                     db_path=main.DB_PATH)
         self.add_proof(pub, 8_000_000)
-        self.assertEqual(self.earners()[pub]["owner"], "")
+        self.assertNotIn(pub, self.earners())  # not a confirmed account: left out
+
+    def test_wallets_without_an_account_are_left_out(self):
+        _, pub = signing.generate_keypair()
+        self.add_proof(pub, 7_000_000)
+        self.assertNotIn(pub, self.earners())
+
+    def test_real_network_lists_only_phone_verified_earners(self):
+        saved = config.REQUIRE_PHONE_TO_POST
+        config.REQUIRE_PHONE_TO_POST = True
+        try:
+            name = "earner" + uuid.uuid4().hex[:6]
+            token = self.client.post("/auth/register", data={"username": name, "password": "pw-x"}).json()["token"]
+            wallet = self.client.post("/wallets/create", data={"name": "main", "api_token": token}).json()["id"]
+            self.add_proof(wallet, 6_000_000)
+            self.assertNotIn(wallet, self.earners())
+            mark_verified(main.DB_PATH, name)
+            self.assertEqual(self.earners()[wallet]["owner"], name)
+        finally:
+            config.REQUIRE_PHONE_TO_POST = saved
+
+
+class ProfilePostsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(main.app)
+
+    def test_profile_lists_that_accounts_posts_newest_first(self):
+        names = []
+        for _ in range(2):
+            name = "poster" + uuid.uuid4().hex[:6]
+            token = self.client.post("/auth/register", data={"username": name, "password": "pw-x"}).json()["token"]
+            self.client.post("/wallets/create", data={"name": "main", "api_token": token})
+            for i in range(2):
+                files = {"file": (f"p{i}.bin", os.urandom(2048), "application/octet-stream")}
+                r = self.client.post("/seeds/upload", data={"api_token": token, "title": f"{name} {i}"}, files=files)
+                self.assertEqual(r.status_code, 200, r.text)
+            names.append(name)
+        items = self.client.get(f"/users/{names[0].upper()}/seeds").json()["items"]
+        self.assertEqual([i["title"] for i in items], [f"{names[0]} 1", f"{names[0]} 0"])
+        self.assertEqual({i["owner"] for i in items}, {names[0]})
+        self.assertEqual(self.client.get("/users/nobody_here/seeds").json()["items"], [])
 
 
 if __name__ == "__main__":

@@ -70,12 +70,16 @@ SEED_SELECT = (
 
 # ---------- rich feed ----------
 
-def get_feed_items(owner: str = "anonymous") -> Dict[str, Any]:
-    """Return all seeds with liked/bookmarked state for `owner`."""
+def get_feed_items(owner: str = "anonymous", author: str = "") -> Dict[str, Any]:
+    """Return all seeds (or only `author`'s) with liked/bookmarked state for `owner`."""
 
     try:
         conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute(f"{SEED_SELECT} ORDER BY seeds.created_at DESC").fetchall()
+        if author:
+            rows = conn.execute(f"{SEED_SELECT} WHERE LOWER(seeds.owner) = LOWER(?) ORDER BY seeds.created_at DESC",
+                                (author,)).fetchall()
+        else:
+            rows = conn.execute(f"{SEED_SELECT} ORDER BY seeds.created_at DESC").fetchall()
 
         items = [seed_row_to_dict(r) for r in rows]
 
@@ -100,6 +104,16 @@ def get_feed_items(owner: str = "anonymous") -> Dict[str, Any]:
         items = []
 
     return {"items": items}
+
+
+@router.get("/users/{username}/seeds")
+def user_seeds(username: str, caller: Caller = Depends(caller_from_query)):
+    """
+    A profile's posts, newest first, as feed items (e.g. tapping a top earner). Public;
+    with a read token, items also have the caller's liked/bookmarked state. Posts hidden
+    after reports, or from an account the caller blocked, are left out.
+    """
+    return get_feed_items(caller.owner("read"), author=username)
 
 
 # ---------- comments ----------

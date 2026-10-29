@@ -206,8 +206,10 @@ curl -X POST $NODE/seeds/$ID/edit -H "Authorization: Bearer $T" \
   newest first.
 - `synced: false` in the response means an older unsigned post: the edit shows
   only on this node.
-- `GET /podt/stats` top earners have `owner`, the account name (`""` when the
-  node can't confirm it; show the wallet ID then).
+- `GET /podt/stats` top earners have `owner`, the account name. Only registered
+  accounts are listed: a confirmed name, and on the real network a verified phone.
+  Link each one to `GET /users/{owner}/seeds`, which returns that account's posts
+  as feed items, newest first.
 
 ## The feed
 

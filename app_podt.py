@@ -13,9 +13,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
+import config
+import phone_verify
 import signing
 from config import DB_PATH
 from blockchain import (
+    TX_TYPE_GRANT,
     process_podt_reward,
     get_balance_cents,
     TREASURY_WALLET_ID,
@@ -128,6 +131,28 @@ def _account_name(conn: sqlite3.Connection, wallet: str) -> str:
     return ""
 
 
+def _is_registered_earner(conn: sqlite3.Connection, wallet: str, owner: str) -> bool:
+    """
+    Top earners only list registered accounts: a confirmed account name, and on the
+    real network a verified phone, shown by this node's verification record or by a
+    treasury-signed new-user grant to the wallet (grants are only paid after verifying).
+    """
+    if not owner:
+        return False
+    if not config.REQUIRE_PHONE_TO_POST:
+        return True
+    phone_verify.init_phone_tables(conn)
+    if phone_verify.is_verified(conn, owner):
+        return True
+    return conn.execute(
+        "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ? AND signature != '' LIMIT 1",
+        (TX_TYPE_GRANT, wallet)
+    ).fetchone() is not None
+
+
+TOP_EARNERS = 10
+
+
 @podt_router.get("/stats")
 async def podt_stats():
     """Get network-wide PoDT statistics."""
@@ -146,9 +171,17 @@ async def podt_stats():
         top_seeders = conn.execute(
             "SELECT seeder_wallet, SUM(reward_cents) as total_reward, COUNT(*) as transfer_count, "
             "SUM(file_size_bytes) as total_bytes "
-            "FROM podt_proofs GROUP BY seeder_wallet ORDER BY total_reward DESC LIMIT 10"
+            "FROM podt_proofs GROUP BY seeder_wallet ORDER BY total_reward DESC"
         ).fetchall()
-        names = {row[0]: _account_name(conn, row[0]) for row in top_seeders}
+        names, earners = {}, []
+        for row in top_seeders:
+            name = _account_name(conn, row[0])
+            if _is_registered_earner(conn, row[0], name):
+                names[row[0]] = name
+                earners.append(row)
+                if len(earners) == TOP_EARNERS:
+                    break
+        top_seeders = earners
 
         conn.close()
 
