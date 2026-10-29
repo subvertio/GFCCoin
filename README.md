@@ -2,6 +2,8 @@
 
 **A peer-to-peer home for small creators: share your work, get discovered, and earn credit when people actually view it, without a platform taking the cut or the algorithm deciding who gets seen.**
 
+**New here? Read the [white paper](docs/whitepaper.md)**: what GFC is, how creators earn, how it works, and the roadmap, in plain words first. It's also on the web at [galacticfederation.tech/gfcwhitepaper](https://www.galacticfederation.tech/gfcwhitepaper). Get the app for Android or Windows at [node.galacticfederation.tech/app](https://node.galacticfederation.tech/app).
+
 > **Status: early prototype.** GFC is a working backend that people can run and test together. It is not production software, and GFC credits are **not money**. They have no cash value and can't be bought or sold. See [Current limitations](#current-limitations) before relying on it for anything important.
 
 ---
