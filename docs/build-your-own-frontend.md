@@ -232,31 +232,26 @@ A gateway node serves a public, read-only page for every seed it has synced:
 Use `/share` to build your share button. Point people at the gateway's
 `https://galacticfederation.tech/p/...` URL, not at a home node.
 
-## Phone verification and Turnstile
+## Phone verification
 
 Phone verification unlocks the 100 GFC grant and play rewards. One phone
 number per account, and only a keyed hash of the number is stored.
 
-```bash
-# 1. Send a code (post scope)
-curl -X POST $NODE/verify/phone/start -H "Authorization: Bearer $T" \
-  -F phone=+14155550123 -F turnstile_token=<token from the widget>
+It happens on a page the node serves, with Firebase phone sign-in, so your
+front end only opens a link and checks the result afterwards:
 
-# 2. Check it
-curl -X POST $NODE/verify/phone/check -H "Authorization: Bearer $T" \
-  -F phone=+14155550123 -F code=123456
-# {"verified": true, "grant": 100.0, ...}
+```bash
+# 1. Get a one-time link (post scope) and open its url in a browser
+curl -X POST $NODE/verify/link -H "Authorization: Bearer $T"
+# {"verified": false, "url": "https://.../verify?c=...", "expires_in": 900}
+
+# 2. When the person comes back (the page's "Back to GFC" opens gfc://verified)
+curl "$NODE/verify/status" -H "Authorization: Bearer $T"
+# {"verified": true, "rewards": {"grant": 100.0, "first_post_bonus": 0.0}, "wallets": [...]}
 ```
 
-Numbers are E.164 (`+` and country code). VoIP numbers are refused, and code
-requests are rate-limited.
-
-Nodes that run verification publicly (the hosted verification node) set
-`GFC_TURNSTILE_SECRET` and require a **Cloudflare Turnstile** token on
-`/verify/phone/start`, to stop SMS pumping. Your front end shows the Turnstile
-widget with the node operator's **site key**, then sends the token it produces
-as `turnstile_token`. Without a valid token the node returns `403` and sends no
-SMS. Local nodes without the secret skip this check.
+The link is good for 15 minutes and one account. Starts are rate-limited. A node
+without `GFC_FIREBASE_CONFIG` has verification turned off.
 
 ## Calling a node from a web page (CORS)
 
@@ -280,5 +275,5 @@ apps, scripts and server-side code aren't affected by CORS.
 - [ ] Never ask for, store or handle wallet private keys. Let the node sign.
 - [ ] Prompt users to export a wallet backup and keep it safe.
 - [ ] Handle `401` (log in again) and `403` (missing scope or limit reached).
-- [ ] Support phone verification and, on public nodes, Turnstile.
+- [ ] Support phone verification (open the `/verify/link` page, then read `/verify/status`).
 - [ ] Share with `/p/{id}` links from the gateway.

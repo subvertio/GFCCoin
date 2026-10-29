@@ -26,43 +26,32 @@ Moderation is per node. Peers make their own calls; the file isn't deleted, so i
 
 ## Phone verification in a browser (`app_webverify.py`)
 
-Turnstile, Cloudflare's bot check, only runs in a web page, so the phone app verifies in the browser:
+Verification uses Firebase phone sign-in, whose web SDK and reCAPTCHA only run in a web page, so the
+apps verify in the browser. The node never sends an SMS itself:
 
 1. The app calls `POST /verify/link` with its token and opens the returned URL
    (`/verify?c=<code>`; one account, 15 minutes, single use).
-2. The page asks for the number and shows the Turnstile widget; `POST /verify/web/start` checks
-   Turnstile and texts a code (same rate limits as `/verify/phone/start`).
-3. `POST /verify/web/check` checks the code. On success the account is verified and gets the
-   100 GFC welcome grant and any pending first post bonus (if it has a wallet), exactly as
-   `/verify/phone/check` does.
-4. "Back to GFC" opens `gfc://verified`; the app refreshes and plays the earnings burst.
+2. The page asks for the number. `POST /verify/web/fb/start` (link code + number) checks one account
+   per phone and the rate limits (5 starts per user and per number a day), then returns the number in
+   E.164.
+3. The page's script has Firebase text the code (`signInWithPhoneNumber`; Google's invisible reCAPTCHA
+   is the bot check) and checks the code the person types.
+4. Firebase hands the page an ID token, which it posts to `POST /verify/web/fb/check`. The node checks
+   the token against Google's published keys (RS256; this project's audience and issuer; phone sign-in
+   in the last 10 minutes), takes the number from it, and requires it to be the number started in
+   step 2. Then the account is verified and gets the 100 GFC welcome grant and any pending first post
+   bonus (if it has a wallet).
+5. "Back to GFC" opens `gfc://verified`; the app refreshes and plays the earnings burst.
+   `GET /verify/status` tells the app whether to offer verification and what verifying paid.
 
-The pages run no script of their own (only Turnstile's), send no Referer and aren't cached, so the
-code in the URL stays on the node. `GET /verify/status` tells the app whether to offer verification.
+Firebase keeps nothing in the browser (in-memory persistence, signed out at the end). The page sends
+no Referer and isn't cached, so the code in the URL stays on the node, and its CSP allows only Google's
+Firebase, reCAPTCHA and API hosts. Firebase does create a sign-in user per number in the project; the
+node never uses it.
 
-Setup: add `GFC_TURNSTILE_SITEKEY` (the public key of the widget whose secret is
-`GFC_TURNSTILE_SECRET`) with `gfc config`, and add the node's domain to the widget's hostnames in
-the Cloudflare dashboard. Without the site key, the page says verification isn't set up yet.
+### Setup
 
-### With Firebase instead of Twilio
-
-When `GFC_FIREBASE_CONFIG` is set, steps 2 and 3 run in one page with Firebase phone sign-in, and
-the node never sends an SMS itself:
-
-1. `POST /verify/web/fb/start` (link code + number) runs the same checks and rate limits as an SMS
-   start, then returns the number in E.164.
-2. The page's script texts the code with Firebase (`signInWithPhoneNumber`; Google's invisible
-   reCAPTCHA replaces Turnstile) and checks the code the person types.
-3. Firebase hands the page an ID token, which it posts to `POST /verify/web/fb/check`. The node
-   checks the token against Google's published keys (RS256; this project's audience and issuer;
-   phone sign-in in the last 10 minutes), takes the number from it, and requires it to be the
-   number started in step 1. Then it verifies and pays exactly as above.
-
-Firebase keeps nothing in the browser (in-memory persistence, signed out at the end). The page's
-CSP allows only Google's Firebase, reCAPTCHA and API hosts. Firebase does create a sign-in user per
-number in the project; the node never uses it.
-
-Setup, in the Firebase console (project `gfc-coin`):
+In the Firebase console (project `gfc-coin`):
 - Authentication > Sign-in method: Phone enabled. Test numbers with fixed codes can be added there.
 - Authentication > Settings > Authorized domains: the node's domain.
 - Authentication > Settings > SMS region policy: Allow, with the countries to text (US and Canada).
@@ -74,6 +63,10 @@ quotes (systemd and bash strip double quotes otherwise):
 ```
 GFC_FIREBASE_CONFIG='{"apiKey":"...","authDomain":"gfc-coin.firebaseapp.com","projectId":"gfc-coin","appId":"..."}'
 ```
+
+Without it, the page says verification isn't set up yet, and accounts can't verify (so no grants or
+play rewards). For a local node, set the same config (Firebase authorizes `localhost` by default);
+Firebase's test numbers then verify without sending a text.
 
 The API key in it is public (it identifies the project, it isn't a secret). To limit it, restrict it
 to the node's domain in Google Cloud console > APIs & Services > Credentials.

@@ -1,28 +1,23 @@
 """
-GFC Web Phone Verification - verify a phone number in a browser, for apps that can't run
-Cloudflare Turnstile themselves (the Unreal phone app).
+GFC Web Phone Verification - verify a phone number in a browser with Firebase phone sign-in
+(the Firebase web SDK and its reCAPTCHA only run in web pages, not in the Unreal app).
 
-- POST /verify/link        (Bearer, post scope) -> {"verified": false, "url": ".../verify?c=<code>", "expires_in": 900}
-                           or {"verified": true, "url": ""} when there's nothing to do
-- GET  /verify?c=<code>    step 1: phone number + Turnstile
-- POST /verify/web/start   form: c, phone, cf-turnstile-response -> step 2 (code sent), or step 1 with the error
-- POST /verify/web/check   form: c, phone, code -> done (new-user grant, pending first post bonus) or step 2 again
-
-With Firebase (GFC_FIREBASE_CONFIG set), step 1 and 2 are one page that texts and checks the code
-with Firebase phone sign-in in the browser (Google's reCAPTCHA stands in for Turnstile):
+- POST /verify/link          (Bearer, post scope) -> {"verified": false, "url": ".../verify?c=<code>", "expires_in": 900}
+                             or {"verified": true, "url": ""} when there's nothing to do
+- GET  /verify?c=<code>      the page: phone number, then the code Firebase texts
 - POST /verify/web/fb/start  form: c, phone -> JSON {"phone": "+1..."} once the limits allow it, or {"error"}
-- POST /verify/web/fb/check  form: c, id_token (from Firebase) -> done, or step 1 with the error
+- POST /verify/web/fb/check  form: c, id_token (from Firebase) -> done (new-user grant, pending first
+                             post bonus), or the phone step with the error
 
 The app opens the link in the system browser. The code in it stands in for the app's token on these
 pages only: random, stored as a hash, one account, 15 minutes, gone once the account is verified.
-The same limits apply as for /verify/phone/* (phone_verify.py). Without Firebase the pages run no
-script of their own, only Turnstile's widget (which fills in cf-turnstile-response); with it, one
-module script that talks to Firebase. They send no Referer, so the code never leaves the node.
-"Back to GFC" opens gfc://verified, and the app refreshes the balance.
+The limits are in phone_verify.py. The page runs one module script that talks to Firebase and sends
+no Referer, so the code never leaves the node. "Back to GFC" opens gfc://verified, and the app
+refreshes the balance.
 
-Environment: GFC_TURNSTILE_SITEKEY, the public site key paired with GFC_TURNSTILE_SECRET. The widget's
-hostnames must include this node's domain. Or GFC_FIREBASE_CONFIG (phone_verify.py), with this node's
-domain in the Firebase project's Authentication > Settings > Authorized domains.
+Environment: GFC_FIREBASE_CONFIG (phone_verify.py), with this node's domain in the Firebase
+project's Authentication > Settings > Authorized domains. Without it, the page says verification
+isn't set up yet.
 """
 import datetime
 import hashlib
@@ -45,7 +40,6 @@ from security import Caller, caller_from_form
 router = APIRouter()
 
 LINK_TTL = datetime.timedelta(minutes=15)
-TURNSTILE_SCRIPT = "https://challenges.cloudflare.com/turnstile/v0/api.js"
 FIREBASE_SDK = "https://www.gstatic.com/firebasejs/10.12.2"
 
 
@@ -136,10 +130,7 @@ def _page(request: Request, step: str, code: str = "", username: str = "", phone
           error: str = "", paid: Optional[dict] = None) -> HTMLResponse:
     e = lambda s: html.escape(str(s), quote=True)  # noqa: E731
     nonce = secrets.token_urlsafe(16)
-    sitekey = os.environ.get("GFC_TURNSTILE_SITEKEY", "").strip()
-    needs_widget = bool(os.environ.get("GFC_TURNSTILE_SECRET", "").strip())
-    widget, script = "", ""
-    err = f'<p class="error">{e(error)}</p>' if error else ""
+    script = ""
     who = f'<p class="who">Account: <b>@{e(username)}</b></p>' if username else ""
     back = _app_link("verified", f"{public_base_url()}/verify", request.headers.get("user-agent", ""))
     firebase = phone_verify.firebase_config() if step == "phone" else None
@@ -147,36 +138,8 @@ def _page(request: Request, step: str, code: str = "", username: str = "", phone
     if firebase:
         body, script = _firebase_phone_step(e, nonce, firebase, code, who, error, phone)
     elif step == "phone":
-        if needs_widget and not sitekey:
-            body = ("<h1>Verify your phone</h1><p>Phone verification isn't set up on this node yet. "
-                    "Please try again later.</p>")
-        else:
-            if needs_widget:
-                widget = f'<div class="cf-turnstile" data-sitekey="{e(sitekey)}" data-theme="dark"></div>'
-                script = f'<script src="{TURNSTILE_SCRIPT}" async defer></script>'
-            body = f"""<h1>Verify your phone</h1>
-{who}<p>One account per phone number. Verifying unlocks the 100 GFC welcome grant, rewards for the
-creators you watch, and your first post bonus if one is waiting.</p>
-{err}<form method="post" action="/verify/web/start">
-<input type="hidden" name="c" value="{e(code)}">
-<label for="phone">Mobile number</label>
-<input id="phone" name="phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="555 123 4567"
- value="{e(phone)}" required>
-{widget}
-<button type="submit">Text me a code</button>
-</form>"""
-    elif step == "code":
-        body = f"""<h1>Enter the code</h1>
-{who}<p>We texted a 6-digit code to <b>{e(phone)}</b>. It works for 10 minutes.</p>
-{err}<form method="post" action="/verify/web/check">
-<input type="hidden" name="c" value="{e(code)}">
-<input type="hidden" name="phone" value="{e(phone)}">
-<label for="code">Code</label>
-<input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*"
- maxlength="10" required autofocus>
-<button type="submit">Verify</button>
-</form>
-<p class="small"><a href="/verify?c={e(code)}">Use a different number or send a new code</a></p>"""
+        body = ("<h1>Verify your phone</h1><p>Phone verification isn't set up on this node yet. "
+                "Please try again later.</p>")
     elif step == "done":
         lines = []
         if paid and paid.get("grant"):
@@ -216,7 +179,6 @@ label{{display:block;margin:16px 0 6px;color:#b8bccc}}
 input{{box-sizing:border-box;width:100%;padding:14px;border-radius:10px;border:1px solid #333;background:#0b0b0b;
 color:#fff;font-size:1.1rem}}
 input:focus{{outline:2px solid #3b4cca;border-color:#3b4cca}}
-.cf-turnstile{{margin-top:16px;min-height:65px}}
 button,.actions a{{display:block;box-sizing:border-box;width:100%;margin-top:20px;padding:14px;border:0;
 border-radius:999px;background:#3b4cca;color:#fff;font-size:1.05rem;text-align:center;text-decoration:none}}
 .small a{{color:#8f9cff}}
@@ -238,8 +200,7 @@ border-radius:999px;background:#3b4cca;color:#fff;font-size:1.05rem;text-align:c
                "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
         page = page.replace(f'<style nonce="{nonce}">', "<style>", 1)
     else:
-        csp = (f"default-src 'none'; style-src 'nonce-{nonce}'; script-src https://challenges.cloudflare.com; "
-               "frame-src https://challenges.cloudflare.com; connect-src https://challenges.cloudflare.com; "
+        csp = (f"default-src 'none'; style-src 'nonce-{nonce}'; "
                "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
     return HTMLResponse(page, headers={
         "Content-Security-Policy": csp,
@@ -352,48 +313,14 @@ def verify_page(request: Request, c: str = ""):
     return _page(request, "phone", code=c, username=username)
 
 
-@router.post("/verify/web/start", response_class=HTMLResponse)
-def verify_web_start(request: Request, c: str = Form(""), phone: str = Form(""),
-                     turnstile: str = Form("", alias="cf-turnstile-response")):
-    username = link_user(c)
-    if not username:
-        return _page(request, "expired")
-    try:
-        phone_verify.check_turnstile(turnstile, request.client.host if request.client else "")
-        phone_verify.start_verification(DB_PATH, username, phone)
-    except phone_verify.FlowError as ex:
-        if ex.status == 409 and _is_verified(username):
-            return _page(request, "already", username=username)
-        return _page(request, "phone", code=c, username=username, phone=phone, error=_friendly(ex))
-    return _page(request, "code", code=c, username=username, phone=phone.strip())
-
-
-@router.post("/verify/web/check", response_class=HTMLResponse)
-def verify_web_check(request: Request, c: str = Form(""), phone: str = Form(""), code: str = Form("")):
-    username = link_user(c)
-    if not username:
-        return _page(request, "expired")
-    try:
-        result = phone_verify.check_verification(DB_PATH, username, phone, code)
-    except phone_verify.FlowError as ex:
-        step = "phone" if ex.status == 400 and "expired" in ex.detail else "code"
-        return _page(request, step, code=c, username=username, phone=phone, error=_friendly(ex))
-    if not result.get("verified"):
-        return _page(request, "code", code=c, username=username, phone=phone,
-                     error="That code isn't right. Check the text and try again.")
-    paid = pay_on_verified(username)
-    _drop_links(username)
-    return _page(request, "done", username=username, paid=paid)
-
-
 @router.post("/verify/web/fb/start")
 def verify_web_fb_start(c: str = Form(""), phone: str = Form("")):
-    """Firebase step 1: the same checks and limits as an SMS start; the browser then texts the code."""
+    """Step 1: one account per phone and the rate limits; the browser then has Firebase text the code."""
     username = link_user(c)
     if not username or not phone_verify.firebase_config():
         return JSONResponse({"reload": True}, status_code=410)  # the page shows why when it reloads
     try:
-        started = phone_verify.start_verification(DB_PATH, username, phone, send=False)
+        started = phone_verify.start_verification(DB_PATH, username, phone)
     except phone_verify.FlowError as ex:
         if ex.status == 409 and _is_verified(username):
             return JSONResponse({"reload": True}, status_code=409)
@@ -403,7 +330,7 @@ def verify_web_fb_start(c: str = Form(""), phone: str = Form("")):
 
 @router.post("/verify/web/fb/check", response_class=HTMLResponse)
 def verify_web_fb_check(request: Request, c: str = Form(""), id_token: str = Form("")):
-    """Firebase step 2: the ID token Firebase gave the browser proves the number."""
+    """Step 2: the ID token Firebase gave the browser proves the number."""
     username = link_user(c)
     if not username:
         return _page(request, "expired")
@@ -418,41 +345,8 @@ def verify_web_fb_check(request: Request, c: str = Form(""), id_token: str = For
     return _page(request, "done", username=username, paid=paid)
 
 
-_TURNSTILE_MESSAGES = {
-    phone_verify.TURNSTILE_EXPIRED: "The check above expired. Wait for it to show Success again, then try again.",
-    phone_verify.TURNSTILE_REJECTED: "The check above didn't go through. Please try again.",
-    phone_verify.TURNSTILE_MISCONFIGURED: "Phone verification isn't working on this node right now. "
-                                          "Please try again later.",
-    phone_verify.TURNSTILE_UNAVAILABLE: "Couldn't reach the bot check. Please try again in a minute.",
-}
-
-
-_NODE_PROBLEM = "Phone verification isn't working on this node right now. Please try again later."
-
-# Twilio error codes (https://www.twilio.com/docs/api/errors) -> what the person can do about it
-_PROVIDER_MESSAGES = {
-    60200: "That number can't receive texts. Check it and try again.",
-    21211: "That number can't receive texts. Check it and try again.",
-    60205: "That looks like a landline. Please use a mobile number.",
-    60203: "Too many codes were sent to this number. Wait 10 minutes, then try again.",
-    60410: "Our SMS provider is blocking texts to this number for now. Please try again later, or use another number.",
-    60605: "We can't text numbers in that country yet.",
-    # The operator's problem (trial account, bad key, missing permission, wrong service): not the person's
-    21608: _NODE_PROBLEM,
-    20003: _NODE_PROBLEM,
-    20404: _NODE_PROBLEM,
-    8021: _NODE_PROBLEM,
-}
-
-
 def _friendly(ex: phone_verify.FlowError) -> str:
     detail = ex.detail or "Something went wrong."
-    if ex.status == 403:
-        return _TURNSTILE_MESSAGES.get(ex.reason, "Please complete the check above, then try again.")
-    if ex.reason.startswith(phone_verify.PROVIDER_REASON) and "VoIP" not in detail:
-        code = ex.reason.partition(":")[2]
-        return _PROVIDER_MESSAGES.get(int(code) if code else None,
-                                      "We couldn't send the code right now. Please try again later.")
     if ex.status == 429:
         return "Too many attempts today. Please try again tomorrow."
     return detail[0].upper() + detail[1:] + ("" if detail.endswith(".") else ".")

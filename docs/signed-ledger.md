@@ -148,32 +148,17 @@ could create many accounts, collect 100 GFC per account and have the accounts
 play each other's seeds. Phone verification makes each such account cost a
 phone number.
 
-**Flow.** `POST /verify/phone/start` (`api_token`, `phone` in E.164) sends an
-SMS code. `POST /verify/phone/check` (`api_token`, `phone`, `code`) marks the
-account verified. Both use `security.require_user`. The provider sits behind a
-small interface in `phone_verify.py` (`start(phone)`, `check(phone, code)`):
-
-- `TwilioVerifier` is used when `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and
-  `TWILIO_VERIFY_SERVICE_SID` are set. With `TWILIO_LOOKUP_LINE_TYPE=1` it
-  first runs a Twilio Lookup line-type check and refuses VoIP numbers (each
-  lookup is billed).
-- Otherwise `FakeVerifier` is used. It sends nothing and prints the code to the
-  node's console, so it is for development and tests only. A treasury node
-  must have Twilio configured, or anyone can verify any number.
-
-**Bot check (Cloudflare Turnstile).** When `GFC_TURNSTILE_SECRET` is set,
-`/verify/phone/start` also needs a `turnstile_token` form field. The node
-checks it with Cloudflare's `siteverify` (secret, token and client IP, 5 s
-timeout) and returns 403 if Cloudflare rejects it or can't be reached (fail
-closed). This runs before rate limiting and before the SMS provider, so a
-failed challenge never costs a text. This guards against SMS pumping (bots
-requesting texts to premium numbers) and scripted signups. If the secret is
-unset, the check is skipped with a one-time warning, so local nodes keep
-working. Turnstile belongs on the hosted treasury/verification endpoint,
-where the secret stays private. An ordinary local node can't keep a secret
-from the person running it, so the check means nothing there. The client
-(the Unreal web view or a website) needs the matching Turnstile **site key**
-to render the widget and get a token.
+**Flow.** Verification runs in a browser with Firebase phone sign-in
+(`app_webverify.py`; details in
+[moderation-and-web-verify.md](moderation-and-web-verify.md#phone-verification-in-a-browser-app_webverifypy)).
+The app gets a one-time link from `POST /verify/link`. On that page,
+`POST /verify/web/fb/start` checks the number against the limits below, Firebase
+texts and checks the code in the browser (Google's reCAPTCHA is the bot check),
+and `POST /verify/web/fb/check` takes the Firebase ID token. The node checks
+that token against Google's published keys (`phone_verify.verify_firebase_token`)
+and takes the number from it, so a client can't claim a number it didn't receive
+a code on. The node never sends an SMS itself. Without `GFC_FIREBASE_CONFIG`,
+verification is off.
 
 **Privacy.** The number is normalized to E.164 and only
 `HMAC-SHA256(key, number)` is stored, keyed with a per-node secret in
@@ -184,15 +169,14 @@ raw number is never written to the database. The `phone_*` tables aren't in
 unchanged.)
 
 **Limits.** One verified account per phone hash, and one phone per account. At
-most 5 code requests per user and 5 per phone hash per 24 hours (counted
-before the provider is called, so failed sends count too). A code is valid for
-10 minutes and allows 5 wrong guesses.
+most 5 starts per user and 5 per phone hash per 24 hours (every start counts,
+finished or not). A start is valid for 10 minutes; Firebase limits wrong codes.
 
 **Reward rules** (constants in `blockchain.py`):
 
 | Rule | Where |
 |---|---|
-| New-user GRANT only after phone verification (not at wallet creation) | `process_user_grant`; issued by `/verify/phone/check`, or by `/wallets/create` if already verified |
+| New-user GRANT only after phone verification (not at wallet creation) | `process_user_grant`; issued by `/verify/web/fb/check`, or by `/wallets/create` if already verified |
 | Play reward only if the viewer is verified | `play_reward_block_reason` |
 | Viewer account at least 24 hours old (`MIN_VIEWER_ACCOUNT_AGE`) | `play_reward_block_reason` |
 | At most one paid play per viewer, per creator wallet, per UTC day (`PLAY_REWARDS_PER_CREATOR_PER_DAY`) | `claim_play_slot`, table `play_reward_slots` |

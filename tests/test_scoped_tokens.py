@@ -14,11 +14,10 @@ import uuid
 from datetime import datetime, timedelta
 
 # Shares the isolated data dir, treasury env and fake provider set up by the ledger tests
-from test_signed_ledger import FAKE_SMS, unique_phone
+from test_signed_ledger import unique_phone, verify_phone
 
 from fastapi.testclient import TestClient  # noqa: E402
 import main  # noqa: E402
-import phone_verify  # noqa: E402
 
 
 def name(prefix: str) -> str:
@@ -33,7 +32,6 @@ class TokenTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(main.app)
-        phone_verify.set_verifier(FAKE_SMS)
 
     def register(self, funded=False):
         username = name("user")
@@ -43,11 +41,7 @@ class TokenTestCase(unittest.TestCase):
         token = r.json()["token"]
         wallet = None
         if funded:
-            phone = unique_phone()
-            self.assertEqual(self.client.post("/verify/phone/start", headers=bearer(token),
-                                              data={"phone": phone}).status_code, 200)
-            self.assertTrue(self.client.post("/verify/phone/check", headers=bearer(token), data={
-                "phone": phone, "code": FAKE_SMS.sent[phone]}).json()["verified"])
+            self.assertIn("You're verified", verify_phone(self.client, token, unique_phone()).text)
             w = self.client.post("/wallets/create", headers=bearer(token), data={"name": "main"})
             self.assertEqual(w.status_code, 200, w.text)
             wallet = w.json()["id"]
