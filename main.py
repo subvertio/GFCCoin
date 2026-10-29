@@ -17,6 +17,7 @@ import uuid
 import hashlib
 import datetime
 
+import config
 from config import DB_PATH, DATA_DIR, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR, AVATAR_DIR
 
 from app_seeds import router as seeds_router
@@ -312,6 +313,9 @@ def health():
     return {
         "ok": True,
         "timestamp": datetime.datetime.utcnow().isoformat(),
+        # Lets apps ask for phone verification before someone writes a post
+        "network": config.NETWORK,
+        "phone_required_to_post": config.REQUIRE_PHONE_TO_POST,
     }
 
 
