@@ -14,7 +14,7 @@ import logredact
 
 class RedactTests(unittest.TestCase):
     def test_phone_numbers_keep_only_the_last_two_digits(self):
-        line = 'HTTP Request: GET https://lookups.twilio.com/v2/PhoneNumbers/+14155550198?Fields=line_type_intelligence "HTTP/1.1 200 OK"'
+        line = 'HTTP Request: GET https://api.example.com/v2/PhoneNumbers/+14155550198?Fields=line_type "HTTP/1.1 200 OK"'
         out = logredact.redact(line)
         self.assertNotIn("4155550198", out)
         self.assertIn("/PhoneNumbers/+...98?Fields", out)
@@ -41,7 +41,7 @@ class RedactTests(unittest.TestCase):
             logredact.install()  # twice is fine
             self.assertEqual(handler.filters.count(logredact._FILTER), 1)
             # httpx logs URLs through %-style args: the formatted message is what gets redacted
-            logging.getLogger("httpx").warning("HTTP Request: %s %s", "GET", "https://lookups.twilio.com/v2/PhoneNumbers/+14155550100")
+            logging.getLogger("httpx").warning("HTTP Request: %s %s", "GET", "https://api.example.com/v2/PhoneNumbers/+14155550100")
         finally:
             root.removeHandler(handler)
         written = stream.getvalue()

@@ -1,31 +1,25 @@
 """
 Tests for phone verification in a browser (app_webverify.py): the one-time link the app
-opens, the Turnstile + SMS pages, and the rewards paid at the end.
+opens, the page's headers, the rewards paid at the end, and the page without Firebase.
+The Firebase side (the ID token check, refusals) is in test_firebase_verify.py.
 
 Run from the repository root:
     python -m unittest discover -s tests -v
 """
 
-import os
-import re
 import sqlite3
 import unittest
 import uuid
 
-import httpx
-
 # Sets up the isolated data dir and test treasury key before any GFC module loads config
 import test_signed_ledger  # noqa: F401
-from test_signed_ledger import FAKE_SMS, as_treasury_node, unique_phone
+from test_signed_ledger import as_treasury_node, unique_phone
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app_webverify  # noqa: E402
+import firebase_stub  # noqa: E402
 import main  # noqa: E402
-import phone_verify  # noqa: E402
-
-TURNSTILE_PASS_SECRET = "1x0000000000000000000000000000000AA"
-TURNSTILE_FAIL_SECRET = "2x0000000000000000000000000000000AA"
 
 
 def bearer(token):
@@ -36,17 +30,6 @@ class WebVerifyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(main.app)
-
-    def setUp(self):
-        def siteverify(request):
-            form = dict(httpx.QueryParams(request.content.decode()))
-            ok = form.get("secret") == TURNSTILE_PASS_SECRET and bool(form.get("response"))
-            return httpx.Response(200, json={"success": ok})
-
-        phone_verify.set_turnstile_client(httpx.Client(transport=httpx.MockTransport(siteverify)))
-        self.addCleanup(phone_verify.set_turnstile_client, httpx.Client(timeout=5.0))
-        for var in ("GFC_TURNSTILE_SECRET", "GFC_TURNSTILE_SITEKEY"):
-            self.addCleanup(os.environ.pop, var, None)
 
     def register(self, wallet=True):
         name = "w" + uuid.uuid4().hex[:10]
@@ -65,45 +48,29 @@ class WebVerifyTests(unittest.TestCase):
         body = r.json()
         self.assertFalse(body["verified"])
         self.assertEqual(body["expires_in"], 900)
-        return re.search(r"[?&]c=([^&]+)", body["url"]).group(1)
+        return firebase_stub.link_code(self.client, token)
 
     def test_full_flow_pays_the_grant(self):
-        os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_PASS_SECRET
-        os.environ["GFC_TURNSTILE_SITEKEY"] = "1x00000000000000000000AA"
         name, token = self.register()
         before = self.client.get("/verify/status", headers=bearer(token)).json()
         self.assertFalse(before["verified"])
         self.assertEqual(before["rewards"], {"grant": 0.0, "first_post_bonus": 0.0})
         self.assertEqual(len(before["wallets"]), 1)  # the wallet register() made
-        code = self.link_code(token)
 
-        page = self.client.get("/verify", params={"c": code})
-        self.assertEqual(page.status_code, 200)
-        self.assertIn(f"@{name}", page.text)
-        self.assertIn('data-sitekey="1x00000000000000000000AA"', page.text)
-        csp = page.headers["content-security-policy"]
-        self.assertIn("script-src https://challenges.cloudflare.com", csp)
-        self.assertIn("form-action 'self'", csp)
-        self.assertEqual(page.headers["referrer-policy"], "no-referrer")
-        self.assertEqual(page.headers["cache-control"], "no-store")
+        with firebase_stub.enabled():
+            code = self.link_code(token)
+            page = self.client.get("/verify", params={"c": code})
+            self.assertEqual(page.status_code, 200)
+            self.assertIn(f"@{name}", page.text)
+            self.assertEqual(page.headers["referrer-policy"], "no-referrer")
+            self.assertEqual(page.headers["cache-control"], "no-store")
 
-        phone = unique_phone()
-        with as_treasury_node():
-            # Without the Turnstile token: no SMS, the phone step again with a hint
-            r = self.client.post("/verify/web/start", data={"c": code, "phone": phone})
-            self.assertIn("complete the check", r.text)
-            self.assertNotIn(phone, FAKE_SMS.sent)
-
-            r = self.client.post("/verify/web/start", data={"c": code, "phone": phone,
-                                                             "cf-turnstile-response": "XXXX.DUMMY"})
-            self.assertIn("Enter the code", r.text)
-            self.assertIn(phone, FAKE_SMS.sent)
-
-            r = self.client.post("/verify/web/check", data={"c": code, "phone": phone, "code": "000000"})
-            self.assertIn("Check the text and try again", r.text)
-
-            r = self.client.post("/verify/web/check", data={"c": code, "phone": phone,
-                                                             "code": FAKE_SMS.sent[phone]})
+            phone = unique_phone()
+            with as_treasury_node():
+                self.assertEqual(self.client.post("/verify/web/fb/start", data={"c": code, "phone": phone})
+                                 .status_code, 200)
+                r = self.client.post("/verify/web/fb/check",
+                                     data={"c": code, "id_token": firebase_stub.make_token(phone)})
         self.assertIn("You're verified", r.text)
         self.assertIn("welcome grant", r.text)
         self.assertIn("gfc://verified", r.text)
@@ -134,69 +101,31 @@ class WebVerifyTests(unittest.TestCase):
             r = self.client.get("/verify", params={"c": c})
             self.assertEqual(r.status_code, 200)
             self.assertIn("expired", r.text)
-        r = self.client.post("/verify/web/start", data={"c": code, "phone": unique_phone(),
-                                                         "cf-turnstile-response": "t"})
-        self.assertIn("expired", r.text)
-
-    def test_refused_check_says_why(self):
-        # The widget can show "Success!" and Cloudflare still refuse the token (an expired token, or a
-        # site key and secret from different widgets): the page shouldn't tell them to do the check
-        os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_PASS_SECRET
-        os.environ["GFC_TURNSTILE_SITEKEY"] = "1x00000000000000000000AA"
-        _, token = self.register(wallet=False)
-        code = self.link_code(token)
-        for codes, message in ((["invalid-input-response"], "go through"),  # the page escapes apostrophes
-                               (["timeout-or-duplicate"], "expired"),
-                               (["invalid-input-secret"], "working on this node")):
-            phone_verify.set_turnstile_client(httpx.Client(transport=httpx.MockTransport(
-                lambda request, c=codes: httpx.Response(200, json={"success": False, "error-codes": c}))))
-            phone = unique_phone()
-            with self.subTest(codes=codes):
-                r = self.client.post("/verify/web/start", data={"c": code, "phone": phone,
-                                                                 "cf-turnstile-response": "XXXX.DUMMY"})
-                self.assertIn(message, r.text)
-                self.assertNotIn("complete the check", r.text)
-                self.assertIn('class="cf-turnstile"', r.text)  # a fresh widget to try again
-                self.assertNotIn(phone, FAKE_SMS.sent)
-
-    def test_provider_refusal_says_what_to_do(self):
-        class Refusing:
-            def __init__(self, code):
-                self.code = code
-
-            def start(self, phone):
-                raise phone_verify.VerifyError("verification provider error (403)", self.code)
-
-        _, token = self.register(wallet=False)
-        code = self.link_code(token)
-        self.addCleanup(phone_verify.set_verifier, FAKE_SMS)
-        for twilio_code, message in ((60410, "blocking texts to this number"),
-                                     (60605, "in that country"),
-                                     (21608, "working on this node"),  # trial account: the operator's problem
-                                     (None, "send the code right now")):
-            phone_verify.set_verifier(Refusing(twilio_code))
-            with self.subTest(twilio_code=twilio_code):
-                r = self.client.post("/verify/web/start", data={"c": code, "phone": unique_phone()})
-                self.assertIn(message, r.text)
-                self.assertNotIn("provider error", r.text)
+        with firebase_stub.enabled():
+            r = self.client.post("/verify/web/fb/start", data={"c": code, "phone": unique_phone()})
+        self.assertEqual(r.json(), {"reload": True})
 
     def test_link_needs_a_post_token(self):
         self.assertEqual(self.client.post("/verify/link").status_code, 401)
 
-    def test_page_escapes_and_without_sitekey_says_not_set_up(self):
-        os.environ["GFC_TURNSTILE_SECRET"] = TURNSTILE_PASS_SECRET
+    def test_without_firebase_says_not_set_up(self):
         _, token = self.register(wallet=False)
         code = self.link_code(token)
         r = self.client.get("/verify", params={"c": code})
         self.assertIn("isn't set up", r.text)
         self.assertNotIn("<form", r.text)
+        self.assertNotIn("<script", r.text)
+        csp = r.headers["content-security-policy"]
+        self.assertNotIn("script-src", csp)  # default-src 'none': no script at all
+        self.assertIn("form-action 'self'", csp)
+        r = self.client.post("/verify/web/fb/start", data={"c": code, "phone": unique_phone()})
+        self.assertEqual(r.json(), {"reload": True})
 
-    def test_no_turnstile_secret_means_no_widget(self):
+    def test_sms_endpoints_are_gone(self):
         _, token = self.register(wallet=False)
-        code = self.link_code(token)
-        r = self.client.get("/verify", params={"c": code})
-        self.assertIn("<form", r.text)
-        self.assertNotIn('class="cf-turnstile"', r.text)
+        for path in ("/verify/phone/start", "/verify/phone/check", "/verify/web/start", "/verify/web/check"):
+            self.assertEqual(self.client.post(path, headers=bearer(token),
+                                              data={"phone": unique_phone(), "code": "1"}).status_code, 404, path)
 
 
 if __name__ == "__main__":

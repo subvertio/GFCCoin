@@ -340,7 +340,7 @@ async def create_wallet(name: str = Form("Default Wallet"), caller: Caller = Dep
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
     # First-wallet grant (100 GFC from Treasury), only once the owner's phone is verified.
-    # Unverified owners get it from POST /verify/phone/check instead.
+    # Unverified owners get it when they verify (POST /verify/web/fb/check) instead.
     grant_balance = 0.0
     if owner:
         grant_result = blockchain.process_user_grant(DB_PATH, owner, wallet_id)

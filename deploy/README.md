@@ -3,7 +3,7 @@
 This server is the network's **treasury and gateway node**. It's the always-on
 peer that:
 - signs grants and rewards with the treasury key;
-- runs phone verification (Twilio) behind Turnstile;
+- runs phone verification (Firebase phone sign-in in the browser);
 - serves public share pages;
 - syncs with everyone's home nodes over TCP 6881.
 
@@ -128,16 +128,13 @@ account and your SSH key's passphrase are what guard those. If the worst
 happens, the treasury limits (fixed grant size, capped rewards) bound the
 damage, and you can rotate to a new key.
 
-## 5. Add the Twilio and Turnstile secrets
+## 5. Turn on phone verification (Firebase)
 
-Open the settings with `ssh -t gfc-node gfc config` (it restarts the node when you save):
-
-- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`: from
-  the Twilio console (Verify → Services). While these are empty, the node uses
-  a fake provider that's only suitable for testing.
-- `GFC_TURNSTILE_SECRET`: from the Cloudflare dashboard (Turnstile → Add
-  widget, domain `galacticfederation.tech`). The *site key* goes into the app
-  or website; the *secret* goes here.
+Open the settings with `ssh -t gfc-node gfc config` (it restarts the node when you save)
+and set `GFC_FIREBASE_CONFIG` to the Firebase web app's public config, as one line of
+JSON in single quotes. The Firebase console setup (phone sign-in, authorized domain,
+SMS regions) is in [docs/moderation-and-web-verify.md](../docs/moderation-and-web-verify.md#phone-verification-in-a-browser-app_webverifypy).
+While it's empty, phone verification is off, and so are the grants and rewards that need it.
 
 Then check everything at once:
 
@@ -153,7 +150,7 @@ editor:
 
 | Task | Command |
 |---|---|
-| Plain-English status: services, HTTPS, treasury key, Twilio, Turnstile, last backup | `ssh gfc-node gfc check` |
+| Plain-English status: services, HTTPS, treasury key, Firebase, last backup | `ssh gfc-node gfc check` |
 | Node log | `ssh gfc-node gfc logs` (or `gfc logs 200`) |
 | Edit settings and secrets, then restart | `ssh -t gfc-node gfc config` |
 | Update to the latest `master` (backs up first) | `ssh gfc-node gfc update` |

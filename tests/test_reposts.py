@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 # Sets up the isolated data dir and test treasury key before any GFC module loads config
 import test_signed_ledger  # noqa: F401
-from test_signed_ledger import FAKE_SMS, TREASURY_PRIV, as_treasury_node, backdate_user, unique_phone
+from test_signed_ledger import TREASURY_PRIV, as_treasury_node, backdate_user, unique_phone, verify_phone
 
 from fastapi.testclient import TestClient  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402
@@ -156,11 +156,8 @@ class RepostTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         token = r.json()["token"]
         if verified:
-            phone = unique_phone()
             with as_treasury_node():
-                self.client.post("/verify/phone/start", data={"phone": phone, "api_token": token})
-                self.client.post("/verify/phone/check", data={"phone": phone, "code": FAKE_SMS.sent[phone],
-                                                               "api_token": token})
+                verify_phone(self.client, token, unique_phone())
         wallet = self.client.post("/wallets/create", data={"name": "main", "api_token": token}).json()["id"]
         return name, token, wallet
 

@@ -9,7 +9,7 @@ Group=gfc
 WorkingDirectory=/opt/gfc/app
 EnvironmentFile=/etc/gfc/gfc.env
 # One worker only: the P2P sync engine starts inside the app process.
-# Proxy headers let Turnstile and rate limits see the real client IP behind Caddy.
+# Proxy headers let rate limits and logs see the real client IP behind Caddy.
 ExecStart=/opt/gfc/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 \
     --proxy-headers --forwarded-allow-ips 127.0.0.1
 Restart=always

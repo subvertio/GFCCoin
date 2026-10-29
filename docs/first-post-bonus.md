@@ -10,12 +10,11 @@ from the treasury. Code: `first_post.py`, `blockchain.process_first_post_mint`.
   original earns nothing and doesn't use up the bonus; the account's next
   original post still earns it.
 - Only phone-verified accounts with a wallet on this node are paid, the same
-  bar as the 100 GFC new-user grant. Phone verification is one account per real
-  (non-VoIP) number, which is what stops someone farming 1,000 GFC per throwaway
-  account.
+  bar as the 100 GFC new-user grant. Phone verification is one account per phone
+  number, which is what stops someone farming 1,000 GFC per throwaway account.
 - If the account isn't verified or has no wallet yet, the bonus is recorded as
   **pending** and paid when it creates its first wallet (`POST /wallets/create`)
-  or verifies its phone (`POST /verify/phone/check`), whichever completes the
+  or verifies its phone (`POST /verify/web/fb/check`), whichever completes the
   requirements. A pending bonus left by a short treasury is retried on the
   account's next upload.
 
@@ -65,5 +64,5 @@ back on, that account's next original post earns it.
 `first_post_bonus_pending` is there only when the bonus is waiting for a wallet
 or a verified phone. Both fields are absent on every other upload. Clients (the
 Unreal app plays its coin animation) should key off `first_post_bonus` being
-present. `POST /verify/phone/check` also returns `first_post_bonus` when it pays
-a pending one; `POST /wallets/create` includes it in `gfc_balance`.
+present. Verifying shows a pending bonus on the done page and in
+`GET /verify/status` (`rewards.first_post_bonus`); `POST /wallets/create` includes it in `gfc_balance`.

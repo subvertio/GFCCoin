@@ -14,13 +14,12 @@ from datetime import datetime, timedelta, timezone
 
 # Sets up the isolated data dir and test treasury key before any GFC module loads config
 import test_signed_ledger  # noqa: F401
-from test_signed_ledger import FAKE_SMS, as_treasury_node, backdate_user, unique_phone
+from test_signed_ledger import as_treasury_node, backdate_user, unique_phone, verify_phone
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 import blockchain  # noqa: E402
 import main  # noqa: E402
-import phone_verify  # noqa: E402
 import referrals  # noqa: E402
 import signing  # noqa: E402
 
@@ -39,11 +38,7 @@ class ReferralTests(unittest.TestCase):
         return name, token, wallet, r.json()
 
     def verify_phone(self, token):
-        phone = unique_phone()
-        self.client.post("/verify/phone/start", data={"phone": phone, "api_token": token})
-        code = FAKE_SMS.sent[phone]
-        r = self.client.post("/verify/phone/check", data={"phone": phone, "code": code, "api_token": token})
-        self.assertTrue(r.json()["verified"], r.text)
+        self.assertIn("You're verified", verify_phone(self.client, token, unique_phone()).text)
 
     def balance(self, wallet):
         return blockchain.get_balance_cents(main.DB_PATH, wallet)

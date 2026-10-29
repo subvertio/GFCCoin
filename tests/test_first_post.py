@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 # Sets up the isolated data dir and test treasury key before any GFC module loads config
 import test_signed_ledger  # noqa: F401
-from test_signed_ledger import FAKE_SMS, TREASURY_PRIV, as_treasury_node, unique_phone
+from test_signed_ledger import TREASURY_PRIV, as_treasury_node, unique_phone, verify_phone
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -45,13 +45,10 @@ class FirstPostBonusTests(unittest.TestCase):
         return name, token, wallet_id
 
     def verify_phone(self, token):
-        phone = unique_phone()
         with as_treasury_node():
-            self.client.post("/verify/phone/start", data={"phone": phone, "api_token": token})
-            r = self.client.post("/verify/phone/check", data={"phone": phone, "code": FAKE_SMS.sent[phone],
-                                                               "api_token": token})
-        self.assertTrue(r.json()["verified"], r.text)
-        return r.json()
+            page = verify_phone(self.client, token, unique_phone())
+        self.assertIn("You're verified", page.text)
+        return page.text
 
     def create_wallet(self, token):
         with as_treasury_node():
@@ -190,8 +187,7 @@ class FirstPostBonusTests(unittest.TestCase):
         self.assertIs(first["first_post_bonus_pending"], True)
         self.assertEqual(self.bonus_txs(wallet), [])
 
-        result = self.verify_phone(token)
-        self.assertEqual(result["first_post_bonus"], 1000.0)
+        self.assertIn("+1,000 GFC first post bonus", self.verify_phone(token))
         self.assertEqual(len(self.bonus_txs(wallet)), 1)
         self.assertEqual(self.balance(wallet), 10_000 + 100_000)
 

@@ -110,6 +110,6 @@ Done. Next steps (see deploy/README.md):
   1. Point DNS: A record  $DOMAIN  ->  $(curl -fsS -4 https://ifconfig.me 2>/dev/null || echo '<this server IP>')
      Caddy gets an HTTPS certificate automatically once DNS resolves.
   2. Restore the treasury key:  gfc restore-treasury
-     Add Twilio/Turnstile secrets: gfc config
+     Add the Firebase config:       gfc config
   3. Check everything:           gfc check
 EOF

@@ -1,11 +1,9 @@
 """
 GFC Phone Verification - makes each rewarded account cost a phone number.
 
-- A verifier sends and checks one-time SMS codes: `start(phone)` / `check(phone, code)`.
-  TwilioVerifier is used when TWILIO_* credentials (an API key, or the account
-  SID and auth token) and the Verify service SID are set, else FakeVerifier.
-- Or Firebase phone sign-in (GFC_FIREBASE_CONFIG): the browser texts and checks the code
-  with Firebase, and the node checks the Google-signed ID token it returns (see FIREBASE).
+- Firebase phone sign-in (GFC_FIREBASE_CONFIG) texts and checks the code in the browser,
+  and the node checks the Google-signed ID token it returns (see FIREBASE). The node never
+  sends an SMS itself.
 - Only an HMAC-SHA256 of the normalized E.164 number is stored, keyed with a
   secret in the data dir (phone_hmac_key.hex). The raw number is never written
   to the database, and none of these tables are synced to peers.
@@ -42,22 +40,15 @@ logger = logging.getLogger("gfc.phone")
 # ============================================================================
 
 START_WINDOW = datetime.timedelta(days=1)
-MAX_STARTS_PER_USER = 5      # SMS sends per user per START_WINDOW
-MAX_STARTS_PER_PHONE = 5     # SMS sends per phone hash per START_WINDOW
-MAX_CHECKS_PER_START = 5     # wrong codes allowed before the user must start again
+MAX_STARTS_PER_USER = 5      # starts per user per START_WINDOW
+MAX_STARTS_PER_PHONE = 5     # starts per phone hash per START_WINDOW
 CODE_TTL = datetime.timedelta(minutes=10)
 
 E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 
 
 class VerifyError(Exception):
-    """
-    A verification request the provider refused (bad number, VoIP, provider error).
-    provider_code is the provider's own error code when it gave one (Twilio's, e.g. 60410).
-    """
-    def __init__(self, message: str, provider_code: Optional[int] = None):
-        super().__init__(message)
-        self.provider_code = provider_code
+    """A phone number that can't be used (not a valid number)."""
 
 
 def normalize_phone(phone: str) -> str:
@@ -96,230 +87,6 @@ def _hmac_key() -> bytes:
 def phone_hash(phone: str) -> str:
     """HMAC-SHA256 of the normalized number. Raises VerifyError if it isn't E.164."""
     return hmac.new(_hmac_key(), normalize_phone(phone).encode(), hashlib.sha256).hexdigest()
-
-
-# ============================================================================
-# PROVIDERS
-# ============================================================================
-
-class FakeVerifier:
-    """
-    In-memory provider for tests and for nodes without Twilio credentials.
-    The code for each number is kept in `sent` (tests read it from there) and
-    printed to the console with the number masked. Numbers in `voip_numbers`
-    are refused like Twilio Lookup refuses VoIP lines.
-    """
-    name = "fake"
-
-    def __init__(self):
-        self.sent = {}
-        self.voip_numbers = set()
-
-    def start(self, phone: str):
-        if phone in self.voip_numbers:
-            raise VerifyError("VoIP numbers can't be used for verification")
-        code = f"{secrets.randbelow(10 ** 6):06d}"
-        self.sent[phone] = code
-        print(f"[PhoneVerify] (fake provider, no SMS sent) code for ***{phone[-2:]}: {code}")
-
-    def check(self, phone: str, code: str) -> bool:
-        expected = self.sent.get(phone)
-        if expected and hmac.compare_digest(expected, code or ""):
-            del self.sent[phone]
-            return True
-        return False
-
-
-class TwilioVerifier:
-    """
-    Twilio Verify (SMS) for TWILIO_VERIFY_SERVICE_SID. It authenticates with a
-    restricted API key (TWILIO_API_KEY_SID + TWILIO_API_KEY_SECRET; preferred,
-    since it can be limited to Verify and Lookup) or else the account's
-    TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN. With TWILIO_LOOKUP_LINE_TYPE=1, a
-    Lookup v2 line-type check runs first and VoIP numbers are refused (it is
-    billed per lookup).
-    """
-    name = "twilio"
-    VERIFY_URL = "https://verify.twilio.com/v2/Services/{service}/{path}"
-    LOOKUP_URL = "https://lookups.twilio.com/v2/PhoneNumbers/{phone}"
-    VOIP_TYPES = {"nonFixedVoip", "fixedVoip"}
-
-    def __init__(self, auth_user: str, auth_secret: str, service_sid: str,
-                 lookup_line_type: bool = False, timeout: float = 10.0):
-        # auth_user is an API key SID (SK...) or the account SID (AC...); the
-        # Verify and Lookup URLs don't contain the account SID, so either works
-        self.service_sid = service_sid
-        self.lookup_line_type = lookup_line_type
-        self.auth_user = auth_user
-        self.client = httpx.Client(auth=(auth_user, auth_secret), timeout=timeout)
-
-    def _post(self, path: str, data: dict) -> dict:
-        try:
-            r = self.client.post(self.VERIFY_URL.format(service=self.service_sid, path=path), data=data)
-        except httpx.HTTPError as ex:
-            raise VerifyError(f"verification provider unreachable: {type(ex).__name__}")
-        if r.status_code == 404 and path == "VerificationCheck":
-            return {"status": "expired"}  # Twilio: no pending verification (expired or used up)
-        if r.status_code >= 400:
-            raise _twilio_error(f"Verify {path}", r)
-        return r.json()
-
-    def _refuse_voip(self, phone: str):
-        try:
-            r = self.client.get(self.LOOKUP_URL.format(phone=phone),
-                                params={"Fields": "line_type_intelligence"})
-        except httpx.HTTPError as ex:
-            raise VerifyError(f"lookup unreachable: {type(ex).__name__}")
-        if r.status_code >= 400:
-            raise _twilio_error("Lookup", r)
-        line_type = ((r.json() or {}).get("line_type_intelligence") or {}).get("type")
-        if line_type in self.VOIP_TYPES:
-            raise VerifyError("VoIP numbers can't be used for verification")
-
-    def start(self, phone: str):
-        if self.lookup_line_type:
-            self._refuse_voip(phone)
-        self._post("Verifications", {"To": phone, "Channel": "sms"})
-
-    def check(self, phone: str, code: str) -> bool:
-        return self._post("VerificationCheck", {"To": phone, "Code": code}).get("status") == "approved"
-
-
-def _twilio_error(what: str, r: httpx.Response) -> VerifyError:
-    """
-    Logs a Twilio refusal with Twilio's own error code and message (its JSON body), which say
-    why: 60410 Fraud Guard, 60605 country not allowed, 21608 trial account, 20003 bad key...
-    logredact masks any phone number in the message.
-    """
-    try:
-        body = r.json()
-    except ValueError:
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
-    code = body.get("code") if isinstance(body.get("code"), int) else None
-    message = str(body.get("message") or "")[:300]
-    logger.warning("Twilio %s refused: HTTP %s, Twilio error %s: %s %s", what, r.status_code,
-                   code if code is not None else "-", message or "(no message)", body.get("more_info") or "")
-    detail = f"verification provider error ({r.status_code}" + (f", Twilio {code}" if code is not None else "") + ")"
-    return VerifyError(detail, code)
-
-
-_verifier = None
-
-
-def twilio_credentials():
-    """(user, secret) for Twilio: a restricted API key if set, else the account SID and auth token."""
-    key_sid = os.environ.get("TWILIO_API_KEY_SID", "")
-    key_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
-    if key_sid and key_secret:
-        return key_sid, key_secret
-    sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
-    token = os.environ.get("TWILIO_AUTH_TOKEN", "")
-    if sid and token:
-        return sid, token
-    return None
-
-
-def get_verifier():
-    """Twilio when its env vars are set, else the fake provider (logged, since it sends nothing)."""
-    global _verifier
-    if _verifier is None:
-        creds = twilio_credentials()
-        service = os.environ.get("TWILIO_VERIFY_SERVICE_SID", "")
-        if creds and service:
-            _verifier = TwilioVerifier(creds[0], creds[1], service,
-                                       lookup_line_type=os.environ.get("TWILIO_LOOKUP_LINE_TYPE") == "1")
-        else:
-            print("[PhoneVerify] No Twilio credentials: using the fake provider (codes go to the console)")
-            _verifier = FakeVerifier()
-    return _verifier
-
-
-def set_verifier(verifier):
-    """Replace the provider (tests)."""
-    global _verifier
-    _verifier = verifier
-
-
-# ============================================================================
-# CLOUDFLARE TURNSTILE (bot check before any SMS is sent)
-# ============================================================================
-
-TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-_turnstile_client = httpx.Client(timeout=5.0)
-_turnstile_warned = False
-
-
-def set_turnstile_client(client: httpx.Client):
-    """Replace the HTTP client used for siteverify (tests)."""
-    global _turnstile_client
-    _turnstile_client = client
-
-
-def check_turnstile(token: str, remoteip: str = ""):
-    """
-    Raise FlowError(403) unless Cloudflare accepts the Turnstile token. Uses the
-    secret in GFC_TURNSTILE_SECRET; if unset, the check is skipped (warned once),
-    so local nodes work without it. Fails closed if Cloudflare can't be reached.
-
-    Every refusal is logged with Cloudflare's error codes, and its FlowError.reason says
-    which kind it was (see TURNSTILE_* below), so the pages can say what to do about it.
-    """
-    global _turnstile_warned
-    secret = os.environ.get("GFC_TURNSTILE_SECRET", "")
-    if not secret:
-        if not _turnstile_warned:
-            print("[PhoneVerify] GFC_TURNSTILE_SECRET not set: skipping the Turnstile bot check")
-            _turnstile_warned = True
-        return
-    if not token:
-        raise FlowError(403, "bot check required (turnstile_token missing)", TURNSTILE_MISSING)
-    data = {"secret": secret, "response": token}
-    if remoteip:
-        data["remoteip"] = remoteip
-    try:
-        r = _turnstile_client.post(TURNSTILE_VERIFY_URL, data=data)
-        body = r.json() if r.status_code == 200 else {}
-        if not isinstance(body, dict):
-            body = {}
-    except (httpx.HTTPError, ValueError) as ex:
-        logger.warning("Turnstile siteverify unreachable: %s", type(ex).__name__)
-        raise FlowError(403, "bot check unavailable, try again later", TURNSTILE_UNAVAILABLE)
-    if body.get("success") is True:
-        return
-    codes = [str(c) for c in body.get("error-codes") or []]
-    reason = _turnstile_reason(r.status_code, codes)
-    if reason == TURNSTILE_MISCONFIGURED:
-        logger.error("Turnstile siteverify rejected this node's secret (%s): check GFC_TURNSTILE_SECRET",
-                     ", ".join(codes))
-    elif reason == TURNSTILE_REJECTED:
-        # A site key and secret from different widgets look exactly like this: the widget says
-        # "Success!" in the browser, then every token comes back invalid-input-response.
-        logger.warning("Turnstile token rejected (%s, hostname %s). If every token fails, "
-                       "GFC_TURNSTILE_SITEKEY and GFC_TURNSTILE_SECRET may be from different widgets",
-                       ", ".join(codes) or "no error codes", body.get("hostname") or "-")
-    else:
-        logger.warning("Turnstile token refused (%s, HTTP %s)", ", ".join(codes) or "no error codes", r.status_code)
-    raise FlowError(403, f"bot check failed ({', '.join(codes) or 'rejected'})", reason)
-
-
-# FlowError.reason for each way the Turnstile check can refuse
-TURNSTILE_MISSING = "turnstile_missing"            # no token sent
-TURNSTILE_EXPIRED = "turnstile_expired"            # token too old or already used: check again
-TURNSTILE_REJECTED = "turnstile_rejected"          # Cloudflare didn't accept the token
-TURNSTILE_MISCONFIGURED = "turnstile_misconfigured"  # this node's secret is wrong: the operator's problem
-TURNSTILE_UNAVAILABLE = "turnstile_unavailable"    # Cloudflare unreachable or erroring: try later
-
-
-def _turnstile_reason(status: int, codes: list) -> str:
-    if status != 200 or "internal-error" in codes:
-        return TURNSTILE_UNAVAILABLE
-    if "missing-input-secret" in codes or "invalid-input-secret" in codes:
-        return TURNSTILE_MISCONFIGURED
-    if "timeout-or-duplicate" in codes:
-        return TURNSTILE_EXPIRED
-    return TURNSTILE_REJECTED
 
 
 # ============================================================================
@@ -376,30 +143,21 @@ def _phone_taken(conn: sqlite3.Connection, username: str, hashed: str) -> bool:
 
 
 # ============================================================================
-# FLOW (called by the /verify/phone endpoints)
+# FLOW (called by the browser verification page, app_webverify.py)
 # ============================================================================
 
 class FlowError(Exception):
-    """A refused step, with the HTTP status the endpoint should return (and, for some, why)."""
-    def __init__(self, status: int, detail: str, reason: str = ""):
+    """A refused step, with the HTTP status the endpoint should return."""
+    def __init__(self, status: int, detail: str):
         super().__init__(detail)
         self.status = status
         self.detail = detail
-        self.reason = reason
 
 
-PROVIDER_REASON = "provider"  # FlowError.reason when the SMS provider refused: "provider" or "provider:<code>"
-
-
-def _provider_reason(ex: VerifyError) -> str:
-    return PROVIDER_REASON + (f":{ex.provider_code}" if ex.provider_code is not None else "")
-
-
-def start_verification(db_path: str, username: str, phone: str, send: bool = True) -> dict:
+def start_verification(db_path: str, username: str, phone: str) -> dict:
     """
-    Checks and counts a start, then sends the code. send=False is for Firebase, where the
-    browser sends the code itself: everything else (limits, the pending row) is the same,
-    and complete_firebase_verification requires that pending row.
+    Checks and counts a start before the browser has Firebase text the code: one account
+    per phone, and the rate limits. complete_firebase_verification requires the pending row.
     """
     try:
         number = normalize_phone(phone)
@@ -421,68 +179,23 @@ def start_verification(db_path: str, username: str, phone: str, send: bool = Tru
                                 (hashed,)).fetchone()[0]
         if by_user >= MAX_STARTS_PER_USER or by_phone >= MAX_STARTS_PER_PHONE:
             raise FlowError(429, "too many verification requests, try again tomorrow")
-        # Count the attempt before calling the provider, so failures are rate-limited too
+        # Count every start, so ones that never finish are rate-limited too
         now = _now().isoformat()
         conn.execute("INSERT INTO phone_verify_starts (username, phone_hash, created_at) VALUES (?, ?, ?)",
                      (username, hashed, now))
-        conn.commit()
-        if send:
-            try:
-                get_verifier().start(number)
-            except VerifyError as ex:
-                raise FlowError(400, str(ex), _provider_reason(ex))
         conn.execute("INSERT OR REPLACE INTO phone_verify_pending (username, phone_hash, started_at, failed_checks) "
                      "VALUES (?, ?, ?, 0)", (username, hashed, now))
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "sent": send, "phone": number}
-
-
-def check_verification(db_path: str, username: str, phone: str, code: str) -> dict:
-    try:
-        number = normalize_phone(phone)
-    except VerifyError as ex:
-        raise FlowError(400, str(ex))
-    hashed = phone_hash(number)
-    conn = sqlite3.connect(db_path)
-    try:
-        init_phone_tables(conn)
-        if is_verified(conn, username):
-            return {"ok": True, "verified": True}
-        pending = conn.execute("SELECT phone_hash, started_at, failed_checks FROM phone_verify_pending "
-                               "WHERE username = ?", (username,)).fetchone()
-        if not pending or pending[0] != hashed:
-            raise FlowError(400, "no verification started for this number")
-        started = datetime.datetime.fromisoformat(pending[1])
-        if pending[2] >= MAX_CHECKS_PER_START or _now() - started > CODE_TTL:
-            conn.execute("DELETE FROM phone_verify_pending WHERE username = ?", (username,))
-            conn.commit()
-            raise FlowError(400, "code expired or too many attempts, request a new code")
-        try:
-            approved = get_verifier().check(number, (code or "").strip())
-        except VerifyError as ex:
-            raise FlowError(502, str(ex), _provider_reason(ex))
-        if not approved:
-            conn.execute("UPDATE phone_verify_pending SET failed_checks = failed_checks + 1 WHERE username = ?",
-                         (username,))
-            conn.commit()
-            return {"ok": True, "verified": False, "reason": "wrong code"}
-        if not record_verified(conn, username, hashed):
-            conn.rollback()
-            raise FlowError(409, "this phone number is already verified on another account")
-        conn.execute("DELETE FROM phone_verify_pending WHERE username = ?", (username,))
-        conn.commit()
-    finally:
-        conn.close()
-    return {"ok": True, "verified": True}
+    return {"ok": True, "phone": number}
 
 
 def complete_firebase_verification(db_path: str, username: str, id_token: str) -> dict:
     """
     Firebase sent and checked the code in the browser; id_token is the Firebase ID token it
     returned. The number comes from the token (Google-signed), and must be the one this user
-    started with start_verification(send=False) within CODE_TTL.
+    started with start_verification within CODE_TTL.
     """
     number = verify_firebase_token(id_token)
     hashed = phone_hash(number)
@@ -498,7 +211,7 @@ def complete_firebase_verification(db_path: str, username: str, id_token: str) -
         if _now() - datetime.datetime.fromisoformat(pending[1]) > CODE_TTL:
             conn.execute("DELETE FROM phone_verify_pending WHERE username = ?", (username,))
             conn.commit()
-            raise FlowError(400, "code expired or too many attempts, request a new code")
+            raise FlowError(400, "code expired, request a new code")
         if not record_verified(conn, username, hashed):
             conn.rollback()
             raise FlowError(409, "this phone number is already verified on another account")
@@ -515,9 +228,9 @@ def complete_firebase_verification(db_path: str, username: str, id_token: str) -
 #
 # GFC_FIREBASE_CONFIG is the web app's public config from the Firebase console, as JSON:
 #   {"apiKey": "...", "authDomain": "<project>.firebaseapp.com", "projectId": "<project>", "appId": "..."}
-# When it's set, the browser verification page sends codes with Firebase phone sign-in
-# instead of Twilio, and the node accepts the Firebase ID token Firebase hands back. The
-# token is checked here against Google's published keys: no service account is needed.
+# When it's set, the browser verification page sends codes with Firebase phone sign-in, and
+# the node accepts the Firebase ID token Firebase hands back; without it, phone verification
+# is off. The token is checked here against Google's published keys: no service account is needed.
 
 FIREBASE_CERTS_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com"
 FIREBASE_MAX_AUTH_AGE = datetime.timedelta(minutes=10)  # the sign-in must be this fresh

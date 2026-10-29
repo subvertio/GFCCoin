@@ -1,9 +1,8 @@
 """
 Keeps private data out of the node's logs.
 
-Phone numbers reach the logs through the HTTP client (httpx logs every request URL, and the
-Twilio lookup URL contains the number), and one-time verify link codes through uvicorn's access
-log (GET /verify?c=<code>). A filter on every log handler rewrites them before they're written:
+Phone numbers can reach the logs through the HTTP client (httpx logs every request URL) or an
+error message, and one-time verify link codes through uvicorn's access log (GET /verify?c=<code>). A filter on every log handler rewrites them before they're written:
 
 - phone numbers (+ and 8-15 digits, also URL-encoded as %2B) keep only their last two digits: +...98
 - verify link codes become c=<hidden>

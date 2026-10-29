@@ -31,9 +31,7 @@ NO_KEY_FILE = Path(_TMP) / "no_treasury_key.hex"  # never created: nodes without
 os.environ["GFC_DATA_DIR"] = _TMP
 os.environ["GFC_TREASURY_PUBKEYS"] = TREASURY_PUB
 os.environ["GFC_TREASURY_KEY_FILE"] = str(NO_KEY_FILE)
-for _var in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_API_KEY_SID", "TWILIO_API_KEY_SECRET",
-             "TWILIO_VERIFY_SERVICE_SID", "GFC_TURNSTILE_SECRET"):
-    os.environ.pop(_var, None)  # tests never reach real Twilio or Cloudflare
+os.environ.pop("GFC_FIREBASE_CONFIG", None)  # tests use firebase_stub's project, never a real one
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -44,6 +42,7 @@ import keystore  # noqa: E402
 import phone_verify  # noqa: E402
 import signing  # noqa: E402
 from sync_ingest import TABLE_COLUMNS, ingest_rows, select_rows_since  # noqa: E402
+from firebase_stub import verify_phone  # noqa: E402
 
 TX_COLUMNS = [c.strip() for c in TABLE_COLUMNS["transactions"].split(",")]
 SEED_COLUMNS = [c.strip() for c in TABLE_COLUMNS["seeds"].split(",")]
@@ -61,16 +60,12 @@ def new_node(name: str) -> str:
     return path
 
 
-FAKE_SMS = phone_verify.FakeVerifier()
-phone_verify.set_verifier(FAKE_SMS)
-
-
 def unique_phone() -> str:
     return "+1555" + str(uuid.uuid4().int)[:7]
 
 
 def mark_verified(db: str, username: str) -> str:
-    """Record username as phone-verified on node `db` (as /verify/phone/check would)."""
+    """Record username as phone-verified on node `db` (as /verify/web/fb/check would)."""
     hashed = phone_verify.phone_hash(unique_phone())
     conn = sqlite3.connect(db)
     phone_verify.record_verified(conn, username, hashed)
@@ -154,11 +149,7 @@ class RestTransferTests(unittest.TestCase):
         r = self.client.post("/auth/register", data={"username": username, "password": "pw-" + username})
         self.assertEqual(r.status_code, 200, r.text)
         token = r.json()["token"]
-        phone = unique_phone()
-        self.assertEqual(self.client.post("/verify/phone/start", data={"api_token": token, "phone": phone})
-                         .status_code, 200)
-        self.assertTrue(self.client.post("/verify/phone/check", data={
-            "api_token": token, "phone": phone, "code": FAKE_SMS.sent[phone]}).json()["verified"])
+        self.assertIn("You're verified", verify_phone(self.client, token, unique_phone()).text)
         w = self.client.post("/wallets/create", data={"name": "main", "api_token": token})
         self.assertEqual(w.status_code, 200, w.text)
         return token, w.json()
@@ -483,9 +474,7 @@ class KeystoreTests(unittest.TestCase):
         r = self.client.post("/auth/register", data={"username": username, "password": password})
         self.assertEqual(r.status_code, 200, r.text)
         token = r.json()["token"]
-        phone = unique_phone()  # verified first, so the wallet gets its grant
-        self.client.post("/verify/phone/start", data={"api_token": token, "phone": phone})
-        self.client.post("/verify/phone/check", data={"api_token": token, "phone": phone, "code": FAKE_SMS.sent[phone]})
+        verify_phone(self.client, token, unique_phone())  # verified first, so the wallet gets its grant
         w = self.client.post("/wallets/create", data={"name": "main", "api_token": token}).json()
         return token, w["id"], password
 

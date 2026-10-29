@@ -10,7 +10,7 @@ GFC First Post Bonus - 1,000 GFC (by default) the first time an account posts
 - Paid only to a phone-verified account with a wallet on this node (the same bar as
   the new-user grant, see phone_verify.py). If either is missing at upload time the
   bonus is recorded as pending and paid when the account creates its first wallet
-  (POST /wallets/create) or verifies its phone (POST /verify/phone/check).
+  (POST /wallets/create) or verifies its phone (POST /verify/web/fb/check).
 - The payment is a treasury-signed FIRST_POST mint, notarised like every mint, and
   shows in wallet history as "First post bonus".
 
