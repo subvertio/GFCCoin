@@ -200,6 +200,63 @@ not from any network. Prices are unknowns: fill them in from a block explorer on
 Take every router, factory and position-manager address from the DEX's own documentation
 on deployment day. None are listed here on purpose.
 
+### Revenue: liquidity-provider fees, no sell tax
+
+**Decision:** the project earns from trading by being a liquidity provider (LP) in the 1%
+pool. GFC has **no transfer or sell tax**, and `GFCToken` has no fee logic. Keep it that way.
+
+How the fee works:
+
+- **Every swap pays 1% of its input to the pool's in-range LPs.** That 1% goes to the
+  LPs, not to Uniswap.
+  - A *buy* (ETH → GFC) pays its fee in **ETH**.
+  - A *sell* (GFC → ETH) pays its fee in **GFC**.
+
+  As long as the project is the only LP, it receives all of it.
+- **Fees aren't paid out automatically.** They build up in the LP position:
+  - **v3:** collect them with the position manager's `collect`. The position is an NFT
+    held by the treasury multisig.
+  - **v4:** collect them through the position manager.
+
+  Collecting is an on-chain transaction, so it costs a little gas each time.
+- **Income formula** (no numbers are assumed here):
+  `fees ≈ swap_volume × 1% × (our in-range liquidity ÷ all in-range liquidity)`.
+  Volume is **unknown** until the pool exists.
+- **Range:** start with a **full-range** position. It's always in range, needs no
+  management, and is the simplest to explain publicly. A narrower range earns more per
+  dollar, but stops earning entirely when the price moves outside it.
+
+The tradeoffs to accept:
+
+- **The fees don't stop sellers from taking your ETH.** When people sell GFC, the pool
+  pays them ETH from the position and takes their GFC in. Over time the position can
+  turn into mostly GFC and much less ETH ("impermanent loss"). The 1% fee only offsets
+  part of that.
+
+  That's why the anti-farming limits in [bridge-service.md](bridge-service.md) matter:
+  - the 14-day hold on fresh free GFC;
+  - the per-sender limits;
+  - the minimum deposit.
+
+  They protect the pool, not just the relayer's gas.
+- **Only put in ETH you can afford to lose** to price moves and contract risk.
+- **LP fees are income.** Keep records, and ask a tax professional how to report them.
+- **Legal:** the team providing liquidity is a market-making position. It must be
+  disclosed (who, how much, whether it's locked), and counsel must approve where the GFC
+  side comes from (see section 5). Being an LP is much easier to defend than a tax on
+  every sale, but it is not risk-free.
+
+Why there is no sell tax:
+
+- **It breaks swaps.** Uniswap v3/v4 pools don't support fee-on-transfer tokens:
+  swaps revert or are priced wrong.
+- **It looks like a scam.** Token scanners flag tax tokens as likely scams or
+  "honeypots", which hurts trust and keeps GFC off token lists.
+- **It pays in GFC, not ETH.** Turning it into ETH would mean the contract
+  auto-selling into its own pool. BTC isn't native on Base at all.
+- **It makes the legal picture worse.** A founder taking a cut of every sale reads as
+  profit from other people's trades.
+
 ---
 
 ## 3. Contracts (scaffold on this branch)
@@ -417,8 +474,12 @@ Every step that deploys a contract or spends gas **waits for the owner's explici
    - Publish the addresses only after verification.
 6. **Uniswap pool**, after the go-ahead.
    - Create a v3 GFC/WETH 1% pool, or a v4 GFC/ETH pool with no hook.
-   - Set the initial price with the first position.
+   - Set the initial price with the first position: full range, held by the treasury
+     multisig. That position is how the project earns, through the 1% LP fee (see
+     "Revenue" in section 2). There is no token tax.
    - Disclose who provided liquidity and whether the LP position is locked.
+   - Collect fees from the multisig on a schedule, and record each collection for tax
+     purposes.
    - Submit the token to token lists only with accurate metadata and the disclosures link.
 7. **Announcement** (copy below): post after the pool exists and the addresses are
    verified. Pin the disclosures.
@@ -433,7 +494,7 @@ placeholders. Don't post until the addresses are verified on the explorer.
 > Token: <TOKEN_ADDRESS> · Bridge: <BRIDGE_ADDRESS> · How it works: <DOCS_URL>
 
 > What it is: wrapped GFC, 1:1 backed by GFC locked in a public ledger escrow. Minting needs 2 of 3 independent attesters, under daily limits.
-> What it isn't: an investment, a sale, or a promise of value. There's no presale and the team isn't selling.
+> What it isn't: an investment, a sale, or a promise of value. There's no presale, no transfer tax, and the team isn't selling. The team provides pool liquidity and earns the pool's 1% swap fee like any LP.
 > Audit: <AUDIT_STATUS>
 
 > Things to know before you bridge: it's new code, bridges can fail, and the team can pause it in an emergency. Start small. Rewards may be taxable once they have a market value.
