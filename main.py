@@ -33,6 +33,7 @@ from app_moderation import router as moderation_router
 from app_webverify import router as webverify_router
 from app_treasury import router as treasury_router
 from app_release import router as release_router
+from app_recovery import router as recovery_router
 import audio_stream
 import blockchain
 import logredact
@@ -76,6 +77,7 @@ app.include_router(moderation_router)
 app.include_router(webverify_router)
 app.include_router(treasury_router)
 app.include_router(release_router)
+app.include_router(recovery_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
@@ -240,9 +242,13 @@ async def auth_register(
         conn.close()
 
     token = create_session(username)
-    keystore.attach_to_session(token, keystore.unlock_user_keys(username, password))
+    data_key = keystore.unlock_user_keys(username, password)
+    keystore.attach_to_session(token, data_key)
     invited_by = referrals.record_invite(DB_PATH, username, ref)
-    return {"ok": True, "token": token, "user": username, "invited_by": invited_by}
+    # Shown to the user once: with their phone or email it restores the account AND its wallets
+    # if they forget the password (account_recovery.py)
+    recovery_code = keystore.new_recovery_code(username, data_key)
+    return {"ok": True, "token": token, "user": username, "invited_by": invited_by, "recovery_code": recovery_code}
 
 
 @app.post("/auth/login")
