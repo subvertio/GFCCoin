@@ -4,14 +4,19 @@ GFC Keystore - wallet private keys encrypted at rest, plus encrypted backups
 How a wallet key is protected:
 - Each user has a random 32-byte data key. Wallet private keys are stored in
   `wallet_keys` encrypted with it (AES-256-GCM, bound to the wallet ID).
-- The data key is never stored in the clear. It is kept wrapped twice:
-    users.key_wrap    - under a key derived from the user's password (scrypt)
-    sessions.dk_wrap  - under a key derived from the session's API token (HKDF)
+- The data key is never stored in the clear. It is kept wrapped:
+    users.key_wrap      - under a key derived from the user's password (scrypt)
+    sessions.dk_wrap    - under a key derived from the session's API token (HKDF)
+    users.recovery_wrap - under a key derived from the user's recovery code (scrypt),
+                          a random code shown to the user once and never stored
   Login unwraps it with the password and re-wraps it for the new session, so
   API calls that carry a valid api_token can sign without the password. Only
   the token's hash is stored, so the database alone can't unwrap anything.
-- Forgetting the password means losing the keys, unless they were exported.
-  export_wallets / import_wallets write and read passphrase-encrypted backups.
+- Forgetting the password: a reset (account_recovery.py, proven with the verified phone
+  or email) plus the recovery code re-wraps the same data key under the new password.
+  Without the code the account gets a new data key; old wallets stay locked until a
+  backup is imported. export_wallets / import_wallets write and read
+  passphrase-encrypted backups. The node alone can never unwrap the data key.
 """
 
 import datetime
@@ -72,7 +77,7 @@ def _session_key(token: str) -> bytes:
 
 def init_keystore(conn: sqlite3.Connection):
     """Add keystore columns (idempotent). Call after users and sessions exist."""
-    for table, col in (("users", "key_wrap"), ("sessions", "dk_wrap")):
+    for table, col in (("users", "key_wrap"), ("sessions", "dk_wrap"), ("users", "recovery_wrap")):
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT ''")
         except sqlite3.OperationalError:
@@ -118,6 +123,76 @@ def rewrap_user_key(username: str, data_key: bytes, new_password: str, db_path: 
     conn.execute("UPDATE users SET key_wrap = ? WHERE username = ?", (f"{salt.hex()}${sealed}", username))
     conn.commit()
     conn.close()
+
+
+# ============================================================================
+# RECOVERY CODES
+# ============================================================================
+
+RECOVERY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L
+RECOVERY_GROUPS, RECOVERY_GROUP_LEN = 6, 5  # 30 characters, about 148 bits
+
+
+def normalize_recovery_code(code: str) -> str:
+    """Upper case, letters and digits only (spaces and dashes dropped)."""
+    return "".join(ch for ch in (code or "").upper() if ch.isalnum())
+
+
+def new_recovery_code(username: str, data_key: bytes, db_path: str = DB_PATH) -> str:
+    """Make a new recovery code for the user (replacing any old one) and return it, formatted.
+    Only a wrap of the data key under it is stored; show the code to the user once."""
+    raw = "".join(secrets.choice(RECOVERY_ALPHABET) for _ in range(RECOVERY_GROUPS * RECOVERY_GROUP_LEN))
+    salt = secrets.token_bytes(16)
+    sealed = _seal(_scrypt(raw, salt), data_key, f"recovery:{username}".encode())
+    conn = sqlite3.connect(db_path)
+    try:
+        init_keystore(conn)
+        conn.execute("UPDATE users SET recovery_wrap = ? WHERE username = ?", (f"{salt.hex()}${sealed}", username))
+        conn.commit()
+    finally:
+        conn.close()
+    return "-".join(raw[i:i + RECOVERY_GROUP_LEN] for i in range(0, len(raw), RECOVERY_GROUP_LEN))
+
+
+def has_recovery_code(username: str, db_path: str = DB_PATH) -> bool:
+    conn = sqlite3.connect(db_path)
+    try:
+        init_keystore(conn)
+        row = conn.execute("SELECT recovery_wrap FROM users WHERE username = ?", (username,)).fetchone()
+        return bool(row and row[0])
+    finally:
+        conn.close()
+
+
+def unlock_with_recovery_code(username: str, code: str, db_path: str = DB_PATH) -> Optional[bytes]:
+    """The user's data key, if `code` is their current recovery code; else None."""
+    raw = normalize_recovery_code(code)
+    if len(raw) != RECOVERY_GROUPS * RECOVERY_GROUP_LEN:
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        init_keystore(conn)
+        row = conn.execute("SELECT recovery_wrap FROM users WHERE username = ?", (username,)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        salt_hex, sealed = row[0].split("$", 1)
+        return _open(_scrypt(raw, bytes.fromhex(salt_hex)), sealed, f"recovery:{username}".encode())
+    except (KeystoreError, ValueError):
+        return None
+
+
+def replace_data_key(username: str, new_password: str, db_path: str = DB_PATH) -> bytes:
+    """
+    A reset without the recovery code: give the user a new data key under the new password.
+    Wallet keys sealed with the old one can't be opened any more; they stay stored, so the
+    wallets' rows (and balances) remain, and importing a backup replaces them.
+    """
+    data_key = secrets.token_bytes(32)
+    rewrap_user_key(username, data_key, new_password, db_path)
+    return data_key
 
 
 def attach_to_session(token: str, data_key: bytes, db_path: str = DB_PATH):

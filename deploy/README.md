@@ -136,6 +136,12 @@ JSON in single quotes. The Firebase console setup (phone sign-in, authorized dom
 SMS regions) is in [docs/moderation-and-web-verify.md](../docs/moderation-and-web-verify.md#phone-verification-in-a-browser-app_webverifypy).
 While it's empty, phone verification is off, and so are the grants and rewards that need it.
 
+Account recovery (`/reset`: forgot password, verify an email, change the phone number) uses
+the same Firebase project. For the email parts, also switch on email links in the Firebase
+console: **Authentication > Sign-in method > Email/Password**, enable it and tick
+**Email link (passwordless sign-in)**. Firebase sends the emails itself, so no mail service
+is needed. Recovery by phone works without that switch.
+
 Then check everything at once:
 
 ```powershell

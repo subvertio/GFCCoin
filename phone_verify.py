@@ -290,17 +290,16 @@ def _b64url(part: str) -> bytes:
     return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
 
 
-def verify_firebase_token(id_token: str) -> str:
+def _firebase_claims(id_token: str, providers: tuple, what: str) -> dict:
     """
-    The E.164 phone number a Firebase ID token proves, or FlowError(400). Checks the RS256
-    signature against Google's keys, the audience and issuer for this project, expiry, that
-    the user signed in with phone just now, and that the token carries a phone number.
+    The claims of a fresh Firebase ID token for this project, or FlowError(400). Checks the RS256
+    signature against Google's keys, the audience and issuer, expiry, that the user signed in
+    just now, and that they signed in with one of `providers`.
     """
-
     cfg = firebase_config()
     if not cfg:
-        raise FlowError(503, "phone verification isn't set up on this node")
-    bad = FlowError(400, "phone sign-in didn't verify, request a new code")
+        raise FlowError(503, f"{what} verification isn't set up on this node")
+    bad = FlowError(400, f"{what} sign-in didn't verify, " + ("request a new code" if what == "phone" else "try again"))
     parts = (id_token or "").split(".")
     if len(parts) != 3 or len(id_token) > 8192:
         raise bad
@@ -331,9 +330,27 @@ def verify_firebase_token(id_token: str) -> str:
             or claims["iat"] > now + FIREBASE_LEEWAY
             or claims["auth_time"] > now + FIREBASE_LEEWAY
             or now - claims["auth_time"] > FIREBASE_MAX_AUTH_AGE.total_seconds()
-            or (claims.get("firebase") or {}).get("sign_in_provider") != "phone"):
+            or (claims.get("firebase") or {}).get("sign_in_provider") not in providers):
         raise bad
+    return claims
+
+
+def verify_firebase_token(id_token: str) -> str:
+    """The E.164 phone number a fresh Firebase phone sign-in proves, or FlowError(400)."""
+    claims = _firebase_claims(id_token, ("phone",), "phone")
     try:
         return normalize_phone(str(claims.get("phone_number") or ""))
     except VerifyError:
-        raise bad
+        raise FlowError(400, "phone sign-in didn't verify, request a new code")
+
+
+def verify_firebase_email(id_token: str) -> str:
+    """
+    The (lowercased) email address a fresh Firebase email-link sign-in proves, or FlowError(400).
+    Firebase marks an address verified only once its owner opened a link sent to it.
+    """
+    claims = _firebase_claims(id_token, ("password", "emailLink"), "email")
+    email = str(claims.get("email") or "").strip().lower()
+    if claims.get("email_verified") is not True or "@" not in email or len(email) > 254:
+        raise FlowError(400, "email sign-in didn't verify, try again")
+    return email
