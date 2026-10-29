@@ -13,6 +13,7 @@ import reposts
 import audio_stream
 import config
 import phone_verify
+import seed_edits
 import signing
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH, SEEDS_ORIG_DIR as ORIG_DIR, SEEDS_THUMB_DIR as THUMB_DIR
@@ -395,7 +396,8 @@ def get_seed(sid: str):
             "(SELECT COUNT(*) FROM likes WHERE likes.seed_id = seeds.id), "
             "(SELECT COUNT(*) FROM comments WHERE comments.seed_id = seeds.id), "
             "seeds.views, seeds.created_at, seeds.owner, seeds.reward_wallet, "
-            "COALESCE(users.avatar_filename, '') AS owner_avatar_filename "
+            "COALESCE(users.avatar_filename, '') AS owner_avatar_filename, "
+            "COALESCE(seeds.edited_at, '') "
             "FROM seeds LEFT JOIN users ON LOWER(seeds.owner) = LOWER(users.username) "
             "WHERE seeds.id = ?", (sid,)
         ).fetchone()
@@ -414,6 +416,7 @@ def get_seed(sid: str):
                 "reward_wallet": row[14] or "",
                 "owner_avatar": owner_avatar,
                 "repost_of": _repost_map().get(row[0]),
+                "edited_at": row[16] or "",
             }
     except Exception:
         pass
@@ -427,3 +430,73 @@ def get_seed(sid: str):
         return seed_row(sid, p.name)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="seed not found")
+
+
+@router.post("/seeds/{sid}/edit")
+async def edit_seed(
+    sid: str,
+    title: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    tags: Optional[str] = Form(None),
+    caller: Caller = Depends(caller_from_form),
+):
+    """
+    Edit your post's text (title, description, comma-separated tags) to fix a typo or
+    update it. Fields you leave out keep their current value; the media can't change.
+    Needs a token with the post scope, on the node that holds the post's wallet key.
+
+    The edit is signed by the post's reward wallet and synced to peers, which all show
+    the newest edit. Every version stays public at GET /seeds/{id}/edits. Edits of
+    older unsigned posts only apply on this node (`synced: false`).
+    """
+    owner = caller.require("post")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        if moderation.is_hidden(conn, sid):
+            raise HTTPException(status_code=410, detail="This post was hidden after reports.")
+        row = conn.execute("SELECT owner, signature, reward_wallet FROM seeds WHERE id = ?", (sid,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="seed not found")
+        seed_owner, seed_signature, reward_wallet = row
+        if (seed_owner or "").lower() != owner.lower():
+            raise HTTPException(status_code=403, detail="you can only edit your own posts")
+
+        private_key = None
+        if seed_signature:
+            if not signing.local_wallet_for(conn, owner, reward_wallet):
+                raise HTTPException(status_code=403, detail="edit this post from the node you posted it on")
+            private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet, caller.data_key())
+            if not private_key:
+                raise HTTPException(status_code=401, detail="log in again to unlock your wallet key")
+
+        try:
+            edit = seed_edits.create_edit(conn, sid, private_key, title, description, tags)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex))
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "ok": True,
+        "id": sid,
+        "title": edit["title"],
+        "description": edit["description"],
+        "tags": [t for t in edit["tags"].split(",") if t],
+        "edited_at": edit["edited_at"],
+        "synced": edit["synced"],
+    }
+
+
+@router.get("/seeds/{sid}/edits")
+def seed_edit_history(sid: str):
+    """Every version of a post's text, newest first (empty if it was never edited)."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        if moderation.is_hidden(conn, sid):
+            raise HTTPException(status_code=410, detail="This post was hidden after reports.")
+        if not conn.execute("SELECT 1 FROM seeds WHERE id = ?", (sid,)).fetchone():
+            raise HTTPException(status_code=404, detail="seed not found")
+        return {"ok": True, "id": sid, "edits": seed_edits.history(conn, sid)}
+    finally:
+        conn.close()

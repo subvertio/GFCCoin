@@ -13,8 +13,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
+import config
+import phone_verify
+import signing
 from config import DB_PATH
 from blockchain import (
+    TX_TYPE_GRANT,
     process_podt_reward,
     get_balance_cents,
     TREASURY_WALLET_ID,
@@ -103,6 +107,52 @@ async def report_transfer(request: TransferReportRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _account_name(conn: sqlite3.Connection, wallet: str) -> str:
+    """
+    The account name behind a wallet, only when it can be trusted: the wallet's key is
+    on this node, or the wallet signed a seed naming its owner. Synced wallet rows
+    alone aren't enough (anyone can send one with a borrowed name). "" if unknown.
+    """
+    signing.init_wallet_keys_table(conn)
+    row = conn.execute(
+        "SELECT wallets.owner FROM wallets JOIN wallet_keys ON wallet_keys.wallet_id = wallets.id "
+        "WHERE wallets.id = ? AND wallets.owner != ''", (wallet,)
+    ).fetchone()
+    if row:
+        return row[0]
+    fields = signing.SEED_SIGNED_FIELDS + ("signature",)
+    for seed_row in conn.execute(
+        f"SELECT {', '.join(fields)} FROM seeds WHERE reward_wallet = ? AND signature != '' "
+        "ORDER BY created_at LIMIT 5", (wallet,)
+    ).fetchall():
+        seed = dict(zip(fields, seed_row))
+        if seed.get("owner") and signing.verify_seed(seed):
+            return seed["owner"]
+    return ""
+
+
+def _is_registered_earner(conn: sqlite3.Connection, wallet: str, owner: str) -> bool:
+    """
+    Top earners only list registered accounts: a confirmed account name, and on the
+    real network a verified phone, shown by this node's verification record or by a
+    treasury-signed new-user grant to the wallet (grants are only paid after verifying).
+    """
+    if not owner:
+        return False
+    if not config.REQUIRE_PHONE_TO_POST:
+        return True
+    phone_verify.init_phone_tables(conn)
+    if phone_verify.is_verified(conn, owner):
+        return True
+    return conn.execute(
+        "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ? AND signature != '' LIMIT 1",
+        (TX_TYPE_GRANT, wallet)
+    ).fetchone() is not None
+
+
+TOP_EARNERS = 10
+
+
 @podt_router.get("/stats")
 async def podt_stats():
     """Get network-wide PoDT statistics."""
@@ -121,8 +171,17 @@ async def podt_stats():
         top_seeders = conn.execute(
             "SELECT seeder_wallet, SUM(reward_cents) as total_reward, COUNT(*) as transfer_count, "
             "SUM(file_size_bytes) as total_bytes "
-            "FROM podt_proofs GROUP BY seeder_wallet ORDER BY total_reward DESC LIMIT 10"
+            "FROM podt_proofs GROUP BY seeder_wallet ORDER BY total_reward DESC"
         ).fetchall()
+        names, earners = {}, []
+        for row in top_seeders:
+            name = _account_name(conn, row[0])
+            if _is_registered_earner(conn, row[0], name):
+                names[row[0]] = name
+                earners.append(row)
+                if len(earners) == TOP_EARNERS:
+                    break
+        top_seeders = earners
 
         conn.close()
 
@@ -137,6 +196,7 @@ async def podt_stats():
             "top_seeders": [
                 {
                     "wallet": row[0],
+                    "owner": names.get(row[0], ""),
                     "total_earned_gfc": row[1] / 100.0,
                     "transfer_count": row[2],
                     "total_bytes_mb": row[3] / (1024 * 1024) if row[3] else 0.0,
