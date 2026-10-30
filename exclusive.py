@@ -77,8 +77,9 @@ def is_text_file(filename: str) -> bool:
 
 
 def can_be_exclusive(filename: str, content_type: str) -> bool:
-    """Videos and text posts."""
-    return content_type == "video" or is_text_file(filename)
+    """Videos, text posts and downloads (zips: only real accounts can download them)."""
+    import filescan
+    return content_type == "video" or is_text_file(filename) or filescan.is_download(filename)
 
 
 # ---------- teasers ----------
@@ -149,7 +150,10 @@ def backfill(db_path: str = DB_PATH) -> int:
         rows = conn.execute("SELECT id, filename FROM seeds WHERE exclusive = 1").fetchall()
     finally:
         conn.close()
-    return sum(1 for sid, fn in rows if teaser_url(sid) is None and fn and make_teaser(sid, fn))
+    return sum(1 for sid, fn in rows if teaser_url(sid) is None and fn
+               and audio_stream.needs_stream(fn, 0, "video") and not is_text_file(fn)
+               and fn.lower().endswith((".mp4", ".mov", ".avi", ".webm", ".mkv", ".wmv", ".flv"))
+               and make_teaser(sid, fn))
 
 
 # ---------- signed links ----------

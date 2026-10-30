@@ -13,6 +13,7 @@ import reposts
 import audio_stream
 import config
 import exclusive
+import filescan
 import phone_verify
 import seed_edits
 import signing
@@ -188,7 +189,10 @@ async def seeds_upload(
                         your oldest one). The wallet signs the seed, and rewards are
                         only ever paid to it. Without a signing wallet the seed is
                         still shared but earns no rewards.
-      - exclusive     : optional, videos and text posts (.txt). "Exclusive to GFC Network":
+      - a .zip file is a download (games, apps, packs): it's checked and virus-scanned
+                        (filescan.py) before anyone can get it; `download.status` in the
+                        response is "pending" until then.
+      - exclusive     : optional, videos, text posts (.txt) and downloads. "Exclusive to GFC Network":
                         the full clip / the post's text is only for real GFC accounts
                         (GET /seeds/{id}/play). Videos get a 5-second public teaser
                         (`teaser`); text posts show only their title. `x_post` in the
@@ -211,7 +215,7 @@ async def seeds_upload(
     owner = caller.owner("post")
     require_phone_to_post(owner)
     if exclusive_to_gfc and not exclusive.can_be_exclusive(file.filename or "", detect_content_type(file.filename or "")):
-        raise HTTPException(status_code=400, detail="Only videos and text posts can be exclusive to the GFC Network.")
+        raise HTTPException(status_code=400, detail="Only videos, text posts and downloads (.zip) can be exclusive to the GFC Network.")
 
     # Pick the signing wallet: must be the owner's, with its key on this node
     conn = sqlite3.connect(DB_PATH)
@@ -331,12 +335,16 @@ async def seeds_upload(
         "repost_of": repost_info,
         "repost_credit_gfc": repost_credit["amount"] if repost_credit else 0.0,
     }
+    if stored and filescan.is_download(orig_safe):
+        filescan.enqueue(sid)
+        result["download"] = {"name": file.filename or orig_safe, "size": file_size, "status": filescan.PENDING}
+        result["full"] = None  # offered once the scan passes
     if exclusive_to_gfc:
         # Cut now: the poster shares the teaser on X right after posting. A few seconds of
         # encoding; if it fails (no ffmpeg) the post stays exclusive and the startup backfill retries.
         text_post = exclusive.is_text_file(orig_safe)
         result["exclusive"] = True
-        result["teaser"] = teaser = (exclusive.teaser_url(sid) if stored and not text_post
+        result["teaser"] = teaser = (exclusive.teaser_url(sid) if stored and content_type == "video"
                                      and exclusive.make_teaser(sid, orig_safe) else None)
         result["full"], result["stream_pending"] = teaser, False
         if text_post:
@@ -390,14 +398,14 @@ def my_seeds(caller: Caller = Depends(caller_from_query)):
             "owner_avatar": owner_avatar,
             "repost_of": repost_of.get(r[0]),
         })
-    return {"items": exclusive.apply_to_items(items)}
+    return {"items": filescan.apply_to_items(exclusive.apply_to_items(items))}
 
 @router.get("/seeds")
 def list_seeds():
     """Return all seeds in feed-friendly shape (without posts hidden after reports)."""
     conn = sqlite3.connect(DB_PATH)
     try:
-        return {"items": exclusive.apply_to_items(moderation.visible_items(conn, list_rows()))}
+        return {"items": filescan.apply_to_items(exclusive.apply_to_items(moderation.visible_items(conn, list_rows())))}
     finally:
         conn.close()
 
@@ -429,7 +437,7 @@ def get_seed(sid: str):
         if row:
             avatar_filename = row[15] if len(row) > 15 else ""
             owner_avatar = f"/avatars/{avatar_filename}" if avatar_filename else ""
-            return exclusive.apply_to_items([{
+            return (filescan.apply_to_items(exclusive.apply_to_items([{
                 "id": row[0], "title": row[1], "description": row[2],
                 "tags": [t.strip() for t in row[3].split(",") if t.strip()] if row[3] else [],
                 "full": f"/originals/{row[4]}",
@@ -441,7 +449,7 @@ def get_seed(sid: str):
                 "owner_avatar": owner_avatar,
                 "repost_of": _repost_map().get(row[0]),
                 "edited_at": row[16] or "",
-            }])[0]
+            }])) or [{"id": row[0], "removed": True}])[0]
     except Exception:
         pass
 
@@ -554,6 +562,10 @@ def play_links(sid: str, caller: Caller = Depends(caller_from_query)):
         owner, filename, content_type, is_exclusive, text = row
         if is_exclusive and not exclusive.may_watch(conn, username, owner):
             raise HTTPException(status_code=403, detail="Verify your phone number to watch GFC Exclusives.")
+        if filescan.is_download(filename):
+            scan = filescan.status_of(conn, sid)
+            if not filescan.downloadable(scan["status"] if scan else filescan.PENDING):
+                raise HTTPException(status_code=409, detail="This download is still being checked for viruses, or it failed the check.")
     finally:
         conn.close()
     full = f"/originals/{filename}"

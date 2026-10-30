@@ -1,0 +1,11 @@
+[Unit]
+Description=GFC daily virus rescan of downloads (fresh ClamAV definitions)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=gfc
+WorkingDirectory=/opt/gfc/app
+EnvironmentFile=/etc/gfc/gfc.env
+ExecStart=/opt/gfc/venv/bin/python filescan.py rescan
+Nice=10

@@ -92,7 +92,7 @@ class ExclusiveTests(unittest.TestCase):
         _, token = self.account()
         r = self.upload(token, filename="pic.png")
         self.assertEqual(r.status_code, 400)
-        self.assertIn("videos and text posts", r.json()["detail"])
+        self.assertIn("videos, text posts and downloads", r.json()["detail"])
         self.assertEqual(self.upload(token, filename="note.txt").status_code, 200)
 
     # ---------- the lock ----------

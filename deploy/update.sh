@@ -17,6 +17,7 @@ if ! command -v ffmpeg >/dev/null 2>&1; then  # audio streaming copies (audio_st
     echo "installing ffmpeg"
     DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q ffmpeg >/dev/null
 fi
+bash "$APP_DIR/deploy/clamav.sh" || echo "ClamAV setup failed: downloads stay held until it works (rerun gfc update)"   # virus scanning for downloads (filescan.py)
 bash "$APP_DIR/deploy/install-files.sh"   # refresh units and helper commands
 systemctl restart gfc-node
 sleep 3

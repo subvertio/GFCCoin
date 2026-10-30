@@ -32,6 +32,7 @@ from fastapi.responses import HTMLResponse
 
 import app_release
 import exclusive
+import filescan
 import moderation
 import reposts
 from app_engagement import SEED_SELECT, seed_row_to_dict
@@ -91,7 +92,7 @@ def feed_page(page: int, page_size: int = PAGE_SIZE):
             return [], False
         rows = conn.execute(f"{SEED_SELECT} WHERE seeds.id IN ({', '.join('?' * len(ids))})", ids).fetchall()
         by_id = {r[0]: seed_row_to_dict(r) for r in rows}
-        seeds = exclusive.apply_to_items([by_id[i] for i in ids if i in by_id])
+        seeds = filescan.apply_to_items(exclusive.apply_to_items([by_id[i] for i in ids if i in by_id]))
         for s in seeds:
             s["repost_of"] = reposts.public_info(reposts.repost_of(conn, s["id"]))
         return seeds, start + page_size < len(order)
@@ -138,6 +139,42 @@ def is_text_post(seed: dict) -> bool:
     return (seed.get("full") or "").lower().endswith(".txt") or (seed.get("content_type") or "").startswith("text")
 
 
+def _fmt_size(n) -> str:
+    n = int(n or 0)
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.1f} GB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024 ** 2:.1f} MB"
+    return f"{max(1, n // 1024)} KB"
+
+
+def download_box(seed: dict, page: str) -> str:
+    """A zip post: name, size, what's inside, the virus-scan result and (once clean) the Download button."""
+    e = lambda s: html.escape(str(s or ""), quote=True)  # noqa: E731
+    d = seed["download"]
+    inside = []
+    if d.get("files") is not None:
+        inside.append(f'{d["files"]} file{"s" if d["files"] != 1 else ""}')
+    if d.get("programs"):
+        inside.append(f'{d["programs"]} program{"s" if d["programs"] != 1 else ""}')
+    meta = " &middot; ".join([e(_fmt_size(d.get("size")))] + [e(x) for x in inside])
+    status = d.get("status")
+    if seed.get("exclusive"):
+        action = ('<p class="exclusive-note">Download it in the <a class="getapp-open" href="/app">GFC app</a> '
+                  'with a verified account.</p>')
+    elif filescan.downloadable(status) and seed.get("full"):
+        action = f'<a class="dl-button" href="{e(seed["full"])}" download>Download</a>'
+    else:
+        action = '<p class="dl-wait">Checking for viruses&hellip; the download opens when it passes.</p>'
+    scanned = ""
+    if status == filescan.CLEAN:
+        when = (d.get("scanned_at") or "")[:10]
+        scanned = (f'<p class="dl-scan">&#10003; Scanned by ClamAV{" on " + e(when) if when else ""}</p>'
+                   + (f'<p class="dl-hash">SHA-256 <code>{e(d["sha256"])}</code></p>' if d.get("sha256") else ""))
+    return (f'<div class="download"><p class="dl-name">&#128230; {e(d.get("name"))}</p>'
+            f'<p class="dl-meta">{meta}</p>{scanned}{action}</div>')
+
+
 EXCLUSIVE_BADGE = '<p class="exclusive">&#9733; Exclusive to the GFC Network</p>'
 
 
@@ -164,7 +201,13 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
     when_html = f' · <a href="{e(page)}"><time datetime="{e(seed.get("created_at"))}">{e(when)}</time></a>' if when else ""
 
     media = ""
-    if is_exclusive:
+    if seed.get("download"):
+        media = download_box(seed, page)
+        if is_exclusive:
+            media = EXCLUSIVE_BADGE + media
+            is_exclusive = False  # handled here: show the description as usual
+        text_post = False
+    elif is_exclusive:
         teaser = seed.get("teaser") or ""
         if ctype == "video" and teaser:
             poster = f'<img src="{e(thumb_path)}" alt="" loading="lazy">' if thumb_path else ""
@@ -562,6 +605,14 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 .exclusive{{display:inline-block;margin:4px 0;padding:2px 10px;border-radius:12px;background:#2a2410;color:#ffd400;font-size:.85rem;font-weight:700}}
 .exclusive-note{{margin:8px 0 0;color:#a9b0b6}}
 .exclusive-note a{{color:#7f8ce0}}
+.download{{margin:8px 0 0;padding:12px 14px;border:1px solid #2f3336;border-radius:16px;background:#0d0f12}}
+.download p{{margin:2px 0}}
+.dl-name{{font-weight:700;overflow-wrap:anywhere}}
+.dl-meta,.dl-hash{{color:#71767b;font-size:.85rem}}
+.dl-hash code{{overflow-wrap:anywhere}}
+.dl-scan{{color:#00ba7c;font-size:.9rem}}
+.dl-wait{{color:#ffd400;font-size:.9rem}}
+.dl-button{{display:inline-block;margin-top:8px;padding:8px 18px;border-radius:999px;background:#3b4cca;color:#fff;text-decoration:none;font-weight:700}}
 .getapp{{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.7)}}
 .getapp[hidden]{{display:none}}
 .getapp-box{{position:relative;width:100%;max-width:420px;padding:24px 20px 16px;border-radius:16px;background:#15181c;border:1px solid #2f3336;text-align:center}}

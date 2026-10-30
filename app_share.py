@@ -46,6 +46,7 @@ from fastapi.responses import HTMLResponse
 import app_release
 import audio_stream
 import exclusive
+import filescan
 import moderation
 import reposts
 import signing
@@ -171,6 +172,10 @@ def load_seed(seed_id: str) -> dict:
         seed["stream"] = (audio_stream.stream_url(seed_id, seed["content_type"])
                           if seed["content_type"] in audio_stream.STREAM_KINDS else None)
         seed["exclusive"] = exclusive.is_exclusive(conn, seed_id)
+        if filescan.is_download(seed["filename"]):
+            scan = filescan.status_of(conn, seed_id)
+            if scan and scan["status"] in filescan.REMOVED:
+                raise HTTPException(status_code=410, detail="This file was removed: it failed the virus or safety check.")
         seed["teaser"] = exclusive.teaser_url(seed_id) if seed["exclusive"] else None
         if seed["exclusive"]:
             seed["stream"] = None
@@ -225,7 +230,16 @@ def share_page(seed_id: str, request: Request):
     viewer_3d = (ctype == "3d" and bool(media_path)
                  and seed["filename"].lower().endswith(MODEL_VIEWER_EXTENSIONS))
     poster = f' poster="{e(thumb_path)}"' if thumb_path else ""
-    if seed["exclusive"]:
+    if filescan.is_download(seed["filename"]):
+        viewer_3d = False
+        from app_web import download_box  # app_web imports this module
+        item = filescan.apply_to_items([{"id": seed["id"], "full": media_path and f"/originals/{seed['filename']}",
+                                          "exclusive": seed["exclusive"]}])
+        dl_item = item[0] if item else {"download": {"name": seed["filename"], "status": filescan.PENDING}}
+        media = download_box(dl_item, "")
+        if seed["exclusive"]:
+            media = '<p class="badge exclusive">&#9733; Exclusive to the GFC Network</p>' + media
+    elif seed["exclusive"]:
         viewer_3d = False
         if ctype == "video" and seed["teaser"]:
             media = (f'<video class="hero" controls playsinline preload="metadata"{poster} data-exclusive="1" '

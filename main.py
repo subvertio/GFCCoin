@@ -44,6 +44,7 @@ import first_post
 import seed_edits
 import verified_wallets
 import exclusive
+import filescan
 import referrals
 import reposts
 import signing
@@ -75,6 +76,11 @@ async def exclusive_media_gate(request, call_next):
         q = request.query_params
         if not exclusive.link_is_valid(path, q.get("exp"), q.get("sig")):
             return JSONResponse({"detail": exclusive.LOCKED_DETAIL}, status_code=403)
+    # Downloads (zips) only once they've passed the virus scan (filescan.py)
+    if path.startswith(filescan.GATED_PREFIX):
+        reason = filescan.blocked(path)
+        if reason:
+            return JSONResponse({"detail": reason}, status_code=403)
     return await call_next(request)
 
 # Include routers
@@ -217,6 +223,7 @@ def init_db():
     seed_edits.init_seed_edit_tables(conn)
     verified_wallets.init_tables(conn)
     exclusive.init_tables(conn)
+    filescan.init_tables(conn)
     migrate_plaintext_passwords(conn)
 
     conn.commit()
@@ -606,7 +613,7 @@ def search(q: str = "", caller: Caller = Depends(caller_from_query)):
             item["liked"] = item["id"] in liked_set
             item["bookmarked"] = item["id"] in bookmarked_set
 
-    seed_items = exclusive.apply_to_items(moderation.visible_items(conn, seed_items, owner))
+    seed_items = filescan.apply_to_items(exclusive.apply_to_items(moderation.visible_items(conn, seed_items, owner)))
     result["seeds"] = seed_items
     result["seed_count"] = len(seed_items)
 
