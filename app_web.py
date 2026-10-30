@@ -31,6 +31,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 import app_release
+import exclusive
 import moderation
 import reposts
 from app_engagement import SEED_SELECT, seed_row_to_dict
@@ -90,7 +91,7 @@ def feed_page(page: int, page_size: int = PAGE_SIZE):
             return [], False
         rows = conn.execute(f"{SEED_SELECT} WHERE seeds.id IN ({', '.join('?' * len(ids))})", ids).fetchall()
         by_id = {r[0]: seed_row_to_dict(r) for r in rows}
-        seeds = [by_id[i] for i in ids if i in by_id]
+        seeds = exclusive.apply_to_items([by_id[i] for i in ids if i in by_id])
         for s in seeds:
             s["repost_of"] = reposts.public_info(reposts.repost_of(conn, s["id"]))
         return seeds, start + page_size < len(order)
@@ -137,12 +138,22 @@ def is_text_post(seed: dict) -> bool:
     return (seed.get("full") or "").lower().endswith(".txt") or (seed.get("content_type") or "").startswith("text")
 
 
+EXCLUSIVE_BADGE = '<p class="exclusive">&#9733; Exclusive to the GFC Network</p>'
+
+
+def exclusive_note(text_post: bool) -> str:
+    what = "read the whole post" if text_post else "watch the full clip"
+    return (f'<p class="exclusive-note">Log in to the <a class="getapp-open" href="/app">GFC app</a> '
+            f'with a verified account to {what}.</p>')
+
+
 def render_card(seed: dict, now: datetime.datetime = None) -> str:
     e = lambda s: html.escape(str(s or ""), quote=True)  # noqa: E731
     sid = seed["id"]
     page = f"/p/{quote(sid, safe='')}"
     owner = seed["owner"] or "unknown"
-    filename = (seed.get("full") or "").removeprefix("/originals/")
+    is_exclusive = bool(seed.get("exclusive"))
+    filename = "" if is_exclusive else (seed.get("full") or "").removeprefix("/originals/")
     media_path = f"/originals/{quote(filename, safe='')}" if filename else ""
     thumb = seed.get("thumb") or ""
     thumb_path = f"/thumbs/{quote(thumb.removeprefix('/thumbs/'), safe='')}" if thumb else ""
@@ -153,7 +164,19 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
     when_html = f' · <a href="{e(page)}"><time datetime="{e(seed.get("created_at"))}">{e(when)}</time></a>' if when else ""
 
     media = ""
-    if text_post:
+    if is_exclusive:
+        teaser = seed.get("teaser") or ""
+        if ctype == "video" and teaser:
+            poster = f'<img src="{e(thumb_path)}" alt="" loading="lazy">' if thumb_path else ""
+            media = (f'<button type="button" class="media video" data-video="{e(teaser)}" data-exclusive="1" '
+                     f'data-poster="{e(thumb_path)}" aria-label="Play the 5-second preview of {e(title or "video")} (muted)">'
+                     f'{poster}<span class="play" aria-hidden="true">&#9654;</span>'
+                     f'<span class="tag">5s preview</span></button>')
+        elif thumb_path:
+            media = f'<a class="media" href="{e(page)}"><img src="{e(thumb_path)}" alt="{e(title)}" loading="lazy"></a>'
+        text_post = ctype != "video"
+        media += exclusive_note(text_post)
+    elif text_post:
         pass  # text only, no media frame
     elif ctype == "image" and (thumb_path or media_path):
         media = (f'<a class="media" href="{e(page)}"><img src="{e(thumb_path or media_path)}" alt="{e(title)}" '
@@ -181,7 +204,12 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
         media = f'<a class="media placeholder" href="{e(page)}">Open in GFC to view</a>'
 
     description = seed.get("description") or ""
-    if text_post:
+    if is_exclusive:
+        show_title = True  # the title is all of an exclusive text post that's public
+        title = title or "GFC Exclusive"
+        body = EXCLUSIVE_BADGE + (f'<p class="text">{e(_shorten(description, DESCRIPTION_LIMIT))}</p>'
+                                  if description.strip() else "")
+    elif text_post:
         show_title = bool(title) and title != _title_from_body(description) and title != filename
         body = (f'<a class="text post" href="{e(page)}">{e(_shorten(description, TEXT_LIMIT))}</a>'
                 if description.strip() else "")
@@ -259,15 +287,38 @@ SCRIPT = """
     root.querySelectorAll('.model-slot').forEach(s => { near.observe(s); far.observe(s); });
     root.querySelectorAll('.more').forEach(a => more.observe(a));
   }
+  // "Get the GFC app" pop-up: after an exclusive's teaser, on "watch the full clip",
+  // and once per visit after a while on the page.
+  const getApp = document.getElementById('getapp');
+  function showGetApp() {
+    if (!getApp || !getApp.hidden) return;
+    getApp.hidden = false;
+    try { sessionStorage.setItem('gfc-getapp', '1'); } catch (e) {}
+    const first = getApp.querySelector('a');
+    if (first) first.focus();
+  }
+  function hideGetApp() { if (getApp) getApp.hidden = true; }
+  if (getApp) {
+    getApp.addEventListener('click', ev => {
+      if (ev.target === getApp || ev.target.closest('.getapp-close')) { ev.preventDefault(); hideGetApp(); }
+    });
+    document.addEventListener('keydown', ev => { if (ev.key === 'Escape') hideGetApp(); });
+    let seen = false;
+    try { seen = sessionStorage.getItem('gfc-getapp') === '1'; } catch (e) {}
+    if (!seen) setTimeout(showGetApp, 15000);
+  }
+  document.querySelectorAll('video[data-exclusive]').forEach(v => v.addEventListener('ended', showGetApp));
   function playVideo(btn) {
     const v = document.createElement('video');
     v.className = 'media'; v.controls = true; v.muted = true; v.playsInline = true; v.preload = 'metadata';
     if (btn.dataset.poster) v.poster = btn.dataset.poster;
     v.src = btn.dataset.video;
+    if (btn.dataset.exclusive) v.addEventListener('ended', showGetApp);
     btn.replaceWith(v);
     v.play().catch(() => {});
   }
   document.addEventListener('click', ev => {
+    if (getApp && ev.target.closest('.getapp-open')) { ev.preventDefault(); showGetApp(); return; }
     const video = ev.target.closest('.video');
     if (video) { ev.preventDefault(); playVideo(video); return; }
     const slot = ev.target.closest('.model-slot');
@@ -316,6 +367,46 @@ def bonus_text() -> str:
     if bonus:
         return f"{grant + bonus:,} GFC for signing up and your first post!"
     return f"{grant:,} GFC for signing up!"
+
+
+def visitor_platform(user_agent: str) -> str:
+    """"android", "windows" or "other", from the browser's User-Agent (only picks the main download button)."""
+    ua = user_agent or ""
+    if "Android" in ua:
+        return "android"
+    if "Windows" in ua:
+        return "windows"
+    return "other"
+
+
+def get_app_popup(platform: str) -> str:
+    """
+    The "Get the GFC app" pop-up (hidden until the page script opens it): the sign-up bonus,
+    and the download for this visitor's device first. Unpublished downloads link to /app.
+    """
+    e = lambda s: html.escape(s, quote=True)  # noqa: E731
+    android = ("/app/gfc.apk", True) if app_release.info() else ("/app#android", False)
+    windows = ("/app/windows", True) if app_release.windows_info() else ("/app#windows", False)
+
+    def button(target, label, cls):
+        href, direct = target
+        return f'<a class="{cls}" href="{e(href)}"{" download" if direct else ""}>{label}</a>'
+    if platform == "android":
+        buttons = button(android, "Get GFC for Android", "primary") + button(windows, "Windows version", "secondary")
+    elif platform == "windows":
+        buttons = button(windows, "Get GFC for Windows", "primary") + button(android, "Android version", "secondary")
+    else:
+        buttons = button(android, "Get GFC for Android", "primary") + button(windows, "Get GFC for Windows", "primary")
+    return ('<div id="getapp" class="getapp" hidden role="dialog" aria-modal="true" aria-labelledby="getapp-title">'
+            '<div class="getapp-box">'
+            '<button type="button" class="getapp-close" aria-label="Close">&#10005;</button>'
+            '<h2 id="getapp-title">Get the GFC app</h2>'
+            f'<p class="getapp-bonus">{e(bonus_text())}</p>'
+            '<p>Create your account to watch GFC Exclusives in full, and earn GFC when people view what you post.</p>'
+            f'<div class="getapp-buttons">{buttons}</div>'
+            '<p class="getapp-more"><a href="/app">How to install</a> &middot; '
+            f'<a href="{e(app_release.SITE_URL)}" rel="noopener">Learn more about GFC</a></p>'
+            '</div></div>')
 
 
 def site_header() -> str:
@@ -397,6 +488,7 @@ def feed_html_response(request: Request, page: int = 1, featured: dict = None) -
     description = FEED_DESCRIPTION
     card_type, image_tags, extra_head, top = "summary", "", "", ""
     header = site_header()
+    popup = get_app_popup(visitor_platform(request.headers.get("user-agent", "")))
     if featured:
         title, description, url = featured["title"], featured["description"], featured["url"]
         page_title = featured.get("page_title", title)
@@ -467,6 +559,22 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 .tag{{position:absolute;left:8px;top:8px;padding:2px 8px;border-radius:8px;background:rgba(0,0,0,.7);font-size:.8rem}}
 .placeholder{{padding:48px 0;text-align:center;color:#9aa}}
 .stats{{margin:8px 0 0;font-size:.9rem}}
+.exclusive{{display:inline-block;margin:4px 0;padding:2px 10px;border-radius:12px;background:#2a2410;color:#ffd400;font-size:.85rem;font-weight:700}}
+.exclusive-note{{margin:8px 0 0;color:#a9b0b6}}
+.exclusive-note a{{color:#7f8ce0}}
+.getapp{{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.7)}}
+.getapp[hidden]{{display:none}}
+.getapp-box{{position:relative;width:100%;max-width:420px;padding:24px 20px 16px;border-radius:16px;background:#15181c;border:1px solid #2f3336;text-align:center}}
+.getapp-box h2{{margin:0 0 8px;font-size:1.4rem}}
+.getapp-bonus{{margin:0 0 8px;color:#ffd400;font-weight:700;font-size:1.1rem}}
+.getapp-box p{{color:#a9b0b6}}
+.getapp-buttons{{display:flex;flex-direction:column;gap:8px;margin:16px 0 8px}}
+.getapp-buttons a{{display:block;padding:12px 16px;border-radius:999px;text-decoration:none;font-weight:700}}
+.getapp-buttons a.primary{{background:#3b4cca;color:#fff}}
+.getapp-buttons a.secondary{{border:1px solid #536471;color:#e7e9ea}}
+.getapp-more{{font-size:.9rem}}
+.getapp-more a{{color:#7f8ce0}}
+.getapp-close{{position:absolute;top:8px;right:8px;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:#a9b0b6;font-size:1.1rem;cursor:pointer}}
 .more,.end{{display:block;padding:20px 16px;text-align:center;color:#71767b}}
 .featured{{padding:12px 16px 16px;border-bottom:1px solid #2f3336}}
 .featured .hero{{display:block;width:100%;max-height:min(55vh,480px);object-fit:contain;background:#000;border:1px solid #2f3336;border-radius:16px}}
@@ -478,6 +586,7 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 .featured .creator{{display:flex;align-items:center;gap:8px;margin:0;color:#71767b}}
 .featured .creator img{{width:28px;height:28px;border-radius:50%}}
 .featured .badge{{display:inline-block;margin:8px 0 0;padding:2px 8px;border-radius:12px;background:#0f3d2e;color:#00ba7c;font-size:.85rem}}
+.featured .badge.exclusive{{background:#2a2410;color:#ffd400;font-weight:700}}
 .featured .repost{{display:block;margin:8px 0 0;padding:8px 12px;border-radius:8px;background:#1d1f23}}
 .featured .desc{{white-space:pre-wrap;line-height:1.5}}
 .featured .actions a{{display:inline-block;margin:8px 8px 0 0;padding:10px 16px;border-radius:999px;background:#3b4cca;color:#fff;text-decoration:none;font-weight:600}}
@@ -493,6 +602,7 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 {cards}
 </div>
 </main>
+{popup}
 <script nonce="{nonce}">{script}</script>
 </body>
 </html>

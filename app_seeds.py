@@ -12,6 +12,7 @@ import moderation
 import reposts
 import audio_stream
 import config
+import exclusive
 import phone_verify
 import seed_edits
 import signing
@@ -172,6 +173,7 @@ async def seeds_upload(
     description: str = Form(""),
     tags: str = Form(""),
     reward_wallet: str = Form(""),
+    exclusive_to_gfc: bool = Form(False, alias="exclusive"),
     caller: Caller = Depends(caller_from_form),
 ):
     """
@@ -186,6 +188,11 @@ async def seeds_upload(
                         your oldest one). The wallet signs the seed, and rewards are
                         only ever paid to it. Without a signing wallet the seed is
                         still shared but earns no rewards.
+      - exclusive     : optional, videos and text posts (.txt). "Exclusive to GFC Network":
+                        the full clip / the post's text is only for real GFC accounts
+                        (GET /seeds/{id}/play). Videos get a 5-second public teaser
+                        (`teaser`); text posts show only their title. `x_post` in the
+                        response is a ready-made X post.
 
     If the file matches content that was notarised earlier (see reposts.py), the
     seed is still shared but becomes a repost: `repost_of` names the original, and
@@ -203,6 +210,8 @@ async def seeds_upload(
 
     owner = caller.owner("post")
     require_phone_to_post(owner)
+    if exclusive_to_gfc and not exclusive.can_be_exclusive(file.filename or "", detect_content_type(file.filename or "")):
+        raise HTTPException(status_code=400, detail="Only videos and text posts can be exclusive to the GFC Network.")
 
     # Pick the signing wallet: must be the owner's, with its key on this node
     conn = sqlite3.connect(DB_PATH)
@@ -264,11 +273,11 @@ async def seeds_upload(
         conn = sqlite3.connect(DB_PATH)
         conn.execute(
             "INSERT INTO seeds (id, owner, title, description, tags, filename, "
-            "thumb_filename, content_type, file_size, gfc_earned, created_at, reward_wallet, signature) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "thumb_filename, content_type, file_size, gfc_earned, created_at, reward_wallet, signature, exclusive) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (sid, owner, final_title, description, tags_str, orig_safe,
              thumb_filename, content_type, file_size, 0.0, created_at,
-             reward_wallet, signature)
+             reward_wallet, signature, 1 if exclusive_to_gfc else 0)
         )
         conn.commit()
         conn.close()
@@ -322,6 +331,18 @@ async def seeds_upload(
         "repost_of": repost_info,
         "repost_credit_gfc": repost_credit["amount"] if repost_credit else 0.0,
     }
+    if exclusive_to_gfc:
+        # Cut now: the poster shares the teaser on X right after posting. A few seconds of
+        # encoding; if it fails (no ffmpeg) the post stays exclusive and the startup backfill retries.
+        text_post = exclusive.is_text_file(orig_safe)
+        result["exclusive"] = True
+        result["teaser"] = teaser = (exclusive.teaser_url(sid) if stored and not text_post
+                                     and exclusive.make_teaser(sid, orig_safe) else None)
+        result["full"], result["stream_pending"] = teaser, False
+        if text_post:
+            result["desc"] = description  # the poster's own copy
+        import app_share
+        result["x_post"] = exclusive.x_post(final_title, app_share.share_url(sid), text_post=text_post)
     if bonus:
         result["first_post_bonus"] = bonus["amount"]
         if bonus["pending"]:
@@ -369,14 +390,14 @@ def my_seeds(caller: Caller = Depends(caller_from_query)):
             "owner_avatar": owner_avatar,
             "repost_of": repost_of.get(r[0]),
         })
-    return {"items": items}
+    return {"items": exclusive.apply_to_items(items)}
 
 @router.get("/seeds")
 def list_seeds():
     """Return all seeds in feed-friendly shape (without posts hidden after reports)."""
     conn = sqlite3.connect(DB_PATH)
     try:
-        return {"items": moderation.visible_items(conn, list_rows())}
+        return {"items": exclusive.apply_to_items(moderation.visible_items(conn, list_rows()))}
     finally:
         conn.close()
 
@@ -408,7 +429,7 @@ def get_seed(sid: str):
         if row:
             avatar_filename = row[15] if len(row) > 15 else ""
             owner_avatar = f"/avatars/{avatar_filename}" if avatar_filename else ""
-            return {
+            return exclusive.apply_to_items([{
                 "id": row[0], "title": row[1], "description": row[2],
                 "tags": [t.strip() for t in row[3].split(",") if t.strip()] if row[3] else [],
                 "full": f"/originals/{row[4]}",
@@ -420,7 +441,7 @@ def get_seed(sid: str):
                 "owner_avatar": owner_avatar,
                 "repost_of": _repost_map().get(row[0]),
                 "edited_at": row[16] or "",
-            }
+            }])[0]
     except Exception:
         pass
 
@@ -492,14 +513,56 @@ async def edit_seed(
 
 
 @router.get("/seeds/{sid}/edits")
-def seed_edit_history(sid: str):
-    """Every version of a post's text, newest first (empty if it was never edited)."""
+def seed_edit_history(sid: str, caller: Caller = Depends(caller_from_query)):
+    """
+    Every version of a post's text, newest first (empty if it was never edited). For a GFC
+    Exclusive, descriptions are left out unless the caller may see the post.
+    """
     conn = sqlite3.connect(DB_PATH)
     try:
         if moderation.is_hidden(conn, sid):
             raise HTTPException(status_code=410, detail="This post was hidden after reports.")
-        if not conn.execute("SELECT 1 FROM seeds WHERE id = ?", (sid,)).fetchone():
+        row = conn.execute("SELECT owner, exclusive FROM seeds WHERE id = ?", (sid,)).fetchone()
+        if not row:
             raise HTTPException(status_code=404, detail="seed not found")
-        return {"ok": True, "id": sid, "edits": seed_edits.history(conn, sid)}
+        edits = seed_edits.history(conn, sid)
+        if row[1] and not exclusive.may_watch(conn, caller.username, row[0]):
+            for e in edits:
+                e["description"] = ""
+        return {"ok": True, "id": sid, "edits": edits}
     finally:
         conn.close()
+
+
+@router.get("/seeds/{sid}/play")
+def play_links(sid: str, caller: Caller = Depends(caller_from_query)):
+    """
+    Links to play a post's full media. For a GFC Exclusive they're signed and expire in
+    `expires_in` seconds (ask again after that); only the poster and real accounts get
+    them: phone-verified on the real network (403 otherwise), any logged-in account on a
+    test net. Other posts: their plain public links. Needs a read token (401 without).
+    """
+    username = caller.require("read")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        if moderation.is_hidden(conn, sid):
+            raise HTTPException(status_code=410, detail="This post was hidden after reports.")
+        row = conn.execute("SELECT owner, filename, content_type, exclusive, description FROM seeds WHERE id = ?",
+                           (sid,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="seed not found")
+        owner, filename, content_type, is_exclusive, text = row
+        if is_exclusive and not exclusive.may_watch(conn, username, owner):
+            raise HTTPException(status_code=403, detail="Verify your phone number to watch GFC Exclusives.")
+    finally:
+        conn.close()
+    full = f"/originals/{filename}"
+    stream = (audio_stream.stream_url(sid, content_type) if content_type in audio_stream.STREAM_KINDS else None)
+    if not is_exclusive:
+        return {"ok": True, "id": sid, "exclusive": False, "full": full, "stream": stream, "expires_in": None}
+    return {"ok": True, "id": sid, "exclusive": True,
+            "full": exclusive.signed_url(full),
+            "stream": exclusive.signed_url(stream) if stream else None,
+            "teaser": exclusive.teaser_url(sid),
+            "text": (text or "") if exclusive.is_text_file(filename) else None,
+            "expires_in": exclusive.URL_TTL_S}
