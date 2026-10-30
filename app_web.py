@@ -21,6 +21,8 @@ download every model. Models far off screen are dropped again to save memory.
 import datetime
 import html
 import json
+import os
+import re
 import secrets
 import sqlite3
 from urllib.parse import quote
@@ -332,12 +334,42 @@ def site_header() -> str:
             f'</nav>\n<p class="promo">{e(bonus_text())}</p>\n</header>')
 
 
-def _security_headers(nonce: str) -> dict:
+# ---------- analytics ----------
+
+CLARITY_ID_RE = re.compile(r"^[a-z0-9]{6,20}$")
+# Hosts Microsoft Clarity loads its script from and sends its data to
+CLARITY_SCRIPT_SRC = "https://www.clarity.ms https://*.clarity.ms"
+CLARITY_CONNECT_SRC = "https://*.clarity.ms https://c.bing.com"
+
+
+def clarity_project_id() -> str:
+    """
+    The Microsoft Clarity project for the web feed and share pages (GFC_CLARITY_PROJECT_ID),
+    or "" when analytics is off. Only these pages get it: never /verify, /account or /app,
+    so phone numbers, codes and recovery forms are never recorded.
+    """
+    value = os.environ.get("GFC_CLARITY_PROJECT_ID", "").strip()
+    return value if CLARITY_ID_RE.match(value) else ""
+
+
+def clarity_script(project_id: str, page_type: str) -> str:
+    """Clarity's standard loader, plus a page_type tag ("feed" or "share") to filter by."""
+    return (f'(function(c,l,a,r,i,t,y){{c[a]=c[a]||function(){{(c[a].q=c[a].q||[]).push(arguments)}};'
+            f't=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;'
+            f'y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);}})'
+            f'(window,document,"clarity","script",{json.dumps(project_id)});'
+            f'window.clarity("set","page_type",{json.dumps(page_type)});')
+
+
+def _security_headers(nonce: str, analytics: bool = False) -> dict:
     # model-viewer fetches models from this node, decodes textures to blob: URLs and loads
     # Draco/KTX2 decoders (wasm in blob: workers) from gstatic when a model needs them.
-    csp = ("default-src 'none'; img-src 'self' blob: data:; media-src 'self'; "
-           f"script-src 'nonce-{nonce}' {MODEL_VIEWER_SRC} 'wasm-unsafe-eval'; "
-           "connect-src 'self' blob: data: https://www.gstatic.com; worker-src blob:; "
+    # With analytics on, Clarity's script and data hosts are allowed too.
+    extra_script = f" {CLARITY_SCRIPT_SRC}" if analytics else ""
+    extra_connect = f" {CLARITY_CONNECT_SRC}" if analytics else ""
+    csp = (f"default-src 'none'; img-src 'self' blob: data:{extra_connect}; media-src 'self'; "
+           f"script-src 'nonce-{nonce}' {MODEL_VIEWER_SRC}{extra_script} 'wasm-unsafe-eval'; "
+           f"connect-src 'self' blob: data: https://www.gstatic.com{extra_connect}; worker-src blob:; "
            f"style-src 'nonce-{nonce}' '{MODEL_VIEWER_STYLE_HASH}'; "
            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
     return {
@@ -377,6 +409,9 @@ def feed_html_response(request: Request, page: int = 1, featured: dict = None) -
                '<h2 class="more-head">Latest on GFC</h2>\n')
     nonce = secrets.token_urlsafe(16)
     script = SCRIPT % {"src": json.dumps(MODEL_VIEWER_SRC), "sri": json.dumps(MODEL_VIEWER_SRI)}
+    clarity_id = clarity_project_id()
+    analytics = (f'<script nonce="{nonce}">{clarity_script(clarity_id, "share" if featured else "feed")}</script>\n'
+                 if clarity_id else "")
     body = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -450,7 +485,7 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 .featured .placeholder{{padding:64px 0;text-align:center;color:#9aa}}
 .more-head{{margin:0;padding:12px 16px;font-size:1rem;color:#71767b;border-bottom:1px solid #2f3336}}
 </style>
-</head>
+{analytics}</head>
 <body>
 {header}
 <main>
@@ -462,7 +497,7 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 </body>
 </html>
 """
-    headers = _security_headers(nonce)
+    headers = _security_headers(nonce, analytics=bool(clarity_id))
     headers["Vary"] = "Accept, User-Agent"  # / is JSON for API clients; a shared post's "Open in GFC" differs on Android
     return HTMLResponse(body, headers=headers)
 

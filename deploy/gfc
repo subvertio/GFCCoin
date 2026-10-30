@@ -123,6 +123,8 @@ cmd_check() {
     if [[ -n "$fb_project" ]]; then line ok "Firebase phone verification on (project $fb_project)"
     elif [[ -n "$(env_value GFC_FIREBASE_CONFIG)" ]]; then line FAIL "GFC_FIREBASE_CONFIG is set but not valid JSON with apiKey, authDomain, projectId (single quotes around it?)"
     else line -- "Firebase not configured - phone verification is off (gfc config)"; fi
+    if [[ -n "$(env_value GFC_CLARITY_PROJECT_ID)" ]]; then line ok "Clarity analytics on the web feed (project $(env_value GFC_CLARITY_PROJECT_ID))"
+    else line -- "Clarity analytics off (GFC_CLARITY_PROJECT_ID, gfc config)"; fi
     local unused=""
     for var in TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN TWILIO_API_KEY_SID TWILIO_API_KEY_SECRET \
                TWILIO_VERIFY_SERVICE_SID TWILIO_LOOKUP_LINE_TYPE GFC_TURNSTILE_SECRET GFC_TURNSTILE_SITEKEY; do
