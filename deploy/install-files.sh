@@ -10,6 +10,8 @@ DOMAIN="${1:-}"
 install -m 644 "$APP_DIR/deploy/gfc-node.service" /etc/systemd/system/gfc-node.service
 install -m 644 "$APP_DIR/deploy/gfc-backup.service" /etc/systemd/system/gfc-backup.service
 install -m 644 "$APP_DIR/deploy/gfc-backup.timer" /etc/systemd/system/gfc-backup.timer
+install -m 644 "$APP_DIR/deploy/gfc-scan.service" /etc/systemd/system/gfc-scan.service
+install -m 644 "$APP_DIR/deploy/gfc-scan.timer" /etc/systemd/system/gfc-scan.timer
 install -m 755 "$APP_DIR/deploy/backup.sh" /usr/local/sbin/gfc-backup
 install -m 755 "$APP_DIR/deploy/update.sh" /usr/local/sbin/gfc-update
 install -m 755 "$APP_DIR/deploy/gfc" /usr/local/bin/gfc
@@ -17,3 +19,4 @@ if [[ -n "$DOMAIN" ]]; then
     sed "s#__DOMAIN__#$DOMAIN#g" "$APP_DIR/deploy/Caddyfile" > /etc/caddy/Caddyfile
 fi
 systemctl daemon-reload
+systemctl enable --now gfc-scan.timer >/dev/null 2>&1 || true

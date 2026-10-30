@@ -123,6 +123,12 @@ cmd_check() {
     if [[ -n "$fb_project" ]]; then line ok "Firebase phone verification on (project $fb_project)"
     elif [[ -n "$(env_value GFC_FIREBASE_CONFIG)" ]]; then line FAIL "GFC_FIREBASE_CONFIG is set but not valid JSON with apiKey, authDomain, projectId (single quotes around it?)"
     else line -- "Firebase not configured - phone verification is off (gfc config)"; fi
+    if command -v clamscan >/dev/null 2>&1; then
+        local defs; defs="$(clamscan --version 2>/dev/null | cut -d/ -f2,3)"
+        if systemctl is-active --quiet clamav-daemon; then line ok "ClamAV scanning downloads (daemon; definitions $defs)"
+        else line ok "ClamAV scanning downloads (on demand; definitions $defs)"; fi
+        systemctl is-active --quiet gfc-scan.timer && line ok "daily download rescan on (gfc-scan.timer)"             || line FAIL "daily download rescan timer not running (systemctl enable --now gfc-scan.timer)"
+    else line FAIL "ClamAV not installed: downloads (zips) can't be offered (gfc update installs it)"; fi
     if [[ -n "$(env_value GFC_CLARITY_PROJECT_ID)" ]]; then line ok "Clarity analytics on the web feed (project $(env_value GFC_CLARITY_PROJECT_ID))"
     else line -- "Clarity analytics off (GFC_CLARITY_PROJECT_ID, gfc config)"; fi
     local unused=""

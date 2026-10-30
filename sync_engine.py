@@ -27,6 +27,7 @@ from pathlib import Path
 
 import audio_stream
 import exclusive
+import filescan
 import reposts
 from sync_ingest import SYNCABLE_TABLES, TABLE_COLUMNS, TABLE_TIMESTAMP_COL, ingest_rows, select_rows_since
 from config import DB_PATH, DATA_DIR, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR
@@ -682,8 +683,10 @@ class SyncEngine:
                 conn.close()
                 if row:
                     audio_stream.enqueue(seed_id, filename, row[0], len(file_data))
-                    if row[1]:  # a GFC Exclusive: this node makes its own public teaser
+                    if row[1] and row[0] == "video":  # a GFC Exclusive video: this node makes its own public teaser
                         exclusive.make_teaser_later(seed_id, filename)
+                    if filescan.is_download(filename):  # every node scans downloads itself
+                        filescan.enqueue(seed_id)
             except Exception as e:
                 logger.warning(f"Media stream queueing failed for seed {seed_id}: {e}")
         if file_type != "thumbnail" and len(file_data) >= 1024:
