@@ -45,7 +45,7 @@ SYNCABLE_TABLES = ["users", "verified_wallets", "seeds", "seed_edits", "transact
 # Columns for each table (sent to peers, and the only ones accepted from them)
 TABLE_COLUMNS = {
     "users": PUBLIC_USER_COLUMNS,  # never share passwords, email, phone or names
-    "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet, signature, exclusive",
+    "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet, signature, exclusive, teaser_seconds",
     "verified_wallets": "id, username, wallet, verified_at, signer, signature",
     "seed_edits": "id, seed_id, title, description, tags, edited_at, signer, signature",
     "transactions": "id, sender, recipient, amount, reason, timestamp, amount_cents, tx_hash, tx_type, signature, signer",

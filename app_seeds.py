@@ -175,6 +175,7 @@ async def seeds_upload(
     tags: str = Form(""),
     reward_wallet: str = Form(""),
     exclusive_to_gfc: bool = Form(False, alias="exclusive"),
+    teaser_seconds: int = Form(exclusive.TEASER_SECONDS),
     caller: Caller = Depends(caller_from_form),
 ):
     """
@@ -194,9 +195,11 @@ async def seeds_upload(
                         response is "pending" until then.
       - exclusive     : optional, videos, text posts (.txt) and downloads. "Exclusive to GFC Network":
                         the full clip / the post's text is only for real GFC accounts
-                        (GET /seeds/{id}/play). Videos get a 5-second public teaser
+                        (GET /seeds/{id}/play). Videos get a 5, 10 or 30-second public teaser
                         (`teaser`); text posts show only their title. `x_post` in the
-                        response is a ready-made X post.
+                        response is a ready-made X post, and `share` has the text,
+                        link and X/LinkedIn/Substack links.
+      - teaser_seconds: optional, exclusive videos: 5 (default), 10 or 30.
 
     If the file matches content that was notarised earlier (see reposts.py), the
     seed is still shared but becomes a repost: `repost_of` names the original, and
@@ -216,6 +219,8 @@ async def seeds_upload(
     require_phone_to_post(owner)
     if exclusive_to_gfc and not exclusive.can_be_exclusive(file.filename or "", detect_content_type(file.filename or "")):
         raise HTTPException(status_code=400, detail="Only videos, text posts and downloads (.zip) can be exclusive to the GFC Network.")
+    if teaser_seconds not in exclusive.TEASER_LENGTHS:
+        raise HTTPException(status_code=400, detail="The preview can be 5, 10 or 30 seconds long.")
 
     # Pick the signing wallet: must be the owner's, with its key on this node
     conn = sqlite3.connect(DB_PATH)
@@ -277,11 +282,11 @@ async def seeds_upload(
         conn = sqlite3.connect(DB_PATH)
         conn.execute(
             "INSERT INTO seeds (id, owner, title, description, tags, filename, "
-            "thumb_filename, content_type, file_size, gfc_earned, created_at, reward_wallet, signature, exclusive) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "thumb_filename, content_type, file_size, gfc_earned, created_at, reward_wallet, signature, exclusive, "
+            "teaser_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (sid, owner, final_title, description, tags_str, orig_safe,
              thumb_filename, content_type, file_size, 0.0, created_at,
-             reward_wallet, signature, 1 if exclusive_to_gfc else 0)
+             reward_wallet, signature, 1 if exclusive_to_gfc else 0, teaser_seconds)
         )
         conn.commit()
         conn.close()
@@ -345,12 +350,17 @@ async def seeds_upload(
         text_post = exclusive.is_text_file(orig_safe)
         result["exclusive"] = True
         result["teaser"] = teaser = (exclusive.teaser_url(sid) if stored and content_type == "video"
-                                     and exclusive.make_teaser(sid, orig_safe) else None)
+                                     and exclusive.make_teaser(sid, orig_safe, seconds=teaser_seconds) else None)
+        result["teaser_seconds"] = teaser_seconds
         result["full"], result["stream_pending"] = teaser, False
         if text_post:
             result["desc"] = description  # the poster's own copy
         import app_share
-        result["x_post"] = exclusive.x_post(final_title, app_share.share_url(sid), text_post=text_post)
+        is_download = filescan.is_download(orig_safe)
+        result["x_post"] = exclusive.x_post(final_title, app_share.share_url(sid), text_post=text_post,
+                                            seconds=teaser_seconds, download=is_download)
+        result["share"] = exclusive.share_links(final_title, app_share.share_url(sid), text_post=text_post,
+                                                seconds=teaser_seconds, download=is_download)
     if bonus:
         result["first_post_bonus"] = bonus["amount"]
         if bonus["pending"]:

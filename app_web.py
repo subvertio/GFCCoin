@@ -209,12 +209,13 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
         text_post = False
     elif is_exclusive:
         teaser = seed.get("teaser") or ""
+        seconds = seed.get("teaser_seconds") or exclusive.TEASER_SECONDS
         if ctype == "video" and teaser:
             poster = f'<img src="{e(thumb_path)}" alt="" loading="lazy">' if thumb_path else ""
             media = (f'<button type="button" class="media video" data-video="{e(teaser)}" data-exclusive="1" '
-                     f'data-poster="{e(thumb_path)}" aria-label="Play the 5-second preview of {e(title or "video")} (muted)">'
+                     f'data-poster="{e(thumb_path)}" aria-label="Play the {seconds}-second preview of {e(title or "video")} (muted)">'
                      f'{poster}<span class="play" aria-hidden="true">&#9654;</span>'
-                     f'<span class="tag">5s preview</span></button>')
+                     f'<span class="tag">{seconds}s preview</span></button>')
         elif thumb_path:
             media = f'<a class="media" href="{e(page)}"><img src="{e(thumb_path)}" alt="{e(title)}" loading="lazy"></a>'
         text_post = ctype != "video"

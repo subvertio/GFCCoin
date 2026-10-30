@@ -11,7 +11,8 @@ itself is locked like a video's full clip.
 
 Videos:
 
-- The node cuts a TEASER_SECONDS (5 s) teaser with ffmpeg, served publicly at
+- The node cuts a teaser of the poster's chosen length (TEASER_LENGTHS: 5, 10 or 30 s,
+  default 5) with ffmpeg, served publicly at
   /teasers/<seed_id>.mp4: the web feed, share pages and X show it.
 - The full clip (/originals/<file> and its /streams/ copy) is locked: those URLs only
   open with a short-lived link signed by this node (?exp=...&sig=..., HMAC-SHA256 with a
@@ -42,7 +43,8 @@ import config
 import phone_verify
 from config import DATA_DIR, DB_PATH, SEEDS_ORIG_DIR
 
-TEASER_SECONDS = 5
+TEASER_SECONDS = 5                 # the default
+TEASER_LENGTHS = (5, 10, 30)       # what a poster can pick
 TEASERS_DIR = DATA_DIR / "seeds" / "teasers"
 TEASERS_DIR.mkdir(parents=True, exist_ok=True)
 URL_TTL_S = 6 * 3600          # long enough to finish a clip; links are re-fetched after
@@ -53,7 +55,7 @@ TEXT_EXTENSION = ".txt"
 LOCKED_DETAIL = "This clip is exclusive to the GFC Network: log in to the GFC app with a verified account to watch it."
 
 # Tests replace this; the default runs ffmpeg. Called as runner(src, dest).
-Runner = Callable[[Path, Path], None]
+Runner = Callable[[Path, Path, int], None]  # (source, teaser, seconds)
 
 _key_lock = threading.Lock()
 _key: Optional[bytes] = None
@@ -61,10 +63,20 @@ _key: Optional[bytes] = None
 
 def init_tables(conn: sqlite3.Connection):
     for table in ("seeds", "seed_quarantine"):
-        try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN exclusive INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # column exists, or the table doesn't yet (quarantine is created on demand)
+        for column in ("exclusive INTEGER DEFAULT 0", f"teaser_seconds INTEGER DEFAULT {TEASER_SECONDS}"):
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass  # column exists, or the table doesn't yet (quarantine is created on demand)
+
+
+def seconds_of(conn: sqlite3.Connection, seed_id: str) -> int:
+    """The teaser length the poster picked (a synced value outside TEASER_LENGTHS falls back to 5)."""
+    try:
+        row = conn.execute("SELECT teaser_seconds FROM seeds WHERE id = ?", (seed_id,)).fetchone()
+    except sqlite3.Error:
+        return TEASER_SECONDS
+    return row[0] if row and row[0] in TEASER_LENGTHS else TEASER_SECONDS
 
 
 def is_exclusive(conn: sqlite3.Connection, seed_id: str) -> bool:
@@ -99,20 +111,27 @@ def teaser_url(seed_id: str) -> Optional[str]:
     return f"/teasers/{path.name}" if path.exists() else None
 
 
-def run_teaser_ffmpeg(src: Path, dest: Path) -> None:
-    """The streaming-copy settings (upright, <=720p, H.264/AAC, faststart), first 5 seconds only."""
+def run_teaser_ffmpeg(src: Path, dest: Path, seconds: int = TEASER_SECONDS) -> None:
+    """The streaming-copy settings (upright, <=720p, H.264/AAC, faststart), first `seconds` only."""
     exe = audio_stream.ffmpeg_path()
     if not exe:
         raise FileNotFoundError("ffmpeg not installed")
     args = audio_stream._ffmpeg_args("video", src, dest, exe)
     out = args.index("-f")  # output options go before the output file
-    args[out:out] = ["-t", str(TEASER_SECONDS)]
+    args[out:out] = ["-t", str(seconds)]
     import subprocess
     subprocess.run(args, check=True, timeout=TEASER_TIMEOUT_S, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
-def make_teaser(seed_id: str, filename: str, runner: Runner = None) -> bool:
-    """Cut the teaser now (synchronously). True if it exists afterwards."""
+def make_teaser(seed_id: str, filename: str, runner: Runner = None, seconds: Optional[int] = None,
+                db_path: str = DB_PATH) -> bool:
+    """Cut the teaser now (synchronously). True if it exists afterwards. Length: the post's choice."""
+    if seconds not in TEASER_LENGTHS:
+        conn = sqlite3.connect(db_path)
+        try:
+            seconds = seconds_of(conn, seed_id)
+        finally:
+            conn.close()
     dest = teaser_path(seed_id)
     if dest.exists():
         return True
@@ -121,7 +140,7 @@ def make_teaser(seed_id: str, filename: str, runner: Runner = None) -> bool:
         return False
     tmp = dest.with_name(dest.name + ".part")
     try:
-        (runner or run_teaser_ffmpeg)(src, tmp)
+        (runner or run_teaser_ffmpeg)(src, tmp, seconds)
         if not tmp.is_file() or tmp.stat().st_size == 0:
             raise RuntimeError("no output")
         os.replace(tmp, dest)
@@ -234,12 +253,13 @@ def apply_to_items(items: Iterable[Dict], db_path: str = DB_PATH) -> List[Dict]:
     conn = sqlite3.connect(db_path)
     try:
         ids = [i.get("id") for i in items if i.get("id")]
-        found = set()
+        found: Dict[str, int] = {}
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
             try:
-                found |= {r[0] for r in conn.execute(
-                    f"SELECT id FROM seeds WHERE exclusive = 1 AND id IN ({','.join('?' * len(chunk))})", chunk)}
+                found.update({r[0]: (r[1] if r[1] in TEASER_LENGTHS else TEASER_SECONDS) for r in conn.execute(
+                    f"SELECT id, teaser_seconds FROM seeds WHERE exclusive = 1 AND id IN ({','.join('?' * len(chunk))})",
+                    chunk)})
             except sqlite3.Error:
                 break
     finally:
@@ -247,6 +267,7 @@ def apply_to_items(items: Iterable[Dict], db_path: str = DB_PATH) -> List[Dict]:
     for item in items:
         if item.get("id") in found:
             item["exclusive"] = True
+            item["teaser_seconds"] = found[item["id"]]
             if is_text_file(item.get("full") or ""):
                 # Title only: the body (description) and the .txt are for real accounts
                 item["teaser"] = None
@@ -264,11 +285,34 @@ def apply_to_items(items: Iterable[Dict], db_path: str = DB_PATH) -> List[Dict]:
     return items
 
 
-def x_post(title: str, url: str, text_post: bool = False) -> Dict[str, str]:
-    """A ready-made X post: for a video, attach the teaser and post this text and link."""
+def share_text(title: str, text_post: bool = False, seconds: int = TEASER_SECONDS, download: bool = False) -> str:
     if text_post:
-        text = f"{title or 'New post'}: the full post is exclusive to the GFC Network"
-    else:
-        text = f"{title or 'New video'}: 5-second preview. The full clip is exclusive to the GFC Network"
+        return f"{title or 'New post'}: the full post is exclusive to the GFC Network"
+    if download:
+        return f"{title or 'New download'}: exclusive to the GFC Network"
+    return f"{title or 'New video'}: {seconds}-second preview. The full clip is exclusive to the GFC Network"
+
+
+def x_post(title: str, url: str, text_post: bool = False, seconds: int = TEASER_SECONDS,
+           download: bool = False) -> Dict[str, str]:
+    """A ready-made X post: for a video, attach the teaser and post this text and link."""
+    text = share_text(title, text_post, seconds, download)
     import app_share
     return {"text": text, "url": url, "intent": app_share.x_intent_url(text, url)}
+
+
+def share_links(title: str, url: str, text_post: bool = False, seconds: int = TEASER_SECONDS,
+                download: bool = False) -> Dict[str, str]:
+    """
+    Where a poster can share an exclusive: X (web intent with the text and link), LinkedIn
+    (its share page takes only the link; it reads the title and image from the share page),
+    and Substack (no posting link exists: apps copy `text` and `url`, and open `substack`
+    for the poster to paste into a Note).
+    """
+    from urllib.parse import quote as q
+    text = share_text(title, text_post, seconds, download)
+    import app_share
+    return {"text": text, "url": url,
+            "x": app_share.x_intent_url(text, url),
+            "linkedin": "https://www.linkedin.com/sharing/share-offsite/?url=" + q(url, safe=""),
+            "substack": "https://substack.com/notes"}
