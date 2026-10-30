@@ -139,7 +139,8 @@ class AppReleaseTests(unittest.TestCase):
     def test_header_downloads_are_always_there(self):
         # Nothing published yet: the buttons still show, and open the "coming soon" page
         web = self.client.get("/web", headers={"Accept": "text/html"}).text
-        self.assertIn('<a href="/app#android">Get GFC for Android</a>', web)
+        self.assertIn('<a href="/app/android">Get GFC for Android</a>', web)
+        self.assertIn("coming soon", self.client.get("/app/android").text)
         self.assertIn('<a href="/app#windows">Get GFC for Windows</a>', web)
         self.assertIn('href="https://galacticfederation.tech" rel="noopener">Learn more about GFC</a>', web)
         self.assertIn("1,100 GFC for signing up and your first post!", web)
@@ -149,7 +150,16 @@ class AppReleaseTests(unittest.TestCase):
         app_release.publish(make_apk("release2.apk", self.release_cert), "0.1.1")
         app_release.publish_windows(make_windows("GFC-Setup.zip", zipped=True), "0.1.1")
         web = self.client.get("/web", headers={"Accept": "text/html"}).text
-        self.assertIn('<a href="/app/gfc.apk" download>Get GFC for Android</a>', web)
+        self.assertIn('<a href="/app/android">Get GFC for Android</a>', web)  # the install steps
+        page = self.client.get("/app/android")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('href="/app/gfc.apk" download>Download GFC for Android</a>', page.text)
+        self.assertIn("Install anyway", page.text)
+        self.assertIn("GFC-0.1.1.apk", page.text)
+        self.assertIn("Open in browser", page.text)
+        self.assertNotIn("<script", page.text)
+        import app_web
+        self.assertIn('<a class="primary" href="/app/android">Get GFC for Android</a>', app_web.get_app_popup("android"))
         self.assertIn('<a href="/app/windows" download>Get GFC for Windows</a>', web)
         import app_web
         self.assertIn('<a href="/app/windows" download>Get GFC for Windows</a>', app_web.site_header())

@@ -429,7 +429,8 @@ def get_app_popup(platform: str) -> str:
     and the download for this visitor's device first. Unpublished downloads link to /app.
     """
     e = lambda s: html.escape(s, quote=True)  # noqa: E731
-    android = ("/app/gfc.apk", True) if app_release.info() else ("/app#android", False)
+    # Android goes to its install page (an APK from outside Google Play takes a few taps to install)
+    android = ("/app/android", False)
     windows = ("/app/windows", True) if app_release.windows_info() else ("/app#windows", False)
 
     def button(target, label, cls):
@@ -456,11 +457,11 @@ def get_app_popup(platform: str) -> str:
 def site_header() -> str:
     """
     Always at the top of the web feed and share pages (people arriving from X): the app
-    downloads, GalacticFederation.tech, and the sign-up bonus. A download that isn't published
-    yet links to the /app page, which says it's coming soon.
+    downloads, GalacticFederation.tech, and the sign-up bonus. Android opens /app/android (the
+    download and how to install it); an unpublished download links to /app ("coming soon").
     """
     e = lambda s: html.escape(s, quote=True)  # noqa: E731
-    android = '<a href="/app/gfc.apk" download>' if app_release.info() else '<a href="/app#android">'
+    android = '<a href="/app/android">'  # the download plus how to install it
     windows = '<a href="/app/windows" download>' if app_release.windows_info() else '<a href="/app#windows">'
     return (f'<header class="top">\n<nav aria-label="Get GFC">'
             f'{android}Get GFC for Android</a>'

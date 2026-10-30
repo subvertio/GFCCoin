@@ -320,30 +320,49 @@ def download_windows():
                         headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
 
 
-@router.get("/app")
-def download_page():
-    rel = info()
-    win = windows_info()
+def _android_section(rel: Optional[dict]) -> str:
+    """The Android download and step-by-step install (APKs from outside Google Play take a few taps)."""
     e = lambda s: html.escape(str(s), quote=True)  # noqa: E731
-    if rel:
-        body = f"""<h2 id="android">Android</h2>
+    if not rel:
+        return """<h2 id="android">Android</h2>
+<p>The Android app is coming soon. Meanwhile everything works on the <a href="/web">web feed</a>.</p>"""
+    return f"""<h2 id="android">Android</h2>
 <a class="button" href="/app/gfc.apk" download>Download GFC for Android</a>
 <p class="meta">Version {e(rel['version'])} &middot; {rel['size'] / 1048576:.0f} MB &middot; {e(rel['published_at'][:10])}</p>
-<h2>Installing</h2>
-<ol>
-<li>Tap <b>Download</b>, then open the file when it finishes.</li>
-<li>Android asks to let your browser install apps: allow it for this install.</li>
-<li>GFC isn't on Google Play yet, so Play Protect may call it an unrecognised app. It's safe to continue: the checksums below match what this node published.</li>
-<li>Updates install over the old version; your account and wallet stay on the network.</li>
+<p class="tip"><b>Opened this from X or another app?</b> Downloads may not start there. Tap the
+<b>&#8942;</b> or <b>&middot;&middot;&middot;</b> menu, choose <b>Open in browser</b> (Chrome), then tap Download.</p>
+<h2>How to install it</h2>
+<ol class="steps">
+<li><b>Tap Download GFC for Android.</b> If Chrome asks whether to keep the file, tap <b>Download</b> (or <b>Download anyway</b>).</li>
+<li><b>Open the file</b> when it finishes: tap <b>Open</b> in the message at the bottom, or find
+<b>GFC-{e(rel['version'])}.apk</b> in your notifications or the <b>Downloads</b> folder of the Files app.</li>
+<li><b>Allow the install.</b> The first time, Android says your browser isn't allowed to install apps:
+tap <b>Settings</b>, turn on <b>Allow from this source</b>, then go back.</li>
+<li><b>Tap Install.</b> GFC isn't on Google Play yet, so Play Protect may call it an unrecognised app:
+tap <b>More details</b>, then <b>Install anyway</b>. The checksums below match what this node published.</li>
+<li><b>Open GFC</b> and create your account. You get 1,100 GFC for signing up and your first post.</li>
 </ol>
+<p>Updates install the same way, over the old version: your account and wallet stay on the network.</p>
 <p>Android 8 or newer, 64-bit phones. Don't want an app? Everything also works on the
 <a href="/web">web feed</a>.</p>
 <h2>Checksums</h2>
 <p class="hash">APK SHA-256<br><code>{e(rel['sha256'])}</code></p>
 <p class="hash">Signing certificate SHA-256<br><code>{e(rel['cert_sha256'])}</code></p>"""
-    else:
-        body = """<h2 id="android">Android</h2>
-<p>The Android app is coming soon. Meanwhile everything works on the <a href="/web">web feed</a>.</p>"""
+
+
+@router.get("/app/android")
+def android_page():
+    """Where every "Get GFC for Android" button goes: the download plus how to install it."""
+    body = _android_section(info()) + """
+<p class="site">Using Windows? <a href="/app#windows">Get GFC for Windows</a></p>"""
+    return _page("Get GFC for Android", "Download and install the GFC app on your Android phone.", body)
+
+
+@router.get("/app")
+def download_page():
+    win = windows_info()
+    e = lambda s: html.escape(str(s), quote=True)  # noqa: E731
+    body = _android_section(info())
     if win:
         zipped = win["ext"] == ".zip"
         first_step = ("<li>Open the downloaded .zip and run the GFC-Setup file inside it.</li>" if zipped
@@ -363,6 +382,10 @@ def download_page():
         body += """
 <h2 id="windows">Windows</h2>
 <p>The Windows app is coming soon.</p>"""
+    return _page("Get the GFC app", "Download the GFC app for Android and Windows: post, play and earn GFC.", body)
+
+
+def _page(title: str, description: str, body: str) -> HTMLResponse:
     body += f"""
 <p class="site">Learn more about GFC at <a href="{SITE_URL}" rel="noopener">GalacticFederation.tech</a></p>"""
     nonce = secrets.token_urlsafe(16)
@@ -371,8 +394,8 @@ def download_page():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Get the GFC app</title>
-<meta name="description" content="Download the GFC app for Android and Windows: post, play and earn GFC.">
+<title>{html.escape(title)}</title>
+<meta name="description" content="{html.escape(description, quote=True)}">
 <style nonce="{nonce}">
 *{{box-sizing:border-box}}
 body{{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#000;color:#e7e9ea;line-height:1.5}}
@@ -384,12 +407,15 @@ p,li{{color:#a9b0b6}}
 .meta{{margin:0;text-align:center;color:#71767b;font-size:.9rem}}
 .hash code{{display:block;margin-top:4px;color:#e7e9ea;font-size:.75rem;overflow-wrap:anywhere}}
 .site{{margin-top:32px;text-align:center}}
+.tip{{margin:16px 0 0;padding:12px 14px;border:1px solid #2f3336;border-radius:12px;background:#15181c}}
+.steps li{{margin:0 0 10px}}
+.steps b,.tip b{{color:#e7e9ea}}
 a{{color:#7f8ce0}}
 </style>
 </head>
 <body>
 <main>
-<h1>Get the GFC app</h1>
+<h1>{html.escape(title)}</h1>
 <p>Post music, video, photos and 3D. Earn GFC when people play what you share.</p>
 {body}
 </main>
