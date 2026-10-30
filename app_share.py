@@ -45,6 +45,7 @@ from fastapi.responses import HTMLResponse
 
 import app_release
 import audio_stream
+import exclusive
 import moderation
 import reposts
 import signing
@@ -169,6 +170,12 @@ def load_seed(seed_id: str) -> dict:
         seed["repost_of"] = reposts.public_info(reposts.repost_of(conn, seed_id))
         seed["stream"] = (audio_stream.stream_url(seed_id, seed["content_type"])
                           if seed["content_type"] in audio_stream.STREAM_KINDS else None)
+        seed["exclusive"] = exclusive.is_exclusive(conn, seed_id)
+        seed["teaser"] = exclusive.teaser_url(seed_id) if seed["exclusive"] else None
+        if seed["exclusive"]:
+            seed["stream"] = None
+            if exclusive.is_text_file(seed["filename"]):
+                seed["description"] = ""  # the body is for real accounts only
         return seed
     finally:
         conn.close()
@@ -201,6 +208,12 @@ def share_page(seed_id: str, request: Request):
     url = share_url(seed["id"])
     title = seed["title"] or seed["filename"] or "Untitled seed"
     description = seed["description"] or f"A seed by {seed['owner']} on GFC"
+    if seed["exclusive"]:
+        text_post = exclusive.is_text_file(seed["filename"])
+        title = seed["title"] or "GFC Exclusive"
+        if text_post or not seed["description"]:
+            what = "the whole post" if text_post else "the full clip"
+            description = f"Exclusive to the GFC Network: log in to the GFC app to see {what}. By {seed['owner']}."
     og_description = description if len(description) <= DESCRIPTION_LIMIT else description[:DESCRIPTION_LIMIT - 1] + "…"
     thumb_path = f"/thumbs/{quote(seed['thumb_filename'], safe='')}" if seed["thumb_filename"] else ""
     media_path = f"/originals/{quote(seed['filename'], safe='')}" if seed["filename"] else ""
@@ -212,7 +225,21 @@ def share_page(seed_id: str, request: Request):
     viewer_3d = (ctype == "3d" and bool(media_path)
                  and seed["filename"].lower().endswith(MODEL_VIEWER_EXTENSIONS))
     poster = f' poster="{e(thumb_path)}"' if thumb_path else ""
-    if ctype == "image" and media_path:
+    if seed["exclusive"]:
+        viewer_3d = False
+        if ctype == "video" and seed["teaser"]:
+            media = (f'<video class="hero" controls playsinline preload="metadata"{poster} data-exclusive="1" '
+                     f'src="{e(seed["teaser"])}"></video>')
+        elif thumb_path:
+            media = f'<img class="hero" src="{e(thumb_path)}" alt="{e(title)}">'
+        else:
+            media = ""
+        what = "read the whole post" if ctype != "video" else "watch the full clip"
+        media += (f'<p class="badge exclusive">&#9733; Exclusive to the GFC Network'
+                  f'{" &middot; 5-second preview" if ctype == "video" and seed["teaser"] else ""}</p>'
+                  f'<p class="exclusive-note">Log in to the <a class="getapp-open" href="/app">GFC app</a> '
+                  f'with a verified account to {what}.</p>')
+    elif ctype == "image" and media_path:
         media = f'<img class="hero" src="{e(media_path)}" alt="{e(title)}">'
     elif ctype == "video" and media_path:
         video_path = seed["stream"] or media_path  # the upright 720p copy plays everywhere
@@ -255,6 +282,8 @@ def share_page(seed_id: str, request: Request):
                      f'{GET_APP_LINK if app_release.info() else ""}</p>\n'
                      '<a class="next" href="#feed">More on GFC <span aria-hidden="true">&#8595;</span></a>')
     image = base + (thumb_path or media_path) if (thumb_path or (ctype == "image" and media_path)) else ""
+    if seed["exclusive"]:
+        image = base + thumb_path if thumb_path else ""  # never the locked original
 
     # The shared post, focused on top, then the whole feed below it (newest first)
     from app_web import feed_html_response  # app_web imports this module

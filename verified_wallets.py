@@ -40,7 +40,7 @@ SIGNED_FIELDS = ("username", "wallet", "verified_at")
 # Same columns as the seeds sync whitelist (sync_ingest.TABLE_COLUMNS["seeds"])
 QUARANTINE_COLUMNS = ("id", "owner", "title", "description", "tags", "filename", "thumb_filename",
                       "content_type", "file_size", "gfc_earned", "likes", "comments", "views",
-                      "created_at", "reward_wallet", "signature")
+                      "created_at", "reward_wallet", "signature", "exclusive")
 
 
 def init_tables(conn: sqlite3.Connection):
@@ -70,6 +70,7 @@ def init_tables(conn: sqlite3.Connection):
         created_at TEXT NOT NULL,
         reward_wallet TEXT DEFAULT '',
         signature TEXT DEFAULT '',
+        exclusive INTEGER DEFAULT 0,
         received_at TEXT NOT NULL
     )''')
     conn.execute("CREATE INDEX IF NOT EXISTS idx_seed_quarantine_wallet ON seed_quarantine (reward_wallet)")
@@ -227,7 +228,7 @@ def quarantine_rows(conn: sqlite3.Connection, columns: List[str], rows: list) ->
         seed = dict(zip(columns, row))
         if not seed.get("id") or conn.execute("SELECT 1 FROM seeds WHERE id = ?", (seed["id"],)).fetchone():
             continue
-        values = [seed.get(c, "" if c not in ("file_size", "gfc_earned", "likes", "comments", "views") else 0)
+        values = [seed.get(c, "" if c not in ("file_size", "gfc_earned", "likes", "comments", "views", "exclusive") else 0)
                   for c in QUARANTINE_COLUMNS]
         try:
             cursor = conn.execute(

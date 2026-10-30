@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Form, Query, Depends
 
 import audio_stream
 import echohunt
+import exclusive
 import moderation
 import referrals
 import reposts
@@ -98,7 +99,7 @@ def get_feed_items(owner: str = "anonymous", author: str = "") -> Dict[str, Any]
                 item["bookmarked"] = item["id"] in bookmarked_set
 
         # Hidden after reports, or from an account this viewer blocked
-        items = moderation.visible_items(conn, items, owner)
+        items = exclusive.apply_to_items(moderation.visible_items(conn, items, owner))
         conn.close()
     except Exception:
         items = []
@@ -286,7 +287,7 @@ def get_bookmarks(caller: Caller = Depends(caller_from_query)):
         d["liked"] = False  # Could check but not critical for bookmarks view
         items.append(d)
 
-    return {"items": items}
+    return {"items": exclusive.apply_to_items(items)}
 
 
 # ---------- playback PoDT credits ----------

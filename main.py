@@ -43,6 +43,7 @@ import keystore
 import first_post
 import seed_edits
 import verified_wallets
+import exclusive
 import referrals
 import reposts
 import signing
@@ -64,6 +65,17 @@ app = FastAPI(
 
 # CORS: only the origins in GFC_CORS_ORIGINS (none by default, i.e. same-origin only)
 app.add_middleware(NodeCORSMiddleware)
+
+
+@app.middleware("http")
+async def exclusive_media_gate(request, call_next):
+    """The full clip of a GFC Exclusive only opens with a signed link from /seeds/{id}/play."""
+    path = request.url.path
+    if path.startswith(exclusive.GATED_PREFIXES) and exclusive.locked(path):
+        q = request.query_params
+        if not exclusive.link_is_valid(path, q.get("exp"), q.get("sig")):
+            return JSONResponse({"detail": exclusive.LOCKED_DETAIL}, status_code=403)
+    return await call_next(request)
 
 # Include routers
 app.include_router(seeds_router)
@@ -92,6 +104,8 @@ app.mount("/thumbs", StaticFiles(directory=str(SEEDS_THUMB_DIR), follow_symlink=
 app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR), follow_symlink=True), name="avatars")
 # Compressed streaming copies of big/lossless audio (audio_stream.py)
 app.mount("/streams", StaticFiles(directory=str(audio_stream.STREAMS_DIR), follow_symlink=True), name="streams")
+# 5-second public teasers of GFC Exclusive videos (exclusive.py)
+app.mount("/teasers", StaticFiles(directory=str(exclusive.TEASERS_DIR), follow_symlink=True), name="teasers")
 
 # ============================================================================
 # MODELS
@@ -202,6 +216,7 @@ def init_db():
     first_post.init_first_post_tables(conn)
     seed_edits.init_seed_edit_tables(conn)
     verified_wallets.init_tables(conn)
+    exclusive.init_tables(conn)
     migrate_plaintext_passwords(conn)
 
     conn.commit()
@@ -591,7 +606,7 @@ def search(q: str = "", caller: Caller = Depends(caller_from_query)):
             item["liked"] = item["id"] in liked_set
             item["bookmarked"] = item["id"] in bookmarked_set
 
-    seed_items = moderation.visible_items(conn, seed_items, owner)
+    seed_items = exclusive.apply_to_items(moderation.visible_items(conn, seed_items, owner))
     result["seeds"] = seed_items
     result["seed_count"] = len(seed_items)
 
@@ -689,6 +704,12 @@ async def startup_event():
 
 
 def _backfill_fingerprints():
+    try:
+        made = exclusive.backfill(DB_PATH)
+        if made:
+            print(f"[Exclusive] Made {made} missing teasers")
+    except Exception as e:
+        print(f"[Exclusive] Teaser backfill failed: {e}")
     try:
         done = reposts.backfill(DB_PATH)
         if done:
