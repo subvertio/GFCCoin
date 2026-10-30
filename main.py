@@ -110,7 +110,7 @@ app.mount("/thumbs", StaticFiles(directory=str(SEEDS_THUMB_DIR), follow_symlink=
 app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR), follow_symlink=True), name="avatars")
 # Compressed streaming copies of big/lossless audio (audio_stream.py)
 app.mount("/streams", StaticFiles(directory=str(audio_stream.STREAMS_DIR), follow_symlink=True), name="streams")
-# 5-second public teasers of GFC Exclusive videos (exclusive.py)
+# 5, 10 or 30-second public teasers of GFC Exclusive videos (exclusive.py)
 app.mount("/teasers", StaticFiles(directory=str(exclusive.TEASERS_DIR), follow_symlink=True), name="teasers")
 
 # ============================================================================

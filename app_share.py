@@ -177,6 +177,7 @@ def load_seed(seed_id: str) -> dict:
             if scan and scan["status"] in filescan.REMOVED:
                 raise HTTPException(status_code=410, detail="This file was removed: it failed the virus or safety check.")
         seed["teaser"] = exclusive.teaser_url(seed_id) if seed["exclusive"] else None
+        seed["teaser_seconds"] = exclusive.seconds_of(conn, seed_id)
         if seed["exclusive"]:
             seed["stream"] = None
             if exclusive.is_text_file(seed["filename"]):
@@ -249,8 +250,8 @@ def share_page(seed_id: str, request: Request):
         else:
             media = ""
         what = "read the whole post" if ctype != "video" else "watch the full clip"
-        media += (f'<p class="badge exclusive">&#9733; Exclusive to the GFC Network'
-                  f'{" &middot; 5-second preview" if ctype == "video" and seed["teaser"] else ""}</p>'
+        preview = f" &middot; {seed['teaser_seconds']}-second preview" if ctype == "video" and seed["teaser"] else ""
+        media += (f'<p class="badge exclusive">&#9733; Exclusive to the GFC Network{preview}</p>'
                   f'<p class="exclusive-note">Log in to the <a class="getapp-open" href="/app">GFC app</a> '
                   f'with a verified account to {what}.</p>')
     elif ctype == "image" and media_path:

@@ -28,7 +28,11 @@ import main  # noqa: E402
 BROWSER = {"Accept": "text/html"}
 
 
-def fake_teaser(src: Path, dest: Path):
+CUT_SECONDS = {}  # teaser file name -> the length it was cut to
+
+
+def fake_teaser(src: Path, dest: Path, seconds: int = exclusive.TEASER_SECONDS):
+    CUT_SECONDS[dest.name.split(".")[0]] = seconds
     dest.write_bytes(b"TEASER" + src.read_bytes()[:64])
 
 
@@ -60,10 +64,13 @@ class ExclusiveTests(unittest.TestCase):
             mark_verified(main.DB_PATH, name)
         return name, token
 
-    def upload(self, token, filename="clip.mp4", exclusive_flag=True, title="My clip", description="Watch this"):
+    def upload(self, token, filename="clip.mp4", exclusive_flag=True, title="My clip", description="Watch this",
+               seconds=None):
         data = {"api_token": token, "title": title, "description": description}
         if exclusive_flag:
             data["exclusive"] = "true"
+        if seconds is not None:
+            data["teaser_seconds"] = str(seconds)
         r = self.client.post("/seeds/upload", data=data, files={"file": (filename, os.urandom(4096), "application/octet-stream")})
         return r
 
@@ -87,6 +94,46 @@ class ExclusiveTests(unittest.TestCase):
         self.assertIn("exclusive to the GFC Network", body["x_post"]["text"])
         self.assertTrue(body["x_post"]["url"].endswith(f"/p/{body['id']}"))
         self.assertTrue(body["x_post"]["intent"].startswith("https://x.com/intent/post?"))
+
+    def test_poster_picks_a_5_10_or_30_second_preview(self):
+        _, token = self.account()
+        for seconds in (10, 30):
+            body = self.upload(token, seconds=seconds).json()
+            sid = body["id"]
+            self.assertEqual(body["teaser_seconds"], seconds)
+            self.assertEqual(CUT_SECONDS[sid], seconds)
+            self.assertIn(f"{seconds}-second preview", body["x_post"]["text"])
+            self.assertEqual(self.feed_item(sid)["teaser_seconds"], seconds)
+            self.assertIn(f"{seconds}s preview", self.client.get("/web").text)
+            self.assertIn(f"{seconds}-second preview", self.client.get(f"/p/{sid}", headers=BROWSER).text)
+            # Re-cutting (backfill, or a node that synced the post) keeps the poster's choice
+            self.assertTrue(exclusive.make_teaser(sid, self._filename(sid)))
+            self.assertEqual(CUT_SECONDS[sid], seconds)
+        sid = self.upload(token).json()["id"]
+        self.assertEqual(CUT_SECONDS[sid], 5)  # the default
+        r = self.upload(token, seconds=60)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("5, 10 or 30", r.json()["detail"])
+
+    def test_share_links_for_x_linkedin_and_substack(self):
+        _, token = self.account()
+        body = self.upload(token, seconds=10, title="Big news").json()
+        share = body["share"]
+        self.assertEqual(share["text"], body["x_post"]["text"])
+        self.assertTrue(share["url"].endswith(f"/p/{body['id']}"))
+        self.assertEqual(share["x"], body["x_post"]["intent"])
+        self.assertTrue(share["linkedin"].startswith("https://www.linkedin.com/sharing/share-offsite/?url=https%3A%2F%2F"))
+        self.assertTrue(share["linkedin"].endswith(f"%2Fp%2F{body['id']}"))
+        self.assertEqual(share["substack"], "https://substack.com/notes")
+        text = self.upload(token, filename="note.txt", title="Secret").json()["share"]["text"]
+        self.assertEqual(text, "Secret: the full post is exclusive to the GFC Network")
+
+    def _filename(self, sid):
+        conn = sqlite3.connect(main.DB_PATH)
+        try:
+            return conn.execute("SELECT filename FROM seeds WHERE id = ?", (sid,)).fetchone()[0]
+        finally:
+            conn.close()
 
     def test_only_videos_and_text_posts_can_be_exclusive(self):
         _, token = self.account()
