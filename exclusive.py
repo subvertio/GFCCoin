@@ -246,7 +246,7 @@ def may_watch(conn: sqlite3.Connection, username: Optional[str], owner: str) -> 
 # ---------- JSON items ----------
 
 def apply_to_items(items: Iterable[Dict], db_path: str = DB_PATH) -> List[Dict]:
-    """Mark exclusive posts in feed/seed JSON, and point their full/stream at the teaser."""
+    """Mark exclusive posts in feed/seed JSON, and point their full and stream at the teaser."""
     items = list(items)
     if not items:
         return items
@@ -277,8 +277,9 @@ def apply_to_items(items: Iterable[Dict], db_path: str = DB_PATH) -> List[Dict]:
                 teaser = teaser_url(item["id"])
                 item["teaser"] = teaser
                 item["full"] = teaser
-            if "stream" in item:
-                item["stream"] = None
+            # The teaser is also the "streaming copy": apps from before exclusives (Unreal 0.1.5)
+            # skip their phone size limit for a stream, which the original's file_size would fail
+            item["stream"] = item.get("teaser")
         else:
             item["exclusive"] = False
             item["teaser"] = None

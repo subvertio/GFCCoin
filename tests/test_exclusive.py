@@ -171,7 +171,7 @@ class ExclusiveTests(unittest.TestCase):
         item = self.feed_item(sid)
         self.assertTrue(item["exclusive"])
         self.assertEqual(item["full"], item["teaser"])
-        self.assertIsNone(item["stream"])
+        self.assertEqual(item["stream"], item["teaser"])  # old apps play the teaser as a stream
 
     def test_who_may_watch_on_the_real_network(self):
         _, poster_token = self.account()
