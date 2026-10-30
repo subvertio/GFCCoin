@@ -249,6 +249,52 @@ class WebFeedTests(unittest.TestCase):
         self.assertNotIn(" style=", r.text)  # no inline style attributes (the CSP would block them)
         self.assertEqual(r.headers["x-content-type-options"], "nosniff")
 
+    # ----- analytics (Microsoft Clarity) -----
+
+    def with_clarity(self, value):
+        saved = os.environ.get("GFC_CLARITY_PROJECT_ID")
+        os.environ["GFC_CLARITY_PROJECT_ID"] = value
+        self.addCleanup(lambda: os.environ.__setitem__("GFC_CLARITY_PROJECT_ID", saved) if saved is not None
+                        else os.environ.pop("GFC_CLARITY_PROJECT_ID", None))
+
+    def test_no_analytics_unless_configured(self):
+        self.add_seed()
+        r = self.client.get("/", headers=BROWSER)
+        self.assertNotIn("clarity", r.text)
+        self.assertNotIn("clarity", r.headers["content-security-policy"])
+        self.with_clarity("not a valid id!")  # a bad value is ignored, not put into the page
+        r = self.client.get("/", headers=BROWSER)
+        self.assertNotIn("clarity", r.text)
+
+    def test_clarity_on_the_feed_with_its_hosts_allowed(self):
+        self.add_seed()
+        self.with_clarity("z5uxlppidk")
+        r = self.client.get("/", headers=BROWSER)
+        csp = r.headers["content-security-policy"]
+        nonce = re.search(r"script-src 'nonce-([^']+)'", csp).group(1)
+        self.assertIn('"https://www.clarity.ms/tag/"+i', r.text)
+        self.assertIn('"clarity","script","z5uxlppidk"', r.text)
+        self.assertIn('window.clarity("set","page_type","feed")', r.text)
+        self.assertEqual(cards(r.text).scripts, [{"nonce": nonce}, {"nonce": nonce}])  # loader + page script
+        self.assertIn(app_web.CLARITY_SCRIPT_SRC, csp)
+        self.assertIn(f"connect-src 'self' blob: data: https://www.gstatic.com {app_web.CLARITY_CONNECT_SRC}", csp)
+        self.assertNotIn("unsafe-inline", csp)
+        for path in ("/web", "/explore"):
+            self.assertIn("z5uxlppidk", self.client.get(path).text)
+
+    def test_share_pages_are_tagged_share(self):
+        sid = self.add_seed()
+        self.with_clarity("z5uxlppidk")
+        r = self.client.get(f"/p/{sid}", headers=BROWSER)
+        self.assertIn('window.clarity("set","page_type","share")', r.text)
+
+    def test_no_analytics_on_download_verify_or_account_pages(self):
+        self.with_clarity("z5uxlppidk")
+        for path in ("/app", "/verify?c=abc", "/account/security", "/account/phone", "/account/email"):
+            r = self.client.get(path, headers=BROWSER)
+            self.assertNotIn("clarity", r.text, path)
+            self.assertNotIn("clarity", r.headers.get("content-security-policy", ""), path)
+
 
 if __name__ == "__main__":
     unittest.main()
