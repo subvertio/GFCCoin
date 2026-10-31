@@ -47,6 +47,8 @@ a = Analysis(
         'sync_ingest',
         'fingerprint',
         'reposts',
+        'app_bridge',
+        'bridge.deposits',
         'PIL.Image',
         # Dependencies
         'cryptography.hazmat.primitives.asymmetric.ed25519',

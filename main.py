@@ -35,6 +35,7 @@ from app_webverify import router as webverify_router
 from app_treasury import router as treasury_router
 from app_release import router as release_router
 from app_recovery import router as recovery_router
+from app_bridge import router as bridge_router
 import audio_stream
 import blockchain
 import logredact
@@ -99,6 +100,7 @@ app.include_router(webverify_router)
 app.include_router(treasury_router)
 app.include_router(release_router)
 app.include_router(recovery_router)
+app.include_router(bridge_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different

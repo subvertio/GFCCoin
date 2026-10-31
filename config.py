@@ -47,3 +47,27 @@ TREASURY_PUBKEYS = tuple(
 IS_TESTNET = bool(_env_treasury.strip())
 NETWORK = "testnet" if IS_TESTNET else "mainnet"
 REQUIRE_PHONE_TO_POST = not IS_TESTNET
+
+# Bridge escrow wallets (Ed25519 public keys), one per EVM chain ID: {chain_id: wallet}.
+# Every node enforces the escrow rules in blockchain.bridge_rule_violation() for these
+# wallets, so this is consensus config: change it in a release all nodes take.
+# Empty until an escrow key exists (`python -m bridge new-escrow-key FILE`).
+# GFC_BRIDGE_ESCROWS ("84532:<pubkey>,8453:<pubkey>") replaces this, for test networks.
+PINNED_BRIDGE_ESCROWS = {}
+_env_escrows = os.environ.get("GFC_BRIDGE_ESCROWS", "")
+BRIDGE_ESCROWS = {
+    int(pair.split(":", 1)[0]): pair.split(":", 1)[1].strip().lower()
+    for pair in _env_escrows.split(",") if ":" in pair
+} if _env_escrows.strip() else dict(PINNED_BRIDGE_ESCROWS)
+
+# What front ends show for the bridge (not consensus): the token contract on each chain,
+# and the bridge service's deposit policy, so the node can refuse a deposit it won't mint.
+CHAIN_NAMES = {8453: "Base", 84532: "Base Sepolia", 31337: "Local test chain"}
+_env_tokens = os.environ.get("GFC_BRIDGE_TOKENS", "")  # "84532:0x...,8453:0x..."
+BRIDGE_TOKENS = {
+    int(pair.split(":", 1)[0]): pair.split(":", 1)[1].strip()
+    for pair in _env_tokens.split(",") if ":" in pair
+}
+BRIDGE_MIN_DEPOSIT_CENTS = int(os.environ.get("GFC_BRIDGE_MIN_DEPOSIT_CENTS", "10000"))
+BRIDGE_RELAY_FEE_CENTS = int(os.environ.get("GFC_BRIDGE_RELAY_FEE_CENTS", "0"))
+BRIDGE_FAUCET_HOLD_DAYS = float(os.environ.get("GFC_BRIDGE_FAUCET_HOLD_DAYS", "14"))

@@ -1,0 +1,3 @@
+# Bridge service only; the node itself doesn't need these.
+# Install with: python -m pip install -r requirements.txt -r bridge/requirements.txt
+eth-account==0.13.7   # EIP-712 signing and EIP-1559 transactions (brings eth-abi, eth-utils)

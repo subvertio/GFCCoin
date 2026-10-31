@@ -146,6 +146,25 @@ belong to the token's user, or the node returns `403`.
 A user's first wallet receives the 100 GFC new-user grant, but only once their
 phone is verified (see below).
 
+## Bridge to Base
+
+Once an escrow is pinned (see [bridge-service.md](bridge-service.md)), users can move GFC
+to the ERC-20 on Base. **Always use these endpoints.** Never build the deposit reason
+yourself: the node rejects any transfer to an escrow that doesn't use the exact format.
+
+```bash
+curl $NODE/bridge/info                        # chains, escrow, token address, minimum, fee, hold
+curl "$NODE/bridge/quote?wallet_id=<wallet>"  # balance_cents, bridgeable_cents, held_cents
+
+# Deposit (spend scope). The tokens are minted to evm_address after a finality wait.
+curl -X POST $NODE/bridge/deposit -H "Authorization: Bearer $T" -H "Content-Type: application/json"   -d '{"wallet_id": "<wallet>", "chain_id": 84532, "evm_address": "0x...", "amount": 150}'
+```
+
+Show users `bridgeable_cents`, not the full balance. Free credit (the welcome grant,
+invite and post bonuses) can only be bridged after the hold in `faucet_hold_days`,
+including when it was passed through other wallets. Show the `notice` from
+`/bridge/info` next to the button.
+
 ## The backup prompt (please show it)
 
 Wallet keys live on one node, encrypted with a key derived from the user's
