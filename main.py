@@ -36,6 +36,8 @@ from app_treasury import router as treasury_router
 from app_release import router as release_router
 from app_recovery import router as recovery_router
 from app_bridge import router as bridge_router
+from app_follows import router as follows_router
+import app_follows
 import audio_stream
 import blockchain
 import logredact
@@ -101,6 +103,7 @@ app.include_router(treasury_router)
 app.include_router(release_router)
 app.include_router(recovery_router)
 app.include_router(bridge_router)
+app.include_router(follows_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
@@ -192,6 +195,7 @@ def init_db():
         created_at TEXT NOT NULL,
         UNIQUE(seed_id, owner)
     )''')
+    app_follows.init_tables(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS bookmarks (
         id TEXT PRIMARY KEY,
         seed_id TEXT NOT NULL,
