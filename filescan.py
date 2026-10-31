@@ -114,7 +114,7 @@ def check_zip(path: Path) -> Tuple[bool, str, Dict]:
 
 # ClamAV skips (and passes) files over its limits, 100 MB by default: raise them past the largest
 # post. deploy/clamav.sh sets the same limits for the daemon in clamd.conf.
-CLAMSCAN_LIMITS = ["--max-filesize=2000M", "--max-scansize=4000M"]
+CLAMSCAN_LIMITS = ["--max-filesize=4000M", "--max-scansize=4000M"]
 
 
 def scanner_command(path: Path) -> Optional[List[str]]:

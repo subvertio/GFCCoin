@@ -36,11 +36,11 @@ class BigUploadTests(unittest.TestCase):
         cls.client = TestClient(main.app)
 
     def setUp(self):
-        self.saved = (config.REQUIRE_PHONE_TO_POST, config.MAX_UPLOAD_BYTES)
+        self.saved = (config.REQUIRE_PHONE_TO_POST, config.MAX_UPLOAD_BYTES, config.MAX_VIDEO_UPLOAD_BYTES)
         config.REQUIRE_PHONE_TO_POST = False
 
     def tearDown(self):
-        config.REQUIRE_PHONE_TO_POST, config.MAX_UPLOAD_BYTES = self.saved
+        config.REQUIRE_PHONE_TO_POST, config.MAX_UPLOAD_BYTES, config.MAX_VIDEO_UPLOAD_BYTES = self.saved
 
     def account(self):
         name = "b" + uuid.uuid4().hex[:10]
@@ -57,7 +57,7 @@ class BigUploadTests(unittest.TestCase):
 
     def test_uploads_up_to_the_limit_are_saved_whole_and_bigger_ones_refused(self):
         h = self.account()
-        config.MAX_UPLOAD_BYTES = 3 * 1024 * 1024 + 5  # several 1 MB pieces
+        config.MAX_UPLOAD_BYTES = config.MAX_VIDEO_UPLOAD_BYTES = 3 * 1024 * 1024 + 5  # several 1 MB pieces
         data = os.urandom(config.MAX_UPLOAD_BYTES)
         with mock.patch.object(audio_stream, "enqueue", return_value=False):
             r = self.upload(h, data)
@@ -96,12 +96,12 @@ class BigUploadTests(unittest.TestCase):
         self.assertFalse(list(SEEDS_ORIG_DIR.glob(".*.part")))
 
         # Over the limit: not even started
-        config.MAX_UPLOAD_BYTES = 1000
+        config.MAX_UPLOAD_BYTES = config.MAX_VIDEO_UPLOAD_BYTES = 1000
         engine._on_seed_file_response(peer, {"seed_id": "s2", "file_type": "original", "found": True,
                                              "filename": "big.bin", "file_size": 5000})
         self.assertNotIn("s2:original", engine._pending_file_chunks)
         # A chunk past the announced size: dropped, and the half file deleted
-        config.MAX_UPLOAD_BYTES = self.saved[1]
+        config.MAX_UPLOAD_BYTES, config.MAX_VIDEO_UPLOAD_BYTES = self.saved[1], self.saved[2]
         engine._on_seed_file_response(peer, {"seed_id": "s3", "file_type": "original", "found": True,
                                              "filename": "liar.bin", "file_size": 10})
         engine._on_seed_file_chunk(peer, {"seed_id": "s3", "file_type": "original", "chunk_idx": 5,
@@ -138,7 +138,7 @@ class BigUploadTests(unittest.TestCase):
              mock.patch.object(filescan.CLAMD_SOCKET.__class__, "exists", return_value=False), \
              mock.patch.object(filescan.shutil, "which", side_effect=lambda n: f"/usr/bin/{n}" if n == "clamscan" else None):
             cmd = filescan.scanner_command(Path("x.zip"))
-        self.assertIn("--max-filesize=2000M", cmd)
+        self.assertIn("--max-filesize=4000M", cmd)
 
     # ---------- optimising oversized videos ----------
 
@@ -194,6 +194,58 @@ class BigUploadTests(unittest.TestCase):
         self.assertEqual(audio_stream.ceiling_kbps(1280, 720), 5000)
         self.assertEqual(audio_stream.ceiling_kbps(1080, 1920), 10000)  # portrait 1080p
         self.assertEqual(audio_stream.ceiling_kbps(3840, 2160), 35000)
+
+    # ---------- videos over the post limit: kept if their optimised copy fits ----------
+
+    def test_a_big_video_is_taken_when_its_optimised_copy_fits_and_refused_with_a_tip_when_not(self):
+        h = self.account()
+        config.MAX_UPLOAD_BYTES = 1024 * 1024           # 1 MB posts (stands in for 1 GB)
+        config.MAX_VIDEO_UPLOAD_BYTES = 4 * 1024 * 1024  # 4 MB raw videos (for 4 GB)
+        data = os.urandom(2 * 1024 * 1024)
+        before = set(SEEDS_ORIG_DIR.iterdir())
+
+        # 1080p at 27 Mbit/s for 0.3 s: optimised to (10,000 + 192) kbit/s -> ~380 KB, fits
+        fits = {"width": 1920, "height": 1080, "kbps": 27000, "duration": 0.3, "audio": "aac"}
+        with mock.patch.object(audio_stream, "probe_video", return_value=fits),              mock.patch.object(audio_stream, "enqueue", return_value=False):
+            self.assertEqual(self.upload(h, data).status_code, 200)
+
+        # 4K at 100 Mbit/s for 1 s: optimised is still ~4.4 MB at the 4K ceiling: refused, with the tip
+        huge = {"width": 3840, "height": 2160, "kbps": 100000, "duration": 1.0, "audio": "aac"}
+        with mock.patch.object(audio_stream, "probe_video", return_value=huge):
+            r = self.upload(h, data)
+        self.assertEqual(r.status_code, 413)
+        self.assertIn("Mbit/s or less", r.json()["detail"])
+        self.assertIn("3840x2160", r.json()["detail"])
+
+        # Can't read it: refused (nothing to base the promise on)
+        with mock.patch.object(audio_stream, "probe_video", return_value=None):
+            self.assertIn("can't read its length", self.upload(h, data).json()["detail"])
+        # Not a video: the post limit as before
+        r = self.client.post("/seeds/upload", data={"title": "zip"}, headers=h,
+                             files={"file": ("big.zip", data, "application/zip")})
+        self.assertEqual(r.status_code, 413)
+        # Over the raw video limit: refused while receiving
+        self.assertEqual(self.upload(h, os.urandom(5 * 1024 * 1024)).status_code, 413)
+        self.assertEqual(len(set(SEEDS_ORIG_DIR.iterdir()) - before), 1)  # only the one that fit
+
+    def test_the_estimate(self):
+        five_min_1080 = {"width": 1920, "height": 1080, "kbps": 27000, "duration": 300}
+        est = audio_stream.estimated_optimized_bytes(five_min_1080, 1_000_000_000)
+        self.assertAlmostEqual(est / 1e6, 382, delta=2)  # 1 GB phone clip -> ~380 MB
+        modest = {"width": 1920, "height": 1080, "kbps": 9000, "duration": 300}
+        self.assertEqual(audio_stream.estimated_optimized_bytes(modest, 337_000_000), 337_000_000)  # kept as is
+        hour_4k = {"width": 3840, "height": 2160, "kbps": 80000, "duration": 3600}
+        tip = audio_stream.bitrate_tip(hour_4k, 1024 ** 3)
+        self.assertIn("60 min at 3840x2160", tip)
+        self.assertIn("Export it at 2 Mbit/s or less", tip)  # 1 GB over an hour, less the audio
+
+    def test_a_video_over_the_limit_is_replaced_by_any_smaller_copy(self):
+        config.MAX_UPLOAD_BYTES = 3000
+        name = self._original()  # 4000 bytes, over the (test) limit
+        info = {"width": 1920, "height": 1080, "kbps": 9000, "audio": "aac"}  # not "oversized" by bitrate
+        self.assertTrue(audio_stream.optimize_video("s", name, runner=lambda s, d, i: d.write_bytes(b"v" * 3900),
+                                                    prober=lambda p: info))
+        self.assertEqual((SEEDS_ORIG_DIR / name).stat().st_size, 3900)  # a 2.5% saving still counts here
 
 
 if __name__ == "__main__":

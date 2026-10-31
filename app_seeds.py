@@ -46,12 +46,35 @@ def detect_content_type(filename: str) -> str:
 
 
 MAX_THUMB_BYTES = 5 * 1024 * 1024
-_TOO_BIG = "Posts can be up to {} MB."
+def _too_big(limit: int) -> str:
+    if limit > config.MAX_UPLOAD_BYTES:
+        return (f"Videos can be uploaded up to {limit / 1024 ** 3:.0f} GB, as long as GFC's optimised copy "
+                f"comes to {config.MAX_UPLOAD_BYTES / 1024 ** 3:.0f} GB or less.")
+    return f"Posts can be up to {limit // (1024 * 1024)} MB."
 
 
-def _save_upload(file: UploadFile, dest) -> int:
-    """Copy an upload to `dest` in pieces; 413 (and nothing kept) past config.MAX_UPLOAD_BYTES."""
-    limit = config.MAX_UPLOAD_BYTES
+def check_big_video(path) -> None:
+    """
+    A video over config.MAX_UPLOAD_BYTES is kept only if its optimised copy will fit (the same
+    estimate the app shows before uploading); otherwise 413 with how to export it smaller.
+    """
+    size = path.stat().st_size
+    if size <= config.MAX_UPLOAD_BYTES:
+        return
+    try:
+        info = audio_stream.probe_video(path)
+    except Exception:
+        info = None
+    if not info:
+        raise HTTPException(status_code=413, detail=(
+            f"This video is over {config.MAX_UPLOAD_BYTES / 1024 ** 3:.0f} GB and GFC can't read its length "
+            "to optimise it. Export it as MP4 (H.264) under 1 GB, then post it again."))
+    if audio_stream.estimated_optimized_bytes(info, size) > config.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=audio_stream.bitrate_tip(info, config.MAX_UPLOAD_BYTES))
+
+
+def _save_upload(file: UploadFile, dest, limit: int) -> int:
+    """Copy an upload to `dest` in pieces; 413 (and nothing kept) past `limit`."""
     size = 0
     file.file.seek(0)
     with open(dest, "wb") as out:
@@ -63,7 +86,7 @@ def _save_upload(file: UploadFile, dest) -> int:
             if size > limit:
                 out.close()
                 dest.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail=_TOO_BIG.format(limit // (1024 * 1024)))
+                raise HTTPException(status_code=413, detail=_too_big(limit))
             out.write(chunk)
     return size
 
@@ -273,8 +296,13 @@ async def seeds_upload(
     # Persist original: copied in 1 MB pieces from the request's temp file, never all in memory
     # (a 1 GB video on a 1 GB server would otherwise run it out of memory)
     try:
-        file_size = await run_in_threadpool(_save_upload, file, orig_path)
+        is_video = detect_content_type(file.filename or "") == "video"
+        limit = config.MAX_VIDEO_UPLOAD_BYTES if is_video else config.MAX_UPLOAD_BYTES
+        file_size = await run_in_threadpool(_save_upload, file, orig_path, limit)
+        if is_video:
+            await run_in_threadpool(check_big_video, orig_path)
     except HTTPException:
+        orig_path.unlink(missing_ok=True)
         raise
     except Exception as ex:
         orig_path.unlink(missing_ok=True)
