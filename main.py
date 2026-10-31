@@ -37,6 +37,8 @@ from app_release import router as release_router
 from app_recovery import router as recovery_router
 from app_bridge import router as bridge_router
 from app_follows import router as follows_router
+from app_ads import router as ads_router
+import ads
 import app_follows
 import audio_stream
 import blockchain
@@ -104,6 +106,7 @@ app.include_router(release_router)
 app.include_router(recovery_router)
 app.include_router(bridge_router)
 app.include_router(follows_router)
+app.include_router(ads_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
@@ -196,6 +199,7 @@ def init_db():
         UNIQUE(seed_id, owner)
     )''')
     app_follows.init_tables(conn)
+    ads.init_tables(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS bookmarks (
         id TEXT PRIMARY KEY,
         seed_id TEXT NOT NULL,
@@ -568,7 +572,12 @@ async def transaction_history(wallet_id: str = None):
 def feed(caller: Caller = Depends(caller_from_query)):
     """Get feed - all seeds with per-user engagement state"""
     from app_engagement import get_feed_items
-    return get_feed_items(caller.owner("read"))
+    from app_ads import feed_items_for
+    owner = caller.owner("read")
+    result = get_feed_items(owner)
+    # Ads: one after every ads.AD_EVERY posts, for logged-in viewers (see ads.py)
+    result["items"] = ads.apply_to_feed(result["items"], owner, lambda ids: feed_items_for(ids, owner))
+    return result
 
 
 # ============================================================================
