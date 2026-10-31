@@ -1,5 +1,5 @@
 """
-Tests for big posts (up to config.MAX_UPLOAD_BYTES, 1 GB by default): uploads and files from
+Tests for big posts (up to config.MAX_UPLOAD_BYTES, 5 GB by default; videos up to 8 GB before optimising): uploads and files from
 peers go to disk in pieces, never whole into memory; over the limit is refused; videos posted
 without a thumbnail get one from the node; ClamAV scans files that big.
 
@@ -52,8 +52,11 @@ class BigUploadTests(unittest.TestCase):
         return self.client.post("/seeds/upload", data={"title": "Big"}, headers=headers,
                                 files={"file": (name, data, "video/mp4")})
 
-    def test_default_limit_is_a_gigabyte(self):
-        self.assertEqual(self.saved[1], 1024 * 1024 * 1024)
+    def test_default_limits(self):
+        self.assertEqual(self.saved[1], 5 * 1024 ** 3)   # posts
+        self.assertEqual(self.saved[2], 8 * 1024 ** 3)   # videos as uploaded, before optimising
+        import app_seeds
+        self.assertEqual(app_seeds.download_limit(), 4000 * 1024 * 1024)  # zips: ClamAV's ceiling
 
     def test_uploads_up_to_the_limit_are_saved_whole_and_bigger_ones_refused(self):
         h = self.account()
@@ -235,9 +238,14 @@ class BigUploadTests(unittest.TestCase):
         modest = {"width": 1920, "height": 1080, "kbps": 9000, "duration": 300}
         self.assertEqual(audio_stream.estimated_optimized_bytes(modest, 337_000_000), 337_000_000)  # kept as is
         hour_4k = {"width": 3840, "height": 2160, "kbps": 80000, "duration": 3600}
-        tip = audio_stream.bitrate_tip(hour_4k, 1024 ** 3)
+        tip = audio_stream.bitrate_tip(hour_4k, 1024 ** 3, int(3.5 * 1024 ** 3))
         self.assertIn("60 min at 3840x2160", tip)
-        self.assertIn("Export it at 2 Mbit/s or less", tip)  # 1 GB over an hour, less the audio
+        self.assertIn("Export it at 2.1 Mbit/s or less", tip)  # 1 GB over an hour, less the audio
+        self.assertIn("at 720p", tip)
+        self.assertEqual(audio_stream.target_mbps(86 * 60, 1024 ** 3), 1.4)  # an 86-minute show
+        # Not oversized (2.3 Mbit/s 1080p) but over 1 GB as it is: the tip gives its real size
+        show = {"width": 1920, "height": 1080, "kbps": 2300, "duration": 86 * 60}
+        self.assertIn("about 1.48 GB", audio_stream.bitrate_tip(show, 1024 ** 3, int(1.48 * 1024 ** 3)))
 
     def test_a_video_over_the_limit_is_replaced_by_any_smaller_copy(self):
         config.MAX_UPLOAD_BYTES = 3000

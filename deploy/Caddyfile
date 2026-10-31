@@ -3,9 +3,9 @@
 __DOMAIN__ {
 	encode gzip
 
-	# Largest accepted upload: 4 GB videos (optimised to 1 GB by the node) plus the thumbnail and form fields
+	# Largest accepted upload: 8 GB videos (optimised to 5 GB or less by the node) plus the thumbnail and form fields
 	request_body {
-		max_size 4200MB
+		max_size 8300MB
 	}
 
 	# Operator/debug endpoints: reachable only on the server itself (curl 127.0.0.1:8000/...)

@@ -75,7 +75,9 @@ BRIDGE_FAUCET_HOLD_DAYS = float(os.environ.get("GFC_BRIDGE_FAUCET_HOLD_DAYS", "1
 
 # Largest post (upload or file synced from a peer). Uploads are streamed to disk, never held in
 # memory, so this is about disk and bandwidth. Caddy's request_body max_size must allow it too.
-MAX_UPLOAD_BYTES = int(float(os.environ.get("GFC_MAX_UPLOAD_MB", "1024")) * 1024 * 1024)
+MAX_UPLOAD_BYTES = int(float(os.environ.get("GFC_MAX_UPLOAD_MB", "5120")) * 1024 * 1024)
 # Videos may arrive bigger (up to this) when the node's optimised copy will fit MAX_UPLOAD_BYTES:
 # audio_stream.estimated_optimized_bytes() decides at upload, and the original is replaced
-MAX_VIDEO_UPLOAD_BYTES = int(float(os.environ.get("GFC_MAX_VIDEO_UPLOAD_MB", "4096")) * 1024 * 1024)
+MAX_VIDEO_UPLOAD_BYTES = int(float(os.environ.get("GFC_MAX_VIDEO_UPLOAD_MB", "8192")) * 1024 * 1024)
+# Downloads (zips) are virus-scanned, and ClamAV can't scan files over 4 GB
+CLAMAV_MAX_BYTES = 4000 * 1024 * 1024
