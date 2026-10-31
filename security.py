@@ -350,9 +350,18 @@ def sanitize_incoming_rows(table: str, columns: List[str], rows: list,
     on the whitelist is dropped. Incoming users get an unusable password.
     """
     allowed = {c.strip() for c in table_columns.get(table, "").split(",") if c.strip()}
-    keep = [i for i, c in enumerate(columns) if c in allowed]
+    # Peer JSON can hold anything: only string column names, each once, and rows that are lists
+    # of the right length (one malformed row must not take the rest of the batch down with it)
+    if not isinstance(columns, (list, tuple)) or not isinstance(rows, (list, tuple)):
+        return [], []
+    keep, seen = [], set()
+    for i, c in enumerate(columns):
+        if isinstance(c, str) and c in allowed and c not in seen:
+            keep.append(i)
+            seen.add(c)
     safe_columns = [columns[i] for i in keep]
-    safe_rows = [[row[i] for i in keep] for row in rows if len(row) == len(columns)]
+    safe_rows = [[row[i] for i in keep] for row in rows
+                 if isinstance(row, (list, tuple)) and len(row) == len(columns)]
     if table == "users" and safe_columns:
         safe_columns.append("password")
         safe_rows = [r + [REMOTE_USER_PASSWORD] for r in safe_rows]

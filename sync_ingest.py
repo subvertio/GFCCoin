@@ -184,7 +184,7 @@ def ingest_rows(table: str, columns: List[str], rows: list, db_path: str = DB_PA
                 cursor = conn.execute(
                     f"INSERT OR IGNORE INTO {table} ({col_names}) VALUES ({placeholders})", row
                 )
-            except sqlite3.Error as e:
+            except (sqlite3.Error, OverflowError, ValueError) as e:  # e.g. an integer too big for SQLite
                 result["errors"] += 1
                 if result["errors"] <= 3:
                     logger.info(f"Sync insert error for {table} row: {e}")

@@ -88,7 +88,7 @@ def check_zip(path: Path) -> Tuple[bool, str, Dict]:
     try:
         with zipfile.ZipFile(path) as zf:
             infos = zf.infolist()
-    except (zipfile.BadZipFile, OSError) as ex:
+    except Exception as ex:  # a crafted zip can trip many errors (NotImplementedError, ValueError, EOFError...)
         return False, f"not a readable zip ({type(ex).__name__})", {}
     if len(infos) > MAX_ENTRIES:
         return False, f"too many files ({len(infos)})", {}
