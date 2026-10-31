@@ -78,3 +78,6 @@ wallet.py
 wallet_verifier.py
 __mw_patch.py
 __routes_patch.py
+
+# Hypothesis example database (fuzz tests)
+.hypothesis/
