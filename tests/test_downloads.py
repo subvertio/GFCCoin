@@ -235,6 +235,30 @@ class DownloadTests(unittest.TestCase):
         self.assertNotIn("download", self.feed_item(sid))
         self.assertEqual(self.client.get(f"/originals/{self.filename(sid)}").status_code, 200)
 
+    # ---------- scanner errors (not detections) ----------
+
+    def test_a_scanner_error_is_retried_then_left_to_the_daily_rescan(self):
+        _, token = self.account()
+        sid = self.upload(token)["id"]
+        self.assertEqual(filescan.scan_seed(sid, runner=scanner(filescan.ERROR, "can't connect to clamd")), "error")
+        scheduled = []
+        for delay in filescan.RETRY_DELAYS_S:
+            self.assertEqual(filescan.after_scan(sid, filescan.ERROR, schedule=lambda d, s: scheduled.append((d, s))), delay)
+            self.assertTrue(self.feed_item(sid)["download"]["retrying"])
+        self.assertIsNone(filescan.after_scan(sid, filescan.ERROR, schedule=lambda d, s: scheduled.append((d, s))))
+        self.assertEqual([d for d, _ in scheduled], list(filescan.RETRY_DELAYS_S))  # 1, 5 and 15 minutes
+        self.assertFalse(self.feed_item(sid)["download"]["retrying"])  # now the daily rescan's job
+        web = self.client.get("/web").text
+        self.assertIn("couldn&rsquo;t check this file yet", web)
+        self.assertNotIn("didn", web.split("couldn&rsquo;t check")[0][-200:])
+        # The post isn't removed or blocked for good: a later scan that works makes it downloadable
+        self.assertEqual(filescan.scan_seed(sid, runner=scanner(filescan.CLEAN)), "clean")
+        self.assertIsNone(filescan.after_scan(sid, filescan.CLEAN))
+        self.assertEqual(self.feed_item(sid)["download"]["status"], "clean")
+
+    def test_a_detection_is_never_retried(self):
+        self.assertIsNone(filescan.after_scan("x" + uuid.uuid4().hex, filescan.INFECTED, schedule=lambda d, s: self.fail("retried")))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
