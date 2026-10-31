@@ -4,6 +4,7 @@ Handles profile viewing, editing, and avatar uploads.
 """
 
 import re
+import secrets
 import sqlite3
 import datetime
 from pathlib import Path
@@ -124,30 +125,55 @@ async def update_my_profile(
     return profile_dict(row)
 
 
+MAX_AVATAR_BYTES = 5 * 1024 * 1024
+# Avatars are served from this node's own origin (/avatars), so only real images, recognised by
+# their bytes: never HTML, SVG or anything a browser would run (the name's extension is ignored)
+_IMAGE_MAGIC = ((b"\xff\xd8\xff", ".jpg"), (b"\x89PNG\r\n\x1a\n", ".png"), (b"GIF87a", ".gif"), (b"GIF89a", ".gif"))
+
+
+def avatar_ext(raw: bytes) -> Optional[str]:
+    """The extension for a JPEG, PNG, GIF or WebP image, or None for anything else."""
+    for magic, ext in _IMAGE_MAGIC:
+        if raw.startswith(magic):
+            return ext
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
 @router.post("/users/me/avatar")
 async def upload_avatar(
     avatar: UploadFile = File(...),
     caller: Caller = Depends(caller_from_form),
 ):
-    """Upload or replace the user's avatar image."""
+    """Upload or replace the user's avatar: a JPEG, PNG, GIF or WebP image, up to 5 MB."""
     owner = caller.require("post")
 
-    # Read file
+    # Read file (one byte over the limit is enough to refuse it)
     try:
-        raw = await avatar.read()
+        raw = await avatar.read(MAX_AVATAR_BYTES + 1)
     except Exception as ex:
         raise HTTPException(status_code=500, detail=f"failed to read avatar: {ex}")
 
     if len(raw) == 0:
         raise HTTPException(status_code=400, detail="empty file")
+    if len(raw) > MAX_AVATAR_BYTES:
+        raise HTTPException(status_code=413, detail="profile photos can be up to 5 MB")
+    ext = avatar_ext(raw)
+    if not ext:
+        raise HTTPException(status_code=400, detail="a profile photo must be a JPEG, PNG, GIF or WebP image")
 
-    # Determine extension and filename
-    ext = safe_ext(avatar.filename or "avatar.jpg")
-    avatar_filename = f"{owner.lower()}_avatar{ext}"
+    # A new name each time, so apps and browsers don't keep showing the old photo from cache
+    avatar_filename = f"{SAFE_RE.sub('_', owner.lower())}_avatar_{secrets.token_hex(4)}{ext}"
     avatar_path = AVATAR_DIR / avatar_filename
 
-    # Delete any previous avatar for this user (different extension)
-    for old in AVATAR_DIR.glob(f"{owner.lower()}_avatar.*"):
+    # Delete this user's previous avatars: name_avatar.ext (older nodes) and name_avatar_xxxxxxxx.ext,
+    # exactly, so another user whose name starts the same way keeps theirs
+    stem = SAFE_RE.sub('_', owner.lower())
+    previous = list(AVATAR_DIR.glob(f"{stem}_avatar.*")) + list(AVATAR_DIR.glob(f"{stem}_avatar_????????.*"))
+    for old in previous:
+        if old.name == avatar_filename:
+            continue
         try:
             old.unlink()
         except Exception:
