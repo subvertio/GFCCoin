@@ -118,7 +118,8 @@ def main(argv=None) -> int:
         print("release:", releases.pay_releases(cfg, store, escrow_key))
 
     def do_reconcile() -> bool:
-        report = reconcile(cfg, store, bridge, pauser_key)
+        report = reconcile(cfg, store, bridge, pauser_key,
+                           own_keys=[relayer_key] + [a._key for a in _attesters(cfg)])
         print(f"reconcile: {'ok' if report.ok else 'PROBLEMS'} outstanding={report.outstanding_cents} "
               f"escrow={report.escrow_cents} unpaid={report.unpaid_release_cents}"
               + (" (bridge paused)" if report.paused else ""))

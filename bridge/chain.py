@@ -95,6 +95,10 @@ class Chain:
         values = decode(list(returns), bytes.fromhex(out[2:]))
         return values[0] if len(values) == 1 else values
 
+    def code(self, address: str) -> bytes:
+        """The code at an address: empty for a plain wallet, 0xef0100 + target for an EIP-7702 delegation."""
+        return bytes.fromhex(self.rpc("eth_getCode", [address, "latest"])[2:])
+
     def logs(self, address: str, topic0: str, from_block: int, to_block: int, chunk: int = 5_000) -> List[dict]:
         out = []
         start = from_block

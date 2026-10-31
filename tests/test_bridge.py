@@ -403,6 +403,30 @@ class BridgeServiceTest(unittest.TestCase):
 
     # ------------------------------------------------------------------ reconcile
 
+    def test_reconcile_pauses_when_a_watched_wallet_is_taken_over(self):
+        self.deposit(500_00)
+        self.relay()
+        owner = self._account()  # a Safe owner, say
+        cfg = replace(self.cfg, watch_addresses=[owner.address])
+        attester = self.attester_accts[0]
+        self.assertTrue(reconcile(cfg, self.store, self.bridge, self.pauser.key.hex(),
+                                  own_keys=[attester.key.hex()]).ok)
+
+        # The attester's key signed an EIP-7702 authorization: its account now runs someone's contract
+        sweeper = "0x" + "5e" * 20
+        self.chain.rpc("anvil_setCode", [attester.address, "0xef0100" + sweeper[2:]])
+        report = reconcile(cfg, self.store, self.bridge, self.pauser.key.hex(), own_keys=[attester.key.hex()])
+        self.assertFalse(report.ok)
+        self.assertTrue(report.paused)
+        self.assertTrue(self.bridge.paused())
+        self.assertTrue(any(attester.address in p and "EIP-7702" in p and sweeper[2:] in p
+                            for p in report.problems), report.problems)
+
+        # A configured owner with any code is flagged too
+        self.chain.rpc("anvil_setCode", [owner.address, "0x6000"])
+        report = reconcile(cfg, self.store, self.bridge)
+        self.assertTrue(any(owner.address in p and "contract code" in p for p in report.problems))
+
     def test_reconcile_pauses_on_unbacked_mint(self):
         self.deposit(500_00)
         self.relay()

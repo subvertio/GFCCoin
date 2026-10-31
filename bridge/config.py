@@ -51,6 +51,11 @@ class BridgeConfig:
     approvals_file: Optional[str] = None    # ledger tx_hashes approved past manual review
     # Other nodes' ledger DBs, to check they agree on the escrow balance
     peer_ledger_dbs: List[str] = field(default_factory=list)
+    # Plain-wallet (EOA) addresses that must never get code: every attester, the pauser,
+    # the relayer and each Safe owner. Reconcile pauses the bridge if one does (an EIP-7702
+    # delegation means someone made that key sign an authorization). The keys this service
+    # holds are watched too, without being listed here. Never list the Safe itself.
+    watch_addresses: List[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "BridgeConfig":
@@ -91,6 +96,7 @@ class BridgeConfig:
             denylist_file=opt("GFC_BRIDGE_DENYLIST_FILE"),
             approvals_file=opt("GFC_BRIDGE_APPROVALS_FILE"),
             peer_ledger_dbs=[p for p in e.get("GFC_BRIDGE_PEER_LEDGER_DBS", "").split(",") if p],
+            watch_addresses=[a.strip() for a in e.get("GFC_BRIDGE_WATCH_ADDRESSES", "").split(",") if a.strip()],
         )
 
 

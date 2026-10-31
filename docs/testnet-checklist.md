@@ -32,7 +32,7 @@ committed by accident.
 | Role | What it is | How to create it | Needs test ETH |
 |---|---|---|---|
 | **Deployer** | Deploys the contracts and wires roles, then hands admin to the Safe and keeps nothing | `cast wallet import gfc-testnet-deployer --interactive` (Foundry's encrypted keystore: paste a fresh key from a new MetaMask account, or use `cast wallet new` in your own terminal) | Yes, about 0.05 (deploying is about 4.4M gas) |
-| **Safe (admin)** | 2-of-3 multisig: the treasury/admin role on both contracts. It can unpause, change limits and grant roles | In the Safe web app (from Safe's official site), pick the **Base Sepolia** network and create a Safe with 3 owner addresses you control (for example 3 MetaMask accounts or hardware wallets) and threshold 2 | The owners need a little for signing transactions |
+| **Safe (admin)** | 2-of-3 multisig: the treasury/admin role on both contracts. It can unpause, change limits and grant roles | In the Safe web app (from Safe's official site), pick the **Base Sepolia** network and create a Safe with 3 owner addresses you control and threshold 2. On the testnet, 3 fresh MetaMask accounts are fine; for mainnet the owners must be hardware wallets (see A2b) | The owners need a little for signing transactions |
 | **Pauser** | Fast emergency stop on the token and the bridge. It can pause, never unpause | A separate MetaMask account. For the bridge service's auto-pause, also save its key as a file (A3) | Yes, a little |
 | **Attesters ×3** | Each signs mints after checking the deposit on its own ledger | Key files (A3). On this testnet all three run in one bridge process; production puts them on 3 machines | No (they only sign) |
 | **Relayer** | Submits mints and pays their gas | Key file (A3) | Yes, about 0.05 |
@@ -41,6 +41,34 @@ committed by accident.
 **Test ETH:** use a Base Sepolia faucet from **Base's official docs** ("Network faucets"). Some
 faucets need a Coinbase or Alchemy login. Fund the deployer, the relayer, the pauser and your
 test user.
+
+### A2b. Key safety: EIP-7702 and hot keys
+
+Binance's hot wallets were drained in October 2026 after its signing system was made to sign
+an **EIP-7702 authorization**. With EIP-7702 (live on Ethereum and Base), a plain wallet that
+signs one hands its whole account to a contract. The attacker never needs the private key: a
+single signature on the wrong prompt is enough. The bridge's rules:
+
+- **Never approve an EIP-7702 request** on any bridge wallet: the Safe owners, the pauser, the
+  attesters, the relayer or the deployer. In MetaMask and other wallets it shows up as
+  "Switch to smart account", "Upgrade your account", "Smart account" or "Set code" /
+  "Authorization". Decline it, even if a site you trust asks. These wallets only ever sign
+  ordinary transactions, and the attesters only sign mint requests.
+- **Safe owners:** on the testnet, 3 fresh MetaMask accounts used for nothing else. For
+  mainnet, **3 hardware wallets** (each in its own place, with its own recovery phrase), never
+  browser-extension accounts. Under EIP-7702 a delegated owner's contract can approve any Safe
+  transaction in that owner's name. Two owners taken over is the whole admin role.
+- **Hot key files** (relayer, pauser, attesters, escrow) live only in `D:\gfc-testnet\keys`, are
+  read only by the bridge service, and hold only what their role needs: the relayer holds a
+  little gas, the attesters and the pauser hold none. On mainnet:
+  - each attester runs on its **own machine**, with its own node and its own operator;
+  - the escrow key moves to an **HSM or KMS** with Ed25519 support, and the release limits stay low;
+  - the relayer and pauser are on a different machine from the attesters.
+- **The bridge watches for takeovers.** Every `reconcile` reads the code of each watched
+  wallet: the keys the service holds, plus `GFC_BRIDGE_WATCH_ADDRESSES` (B6). Any code there,
+  such as `0xef0100…`, which is an EIP-7702 delegation, makes it report the takeover and pause
+  the bridge. Then rotate that key: revoke its role from the Safe, grant a new address, and
+  replace the owner in the Safe.
 
 ### A3. Key files for the bridge service
 
@@ -79,6 +107,7 @@ the variable unset and `new-escrow-key` will prompt you instead.
 **Public values only:**
 
 - the Safe address;
+- the 3 Safe owner addresses (to watch for takeovers);
 - the pauser address;
 - the 3 attester addresses (from A3);
 - the deployer keystore name (`gfc-testnet-deployer`);
@@ -208,6 +237,9 @@ $env:GFC_BRIDGE_ATTESTER_KEY_FILE = 'D:\gfc-testnet\keys\attester0.key'
 $env:GFC_BRIDGE_EXTRA_ATTESTER_KEY_FILES = 'D:\gfc-testnet\keys\attester1.key,D:\gfc-testnet\keys\attester2.key'
 $env:GFC_BRIDGE_ESCROW_KEY_FILE = 'D:\gfc-testnet\keys\escrow-84532.json'
 $env:GFC_BRIDGE_ESCROW_PASSPHRASE = '<you type it in this terminal>'
+# Plain wallets that must never get code (A2b): the 3 Safe owners, plus the pauser and the
+# attesters (the keys above are watched anyway; listing them as well does no harm). Never the Safe itself.
+$env:GFC_BRIDGE_WATCH_ADDRESSES = '<owner1>,<owner2>,<owner3>,<pauser>,<attester0>,<attester1>,<attester2>'
 .\.venv\Scripts\python.exe -m bridge reconcile    # must say ok before anything moves
 .\.venv\Scripts\python.exe -m bridge run --interval 30
 ```
@@ -237,6 +269,7 @@ $env:GFC_BRIDGE_ESCROW_PASSPHRASE = '<you type it in this terminal>'
 | Release limit | Bridge out more than `GFC_BRIDGE_MAX_RELEASE_CENTS` | Held until `python -m bridge approve-release <nonce>` |
 | Refund | A deposit marked `held` | `python -m bridge refund <tx_hash>` returns it once |
 | Unbacked supply | Stop the bridge, then have 2 attester keys sign a mint with no deposit (a one-off script, testnet only) | `reconcile` reports it and auto-pauses the bridge |
+| EIP-7702 takeover | With a throwaway account added to `GFC_BRIDGE_WATCH_ADDRESSES`, sign and send an EIP-7702 authorization for it (`cast send --auth <any contract> ...` from that account, testnet only) | `reconcile` reports "delegated to … (EIP-7702)" and auto-pauses the bridge. Remove the account from the list and unpause from the Safe |
 | Restart safety | Kill the service in the middle of a release and start it again | Paid once, never twice |
 
 ### B9. Cleanup or keep running
@@ -256,5 +289,9 @@ delete the key files.
 - [ ] The run has lasted at least two weeks, with the service running continuously.
 - [ ] Before mainnet, the attesters move to 3 separate machines and operators. The in-process
   mode is testnet-only.
+- [ ] Before mainnet, the Safe owners are 3 hardware wallets, the escrow key is in an HSM or
+  KMS, and `GFC_BRIDGE_WATCH_ADDRESSES` lists every owner, attester and the pauser (A2b).
+- [ ] No bridge wallet has ever approved an EIP-7702 authorization: `reconcile`'s takeover
+  check has stayed clean the whole run.
 - [ ] The audit (see `docs/dex-plan.md` section 6) is booked, with this testnet's addresses in
   scope for reproduction.

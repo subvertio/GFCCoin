@@ -8,13 +8,18 @@ Checks:
   c. every peer ledger DB (other attesters' nodes) also sees escrow >= wrapped supply
   d. every MintedFromLedger event matches a valid escrow deposit on this ledger
      (same destination and amount less the relay fee)
+  e. no watched wallet (attesters, pauser, relayer, Safe owners) has code. Under EIP-7702 a
+     plain wallet that signs an authorization hands its account to a contract (how Binance's
+     hot wallet was swept in October 2026): its code becomes 0xef0100 + that contract.
+     A signature from the key is still needed, so code here means the key's signing was
+     abused, and everything it can do should be treated as hostile.
 Escrow may hold more than that (relay fees, deposits awaiting mint or refund).
 """
 
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 import blockchain
 from bridge import deposits
@@ -25,6 +30,7 @@ from bridge.store import Store
 logger = logging.getLogger("gfc.bridge.reconcile")
 
 CENT = 10 ** 16
+DELEGATION_PREFIX = bytes.fromhex("ef0100")  # EIP-7702: 0xef0100 || 20-byte delegate address
 
 
 @dataclass
@@ -40,9 +46,37 @@ class Report:
         return not self.problems
 
 
+def takeover_problems(chain, addresses: Iterable[str]) -> List[str]:
+    """Check e: watched plain wallets that have code (an EIP-7702 delegation, or anything else)."""
+    problems, seen = [], set()
+    for addr in addresses:
+        if not addr or addr.lower() in seen:
+            continue
+        seen.add(addr.lower())
+        try:
+            code = chain.code(addr)
+        except RPCError as e:
+            problems.append(f"could not read the code of watched wallet {addr}: {e}")
+            continue
+        if code.startswith(DELEGATION_PREFIX) and len(code) == 23:
+            problems.append(f"watched wallet {addr} is delegated to 0x{code[3:].hex()} (EIP-7702): "
+                            "its key signed an authorization; rotate it")
+        elif code:
+            problems.append(f"watched wallet {addr} has contract code: it should be a plain wallet")
+    return problems
+
+
+def watched_addresses(cfg: BridgeConfig, own_keys: Iterable[Optional[str]] = ()) -> List[str]:
+    """The configured watch list plus the addresses of the EVM keys this service holds."""
+    from eth_account import Account
+    return list(cfg.watch_addresses) + [Account.from_key(k).address for k in own_keys if k]
+
+
 def reconcile(cfg: BridgeConfig, store: Store, bridge: BridgeContract,
-              pauser_key: Optional[str] = None) -> Report:
+              pauser_key: Optional[str] = None, own_keys: Iterable[Optional[str]] = ()) -> Report:
+    """own_keys: the other EVM keys this service holds (relayer, in-process attesters), to watch too."""
     report = Report()
+    report.problems += takeover_problems(bridge.chain, watched_addresses(cfg, [pauser_key, *own_keys]))
     minted, out = bridge.total_minted_cents(), bridge.total_bridged_out_cents()
     report.outstanding_cents = minted - out
     supply = token_total_supply(bridge.chain, bridge.token())

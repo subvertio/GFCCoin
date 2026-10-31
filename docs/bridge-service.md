@@ -42,11 +42,16 @@ run against a throwaway ledger and a local `anvil` chain.
 
 **Reconcile**
 
-`reconcile.py` runs four checks:
+`reconcile.py` runs five checks:
 - token supply = (minted − bridged out) × 10¹⁶;
 - escrow ≥ wrapped supply + burned-but-unpaid releases;
 - every peer DB also sees enough escrow;
-- every `MintedFromLedger` event matches a valid deposit.
+- every `MintedFromLedger` event matches a valid deposit;
+- no watched wallet has code. The watched wallets are the EVM keys this service holds,
+  plus `GFC_BRIDGE_WATCH_ADDRESSES`, which should list the attesters, the pauser and the Safe
+  owners. Under EIP-7702, a plain wallet that signs an authorization runs another contract's
+  code (`0xef0100` + its address). This is how Binance's hot wallet was swept in October 2026.
+  Code there means that key's signing was abused, so the key must be rotated.
 
 If any check fails, it pauses the bridge with the pauser key. In `run` mode the service
 moves no funds while reconcile is failing.
@@ -147,7 +152,8 @@ All configuration comes from `GFC_BRIDGE_*` environment variables (see `bridge/c
   - Keys are only ever read from files and are never logged.
   - httpx request logging is turned off, because RPC URLs often carry an API key.
 - **Optional:** `DENYLIST_FILE`, `APPROVALS_FILE`, `PEER_LEDGER_DBS`,
-  `FINALITY_SECONDS`, `CHAIN_FINALITY`, `START_BLOCK`.
+  `FINALITY_SECONDS`, `CHAIN_FINALITY`, `START_BLOCK`, and `WATCH_ADDRESSES`
+  (comma-separated plain wallets that must never get code; never the Safe itself).
 
 ## Commands
 
@@ -189,8 +195,11 @@ they're missing, it skips. It covers:
   - the release limits apply;
   - a release back to the escrow wallet is held;
   - the wrong escrow key is refused.
-- **Reconcile:** it pauses the bridge after a mint made with leaked attester keys that
-  has no deposit behind it.
+- **Reconcile:**
+  - it pauses the bridge after a mint made with leaked attester keys that has no deposit
+    behind it;
+  - it pauses the bridge when an attester's account is delegated under EIP-7702, and flags
+    a watched Safe owner that has code.
 
 ```powershell
 python -m unittest tests.test_bridge -v
@@ -211,6 +220,14 @@ python -m unittest tests.test_bridge -v
   to a bad wallet still needs a person: those tokens are already burned.
 - **The escrow key is hot.** It signs releases on the bridge host. Keep the release limits
   low, and move the key to an HSM or KMS with Ed25519 support if one is available.
+- **The EVM keys are hot too.** The relayer, pauser and attester keys are plain files on
+  the bridge host. Whoever can make one sign can also sign an EIP-7702 authorization and
+  take that account over. Keep them on separate machines (attesters apart from the
+  relayer), give each only what its role needs, and keep `WATCH_ADDRESSES` complete so
+  `reconcile` catches a takeover. The takeover check runs every interval, so it notices
+  after the fact; it doesn't prevent anything.
+- **Safe owners must be hardware wallets.** A delegated owner's contract can approve any Safe
+  transaction in that owner's name. The testnet checklist (A2b) has the wallet rules.
 - **The service writes to the live node's SQLite DB.** Payouts go into the same file the
   node uses. It works with SQLite locking, but load-test it alongside a running node on
   testnet.
