@@ -90,7 +90,8 @@ def record_id(record: dict) -> str:
 
 def verify_record(record: dict) -> bool:
     """True if signed by a pinned treasury key, well formed, for a real wallet key."""
-    signer = (record.get("signer") or "").lower()
+    signer = record.get("signer") or ""
+    signer = signer.lower() if isinstance(signer, str) else ""
     signature = record.get("signature") or ""
     if signer not in signing.treasury_pubkeys() or not isinstance(signature, str) or not signature:
         return False

@@ -57,7 +57,7 @@ def safe_name(name: str) -> str:
         stem = SAFE_RE.sub("_", stem).strip("._")
         ext  = SAFE_RE.sub("", ext)
         return (stem or "file") + ("." + ext if ext else "")
-    return SAFE_RE.sub("_", name)
+    return SAFE_RE.sub("_", name) or "file"  # e.g. "dir/": nothing left after the path
 
 def seed_row(sid: str, orig_file: str) -> Dict[str, Any]:
     """

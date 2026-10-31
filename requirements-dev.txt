@@ -1,0 +1,3 @@
+# Test-only dependencies (the node itself does not need these)
+# python -m pip install -r requirements.txt -r requirements-dev.txt
+hypothesis==6.131.0   # fuzz tests: tests/test_fuzz.py

@@ -80,6 +80,11 @@ Run the tests with:
 python -m unittest discover -s tests -v
 ```
 
+The fuzz tests (`tests/test_fuzz.py`) throw random and malformed input at the code that takes
+input from strangers: peer sync, signature checks, download zips and upload names. They need
+`pip install -r requirements-dev.txt` and are skipped without it. For a deeper run, set
+`GFC_FUZZ_EXAMPLES` (default 200 per test), for example to 3000.
+
 - Data is stored in `./data` by default. Set `GFC_DATA_DIR` to use another location.
 - To sync with peers, TCP port 6881 and UDP port 6882 must be reachable.
 - `gfc_backend.spec` builds a single-file Windows executable with PyInstaller.
