@@ -191,6 +191,11 @@ OPTIMIZE_MIN_SAVING = 0.25
 OPTIMIZE_CEILINGS = ((720, 5000), (1080, 10000), (1440, 16000), (2160, 35000), (10 ** 6, 60000))
 
 
+def MAX_STORED_BYTES() -> int:
+    import config
+    return config.MAX_UPLOAD_BYTES
+
+
 def ceiling_kbps(width: int, height: int) -> int:
     short = min(width, height) or 1080
     return next(kbps for side, kbps in OPTIMIZE_CEILINGS if short <= side)
@@ -225,8 +230,37 @@ def probe_video(src: Path) -> Optional[dict]:
         return None
     if not video or not kbps:
         return None
+    try:
+        duration = float(fmt.get("duration") or 0)
+    except ValueError:
+        duration = 0.0
     return {"width": int(video.get("width") or 0), "height": int(video.get("height") or 0), "kbps": kbps,
-            "audio": (audio or {}).get("codec_name")}
+            "duration": duration or src.stat().st_size * 8 / 1000 / kbps, "audio": (audio or {}).get("codec_name")}
+
+
+OPTIMIZE_AUDIO_KBPS = 192
+
+
+def estimated_optimized_bytes(info: dict, size: int) -> int:
+    """
+    About how big a video ends up after optimize_video (an upper bound: CRF 20 is usually under
+    the ceiling). Videos that aren't oversized are kept as uploaded. The app does the same maths.
+    """
+    ceiling = ceiling_kbps(info["width"], info["height"])
+    if info["kbps"] <= ceiling * 1.2:
+        return size
+    return int(info["duration"] * (ceiling + OPTIMIZE_AUDIO_KBPS) * 1000 / 8)
+
+
+def bitrate_tip(info: dict, limit: int) -> str:
+    """What to tell someone whose video would still be over `limit` after optimising."""
+    minutes = info["duration"] / 60
+    target = max(1.0, (limit * 8 / 1000 / max(info["duration"], 1) - OPTIMIZE_AUDIO_KBPS) / 1000)
+    est = estimated_optimized_bytes(info, 0) / 1024 ** 3
+    return (f"This video would still be about {est:.1f} GB after GFC optimises it ({minutes:.0f} min at "
+            f"{info['width']}x{info['height']}), and posts can be up to {limit / 1024 ** 3:.0f} GB. "
+            f"Export it at {target:.0f} Mbit/s or less (the video bitrate in your editor's export settings), "
+            f"or at a lower resolution, or trim it, then post it again.")
 
 
 def optimize_args(src: Path, dest: Path, info: dict, exe: str) -> list:
@@ -262,13 +296,15 @@ def optimize_video(seed_id: str, filename: str, runner=None, prober=None) -> boo
         info = (prober or probe_video)(src)
     except Exception:
         info = None
-    if not info or info["kbps"] <= ceiling_kbps(info["width"], info["height"]) * 1.2:
+    over_limit = src.stat().st_size > MAX_STORED_BYTES()
+    if not info or (info["kbps"] <= ceiling_kbps(info["width"], info["height"]) * 1.2 and not over_limit):
         return False  # unknown, or not oversized: keep exactly what was uploaded
     tmp = src.with_name(f".{src.name}.optimizing.mp4")
     try:
         (runner or run_optimize_ffmpeg)(src, tmp, info)
         before, after = src.stat().st_size, tmp.stat().st_size if tmp.exists() else 0
-        if not after or after > before * (1 - OPTIMIZE_MIN_SAVING):
+        # Over the post limit, any saving counts (it was accepted on the promise of this copy)
+        if not after or after > before * (1 if over_limit else 1 - OPTIMIZE_MIN_SAVING):
             return False
         os.replace(tmp, src)
         print(f"[MediaStream] {seed_id}: optimised {before / 1048576:.0f} MB -> {after / 1048576:.0f} MB "

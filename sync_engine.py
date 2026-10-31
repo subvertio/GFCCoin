@@ -626,7 +626,7 @@ class SyncEngine:
             file_size = int(file_size or 0)
         except (TypeError, ValueError):
             return
-        if file_size > config.MAX_UPLOAD_BYTES:
+        if file_size > max(config.MAX_UPLOAD_BYTES, config.MAX_VIDEO_UPLOAD_BYTES):
             logger.info(f"Skipping {file_type} {seed_id} from {peer.peer_address}: {file_size} bytes is over the limit")
             return
 
