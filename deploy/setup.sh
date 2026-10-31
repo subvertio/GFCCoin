@@ -72,6 +72,7 @@ fi
 chown root:gfc "$ETC_DIR/gfc.env"
 chmod 640 "$ETC_DIR/gfc.env"
 
+bash "$APP_DIR/deploy/clamav.sh" || echo "ClamAV setup failed: downloads stay held until it works (rerun gfc update)"
 bash "$APP_DIR/deploy/install-files.sh" "$DOMAIN"
 
 echo "==> Firewall: SSH, HTTP(S), P2P sync"

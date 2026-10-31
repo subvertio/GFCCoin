@@ -41,6 +41,13 @@ TREASURY_PUBKEYS = tuple(
     k.strip() for k in _env_treasury.split(",") if k.strip()
 ) if _env_treasury.strip() else PINNED_TREASURY_PUBKEYS
 
+# A node with its own treasury keys is a test network: it can't exchange ledger rows
+# with the real network, so nothing it allows reaches real GFC. Only the real network
+# (the pinned keys above) requires a verified phone number before an account can post.
+IS_TESTNET = bool(_env_treasury.strip())
+NETWORK = "testnet" if IS_TESTNET else "mainnet"
+REQUIRE_PHONE_TO_POST = not IS_TESTNET
+
 # Bridge escrow wallets (Ed25519 public keys), one per EVM chain ID: {chain_id: wallet}.
 # Every node enforces the escrow rules in blockchain.bridge_rule_violation() for these
 # wallets, so this is consensus config: change it in a release all nodes take.

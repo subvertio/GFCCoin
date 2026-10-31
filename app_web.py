@@ -21,6 +21,8 @@ download every model. Models far off screen are dropped again to save memory.
 import datetime
 import html
 import json
+import os
+import re
 import secrets
 import sqlite3
 from urllib.parse import quote
@@ -28,11 +30,14 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
+import app_release
+import exclusive
+import filescan
 import moderation
 import reposts
 from app_engagement import SEED_SELECT, seed_row_to_dict
 from app_share import (MODEL_VIEWER_EXTENSIONS, MODEL_VIEWER_SRC, MODEL_VIEWER_SRI,
-                       MODEL_VIEWER_STYLE_HASH, _app_link, _with_ref, clean_ref, public_base_url)
+                       MODEL_VIEWER_STYLE_HASH, public_base_url)
 from config import DB_PATH
 
 router = APIRouter()
@@ -87,7 +92,7 @@ def feed_page(page: int, page_size: int = PAGE_SIZE):
             return [], False
         rows = conn.execute(f"{SEED_SELECT} WHERE seeds.id IN ({', '.join('?' * len(ids))})", ids).fetchall()
         by_id = {r[0]: seed_row_to_dict(r) for r in rows}
-        seeds = [by_id[i] for i in ids if i in by_id]
+        seeds = filescan.apply_to_items(exclusive.apply_to_items([by_id[i] for i in ids if i in by_id]))
         for s in seeds:
             s["repost_of"] = reposts.public_info(reposts.repost_of(conn, s["id"]))
         return seeds, start + page_size < len(order)
@@ -134,12 +139,58 @@ def is_text_post(seed: dict) -> bool:
     return (seed.get("full") or "").lower().endswith(".txt") or (seed.get("content_type") or "").startswith("text")
 
 
+def _fmt_size(n) -> str:
+    n = int(n or 0)
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.1f} GB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024 ** 2:.1f} MB"
+    return f"{max(1, n // 1024)} KB"
+
+
+def download_box(seed: dict, page: str) -> str:
+    """A zip post: name, size, what's inside, the virus-scan result and (once clean) the Download button."""
+    e = lambda s: html.escape(str(s or ""), quote=True)  # noqa: E731
+    d = seed["download"]
+    inside = []
+    if d.get("files") is not None:
+        inside.append(f'{d["files"]} file{"s" if d["files"] != 1 else ""}')
+    if d.get("programs"):
+        inside.append(f'{d["programs"]} program{"s" if d["programs"] != 1 else ""}')
+    meta = " &middot; ".join([e(_fmt_size(d.get("size")))] + [e(x) for x in inside])
+    status = d.get("status")
+    if seed.get("exclusive"):
+        action = ('<p class="exclusive-note">Download it in the <a class="getapp-open" href="/app">GFC app</a> '
+                  'with a verified account.</p>')
+    elif filescan.downloadable(status) and seed.get("full"):
+        action = f'<a class="dl-button" href="{e(seed["full"])}" download>Download</a>'
+    else:
+        action = '<p class="dl-wait">Checking for viruses&hellip; the download opens when it passes.</p>'
+    scanned = ""
+    if status == filescan.CLEAN:
+        when = (d.get("scanned_at") or "")[:10]
+        scanned = (f'<p class="dl-scan">&#10003; Scanned by ClamAV{" on " + e(when) if when else ""}</p>'
+                   + (f'<p class="dl-hash">SHA-256 <code>{e(d["sha256"])}</code></p>' if d.get("sha256") else ""))
+    return (f'<div class="download"><p class="dl-name">&#128230; {e(d.get("name"))}</p>'
+            f'<p class="dl-meta">{meta}</p>{scanned}{action}</div>')
+
+
+EXCLUSIVE_BADGE = '<p class="exclusive">&#9733; Exclusive to the GFC Network</p>'
+
+
+def exclusive_note(text_post: bool) -> str:
+    what = "read the whole post" if text_post else "watch the full clip"
+    return (f'<p class="exclusive-note">Log in to the <a class="getapp-open" href="/app">GFC app</a> '
+            f'with a verified account to {what}.</p>')
+
+
 def render_card(seed: dict, now: datetime.datetime = None) -> str:
     e = lambda s: html.escape(str(s or ""), quote=True)  # noqa: E731
     sid = seed["id"]
     page = f"/p/{quote(sid, safe='')}"
     owner = seed["owner"] or "unknown"
-    filename = (seed.get("full") or "").removeprefix("/originals/")
+    is_exclusive = bool(seed.get("exclusive"))
+    filename = "" if is_exclusive else (seed.get("full") or "").removeprefix("/originals/")
     media_path = f"/originals/{quote(filename, safe='')}" if filename else ""
     thumb = seed.get("thumb") or ""
     thumb_path = f"/thumbs/{quote(thumb.removeprefix('/thumbs/'), safe='')}" if thumb else ""
@@ -150,7 +201,26 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
     when_html = f' · <a href="{e(page)}"><time datetime="{e(seed.get("created_at"))}">{e(when)}</time></a>' if when else ""
 
     media = ""
-    if text_post:
+    if seed.get("download"):
+        media = download_box(seed, page)
+        if is_exclusive:
+            media = EXCLUSIVE_BADGE + media
+            is_exclusive = False  # handled here: show the description as usual
+        text_post = False
+    elif is_exclusive:
+        teaser = seed.get("teaser") or ""
+        seconds = seed.get("teaser_seconds") or exclusive.TEASER_SECONDS
+        if ctype == "video" and teaser:
+            poster = f'<img src="{e(thumb_path)}" alt="" loading="lazy">' if thumb_path else ""
+            media = (f'<button type="button" class="media video" data-video="{e(teaser)}" data-exclusive="1" '
+                     f'data-poster="{e(thumb_path)}" aria-label="Play the {seconds}-second preview of {e(title or "video")} (muted)">'
+                     f'{poster}<span class="play" aria-hidden="true">&#9654;</span>'
+                     f'<span class="tag">{seconds}s preview</span></button>')
+        elif thumb_path:
+            media = f'<a class="media" href="{e(page)}"><img src="{e(thumb_path)}" alt="{e(title)}" loading="lazy"></a>'
+        text_post = ctype != "video"
+        media += exclusive_note(text_post)
+    elif text_post:
         pass  # text only, no media frame
     elif ctype == "image" and (thumb_path or media_path):
         media = (f'<a class="media" href="{e(page)}"><img src="{e(thumb_path or media_path)}" alt="{e(title)}" '
@@ -178,7 +248,12 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
         media = f'<a class="media placeholder" href="{e(page)}">Open in GFC to view</a>'
 
     description = seed.get("description") or ""
-    if text_post:
+    if is_exclusive:
+        show_title = True  # the title is all of an exclusive text post that's public
+        title = title or "GFC Exclusive"
+        body = EXCLUSIVE_BADGE + (f'<p class="text">{e(_shorten(description, DESCRIPTION_LIMIT))}</p>'
+                                  if description.strip() else "")
+    elif text_post:
         show_title = bool(title) and title != _title_from_body(description) and title != filename
         body = (f'<a class="text post" href="{e(page)}">{e(_shorten(description, TEXT_LIMIT))}</a>'
                 if description.strip() else "")
@@ -256,15 +331,38 @@ SCRIPT = """
     root.querySelectorAll('.model-slot').forEach(s => { near.observe(s); far.observe(s); });
     root.querySelectorAll('.more').forEach(a => more.observe(a));
   }
+  // "Get the GFC app" pop-up: after an exclusive's teaser, on "watch the full clip",
+  // and once per visit after a while on the page.
+  const getApp = document.getElementById('getapp');
+  function showGetApp() {
+    if (!getApp || !getApp.hidden) return;
+    getApp.hidden = false;
+    try { sessionStorage.setItem('gfc-getapp', '1'); } catch (e) {}
+    const first = getApp.querySelector('a');
+    if (first) first.focus();
+  }
+  function hideGetApp() { if (getApp) getApp.hidden = true; }
+  if (getApp) {
+    getApp.addEventListener('click', ev => {
+      if (ev.target === getApp || ev.target.closest('.getapp-close')) { ev.preventDefault(); hideGetApp(); }
+    });
+    document.addEventListener('keydown', ev => { if (ev.key === 'Escape') hideGetApp(); });
+    let seen = false;
+    try { seen = sessionStorage.getItem('gfc-getapp') === '1'; } catch (e) {}
+    if (!seen) setTimeout(showGetApp, 15000);
+  }
+  document.querySelectorAll('video[data-exclusive]').forEach(v => v.addEventListener('ended', showGetApp));
   function playVideo(btn) {
     const v = document.createElement('video');
     v.className = 'media'; v.controls = true; v.muted = true; v.playsInline = true; v.preload = 'metadata';
     if (btn.dataset.poster) v.poster = btn.dataset.poster;
     v.src = btn.dataset.video;
+    if (btn.dataset.exclusive) v.addEventListener('ended', showGetApp);
     btn.replaceWith(v);
     v.play().catch(() => {});
   }
   document.addEventListener('click', ev => {
+    if (getApp && ev.target.closest('.getapp-open')) { ev.preventDefault(); showGetApp(); return; }
     const video = ev.target.closest('.video');
     if (video) { ev.preventDefault(); playVideo(video); return; }
     const slot = ev.target.closest('.model-slot');
@@ -304,12 +402,110 @@ SCRIPT = """
 """
 
 
-def _security_headers(nonce: str) -> dict:
+def bonus_text() -> str:
+    """What a new account gets, from the node's own settings, so the header never over-promises."""
+    import blockchain
+    import first_post
+    grant = blockchain.NEW_USER_GRANT_CENTS // 100
+    bonus = first_post.amount_cents() // 100 if first_post.enabled() else 0
+    if bonus:
+        return f"{grant + bonus:,} GFC for signing up and your first post!"
+    return f"{grant:,} GFC for signing up!"
+
+
+def visitor_platform(user_agent: str) -> str:
+    """"android", "windows" or "other", from the browser's User-Agent (only picks the main download button)."""
+    ua = user_agent or ""
+    if "Android" in ua:
+        return "android"
+    if "Windows" in ua:
+        return "windows"
+    return "other"
+
+
+def get_app_popup(platform: str) -> str:
+    """
+    The "Get the GFC app" pop-up (hidden until the page script opens it): the sign-up bonus,
+    and the download for this visitor's device first. Unpublished downloads link to /app.
+    """
+    e = lambda s: html.escape(s, quote=True)  # noqa: E731
+    # Android goes to its install page (an APK from outside Google Play takes a few taps to install)
+    android = ("/app/android", False)
+    windows = ("/app/windows", True) if app_release.windows_info() else ("/app#windows", False)
+
+    def button(target, label, cls):
+        href, direct = target
+        return f'<a class="{cls}" href="{e(href)}"{" download" if direct else ""}>{label}</a>'
+    if platform == "android":
+        buttons = button(android, "Get GFC for Android", "primary") + button(windows, "Windows version", "secondary")
+    elif platform == "windows":
+        buttons = button(windows, "Get GFC for Windows", "primary") + button(android, "Android version", "secondary")
+    else:
+        buttons = button(android, "Get GFC for Android", "primary") + button(windows, "Get GFC for Windows", "primary")
+    return ('<div id="getapp" class="getapp" hidden role="dialog" aria-modal="true" aria-labelledby="getapp-title">'
+            '<div class="getapp-box">'
+            '<button type="button" class="getapp-close" aria-label="Close">&#10005;</button>'
+            '<h2 id="getapp-title">Get the GFC app</h2>'
+            f'<p class="getapp-bonus">{e(bonus_text())}</p>'
+            '<p>Create your account to watch GFC Exclusives in full, and earn GFC when people view what you post.</p>'
+            f'<div class="getapp-buttons">{buttons}</div>'
+            '<p class="getapp-more"><a href="/app">How to install</a> &middot; '
+            f'<a href="{e(app_release.SITE_URL)}" rel="noopener">Learn more about GFC</a></p>'
+            '</div></div>')
+
+
+def site_header() -> str:
+    """
+    Always at the top of the web feed and share pages (people arriving from X): the app
+    downloads, GalacticFederation.tech, and the sign-up bonus. Android opens /app/android (the
+    download and how to install it); an unpublished download links to /app ("coming soon").
+    """
+    e = lambda s: html.escape(s, quote=True)  # noqa: E731
+    android = '<a href="/app/android">'  # the download plus how to install it
+    windows = '<a href="/app/windows" download>' if app_release.windows_info() else '<a href="/app#windows">'
+    return (f'<header class="top">\n<nav aria-label="Get GFC">'
+            f'{android}Get GFC for Android</a>'
+            f'{windows}Get GFC for Windows</a>'
+            f'<a class="learn" href="{e(app_release.SITE_URL)}" rel="noopener">Learn more about GFC</a>'
+            f'</nav>\n<p class="promo">{e(bonus_text())}</p>\n</header>')
+
+
+# ---------- analytics ----------
+
+CLARITY_ID_RE = re.compile(r"^[a-z0-9]{6,20}$")
+# Hosts Microsoft Clarity loads its script from and sends its data to
+CLARITY_SCRIPT_SRC = "https://www.clarity.ms https://*.clarity.ms"
+CLARITY_CONNECT_SRC = "https://*.clarity.ms https://c.bing.com"
+
+
+def clarity_project_id() -> str:
+    """
+    The Microsoft Clarity project for the web feed and share pages (GFC_CLARITY_PROJECT_ID),
+    or "" when analytics is off. Only these pages get it: never /verify, /account or /app,
+    so phone numbers, codes and recovery forms are never recorded.
+    """
+    value = os.environ.get("GFC_CLARITY_PROJECT_ID", "").strip()
+    return value if CLARITY_ID_RE.match(value) else ""
+
+
+def clarity_script(project_id: str, page_type: str) -> str:
+    """Clarity's standard loader, plus a page_type tag ("feed" or "share") to filter by."""
+    return (f'(function(c,l,a,r,i,t,y){{c[a]=c[a]||function(){{(c[a].q=c[a].q||[]).push(arguments)}};'
+            f't=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;'
+            f'y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);}})'
+            f'(window,document,"clarity","script",{json.dumps(project_id)});'
+            f'window.clarity("set","page_type",{json.dumps(page_type)});')
+
+
+def _security_headers(nonce: str, analytics: bool = False) -> dict:
     # model-viewer fetches models from this node, decodes textures to blob: URLs and loads
     # Draco/KTX2 decoders (wasm in blob: workers) from gstatic when a model needs them.
-    csp = ("default-src 'none'; img-src 'self' blob: data:; media-src 'self'; "
-           f"script-src 'nonce-{nonce}' {MODEL_VIEWER_SRC} 'wasm-unsafe-eval'; "
-           "connect-src 'self' blob: data: https://www.gstatic.com; worker-src blob:; "
+    # With analytics on, Clarity's script and data hosts are allowed too.
+    extra_script = f" {CLARITY_SCRIPT_SRC}" if analytics else ""
+    extra_connect = f" {CLARITY_CONNECT_SRC}" if analytics else ""
+    csp = (f"default-src 'none'; img-src 'self' blob: data:{extra_connect}; media-src 'self'; "
+           f"script-src 'nonce-{nonce}' {MODEL_VIEWER_SRC}{extra_script} 'wasm-unsafe-eval'; "
+           f"connect-src 'self' blob: data: https://www.gstatic.com{extra_connect}; worker-src blob:; "
            f"style-src 'nonce-{nonce}' '{MODEL_VIEWER_STYLE_HASH}'; "
            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
     return {
@@ -330,18 +526,17 @@ def feed_html_response(request: Request, page: int = 1, featured: dict = None) -
     e = lambda s: html.escape(s, quote=True)  # noqa: E731
     base = public_base_url()
     url = f"{base}/" if page == 1 else f"{base}/web?page={page}"
-    ref = clean_ref(request.query_params.get("ref"))
-    app_link = _app_link(_with_ref("feed", ref), url, request.headers.get("user-agent", ""))
     cards, any_cards = render_cards(page, exclude=featured["id"] if featured else "")
     if not any_cards:
         cards = '<p class="end">No posts here yet.</p>'
     title = page_title = FEED_TITLE
     description = FEED_DESCRIPTION
     card_type, image_tags, extra_head, top = "summary", "", "", ""
+    header = site_header()
+    popup = get_app_popup(visitor_platform(request.headers.get("user-agent", "")))
     if featured:
         title, description, url = featured["title"], featured["description"], featured["url"]
         page_title = featured.get("page_title", title)
-        app_link = featured["app_link"]
         extra_head = featured.get("head", "")
         if featured.get("image"):
             card_type = "summary_large_image"
@@ -351,6 +546,9 @@ def feed_html_response(request: Request, page: int = 1, featured: dict = None) -
                '<h2 class="more-head">Latest on GFC</h2>\n')
     nonce = secrets.token_urlsafe(16)
     script = SCRIPT % {"src": json.dumps(MODEL_VIEWER_SRC), "sri": json.dumps(MODEL_VIEWER_SRI)}
+    clarity_id = clarity_project_id()
+    analytics = (f'<script nonce="{nonce}">{clarity_script(clarity_id, "share" if featured else "feed")}</script>\n'
+                 if clarity_id else "")
     body = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -372,10 +570,14 @@ def feed_html_response(request: Request, page: int = 1, featured: dict = None) -
 html{{background:#000}}
 body{{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#000;color:#e7e9ea;overflow-x:hidden}}
 a{{color:inherit}}
-.top{{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:12px;
-max-width:640px;margin:0 auto;padding:10px 16px;background:rgba(0,0,0,.85);backdrop-filter:blur(8px);border-bottom:1px solid #2f3336}}
-.top h1{{margin:0;font-size:1.2rem}}
-.open{{flex:none;padding:8px 14px;border-radius:999px;background:#3b4cca;color:#fff;text-decoration:none;font-weight:600}}
+.top{{position:sticky;top:0;z-index:2;max-width:640px;margin:0 auto;padding:10px 16px 8px;
+background:rgba(0,0,0,.9);backdrop-filter:blur(8px);border-bottom:1px solid #2f3336}}
+.top nav{{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}}
+.top nav a{{flex:1 1 auto;padding:8px 14px;border-radius:999px;background:#3b4cca;color:#fff;text-align:center;
+text-decoration:none;font-weight:600;font-size:.95rem;white-space:nowrap}}
+.top nav a.learn{{background:transparent;border:1px solid #536471;color:#e7e9ea}}
+.top nav a:hover{{filter:brightness(1.15)}}
+.top .promo{{margin:8px 0 0;text-align:center;color:#ffd400;font-weight:700}}
 main{{max-width:640px;margin:0 auto}}
 .card{{display:flex;gap:12px;padding:12px 16px;border-bottom:1px solid #2f3336}}
 .avatar{{flex:none;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;
@@ -402,6 +604,30 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 .tag{{position:absolute;left:8px;top:8px;padding:2px 8px;border-radius:8px;background:rgba(0,0,0,.7);font-size:.8rem}}
 .placeholder{{padding:48px 0;text-align:center;color:#9aa}}
 .stats{{margin:8px 0 0;font-size:.9rem}}
+.exclusive{{display:inline-block;margin:4px 0;padding:2px 10px;border-radius:12px;background:#2a2410;color:#ffd400;font-size:.85rem;font-weight:700}}
+.exclusive-note{{margin:8px 0 0;color:#a9b0b6}}
+.exclusive-note a{{color:#7f8ce0}}
+.download{{margin:8px 0 0;padding:12px 14px;border:1px solid #2f3336;border-radius:16px;background:#0d0f12}}
+.download p{{margin:2px 0}}
+.dl-name{{font-weight:700;overflow-wrap:anywhere}}
+.dl-meta,.dl-hash{{color:#71767b;font-size:.85rem}}
+.dl-hash code{{overflow-wrap:anywhere}}
+.dl-scan{{color:#00ba7c;font-size:.9rem}}
+.dl-wait{{color:#ffd400;font-size:.9rem}}
+.dl-button{{display:inline-block;margin-top:8px;padding:8px 18px;border-radius:999px;background:#3b4cca;color:#fff;text-decoration:none;font-weight:700}}
+.getapp{{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.7)}}
+.getapp[hidden]{{display:none}}
+.getapp-box{{position:relative;width:100%;max-width:420px;padding:24px 20px 16px;border-radius:16px;background:#15181c;border:1px solid #2f3336;text-align:center}}
+.getapp-box h2{{margin:0 0 8px;font-size:1.4rem}}
+.getapp-bonus{{margin:0 0 8px;color:#ffd400;font-weight:700;font-size:1.1rem}}
+.getapp-box p{{color:#a9b0b6}}
+.getapp-buttons{{display:flex;flex-direction:column;gap:8px;margin:16px 0 8px}}
+.getapp-buttons a{{display:block;padding:12px 16px;border-radius:999px;text-decoration:none;font-weight:700}}
+.getapp-buttons a.primary{{background:#3b4cca;color:#fff}}
+.getapp-buttons a.secondary{{border:1px solid #536471;color:#e7e9ea}}
+.getapp-more{{font-size:.9rem}}
+.getapp-more a{{color:#7f8ce0}}
+.getapp-close{{position:absolute;top:8px;right:8px;width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:#a9b0b6;font-size:1.1rem;cursor:pointer}}
 .more,.end{{display:block;padding:20px 16px;text-align:center;color:#71767b}}
 .featured{{padding:12px 16px 16px;border-bottom:1px solid #2f3336}}
 .featured .hero{{display:block;width:100%;max-height:min(55vh,480px);object-fit:contain;background:#000;border:1px solid #2f3336;border-radius:16px}}
@@ -413,6 +639,7 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 .featured .creator{{display:flex;align-items:center;gap:8px;margin:0;color:#71767b}}
 .featured .creator img{{width:28px;height:28px;border-radius:50%}}
 .featured .badge{{display:inline-block;margin:8px 0 0;padding:2px 8px;border-radius:12px;background:#0f3d2e;color:#00ba7c;font-size:.85rem}}
+.featured .badge.exclusive{{background:#2a2410;color:#ffd400;font-weight:700}}
 .featured .repost{{display:block;margin:8px 0 0;padding:8px 12px;border-radius:8px;background:#1d1f23}}
 .featured .desc{{white-space:pre-wrap;line-height:1.5}}
 .featured .actions a{{display:inline-block;margin:8px 8px 0 0;padding:10px 16px;border-radius:999px;background:#3b4cca;color:#fff;text-decoration:none;font-weight:600}}
@@ -420,20 +647,21 @@ display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65
 .featured .placeholder{{padding:64px 0;text-align:center;color:#9aa}}
 .more-head{{margin:0;padding:12px 16px;font-size:1rem;color:#71767b;border-bottom:1px solid #2f3336}}
 </style>
-</head>
+{analytics}</head>
 <body>
-<header class="top"><h1>GFC</h1><a class="open" href="{e(app_link)}">Open in GFC</a></header>
+{header}
 <main>
 {top}<div id="feed" tabindex="-1">
 {cards}
 </div>
 </main>
+{popup}
 <script nonce="{nonce}">{script}</script>
 </body>
 </html>
 """
-    headers = _security_headers(nonce)
-    headers["Vary"] = "Accept, User-Agent"  # / is JSON for API clients; "Open in GFC" differs on Android
+    headers = _security_headers(nonce, analytics=bool(clarity_id))
+    headers["Vary"] = "Accept, User-Agent"  # / is JSON for API clients; a shared post's "Open in GFC" differs on Android
     return HTMLResponse(body, headers=headers)
 
 

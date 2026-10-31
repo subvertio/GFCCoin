@@ -17,6 +17,7 @@ import uuid
 import hashlib
 import datetime
 
+import config
 from config import DB_PATH, DATA_DIR, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR, AVATAR_DIR
 
 from app_seeds import router as seeds_router
@@ -32,6 +33,8 @@ from app_web import router as web_router, feed_html_response, wants_html
 from app_moderation import router as moderation_router
 from app_webverify import router as webverify_router
 from app_treasury import router as treasury_router
+from app_release import router as release_router
+from app_recovery import router as recovery_router
 from app_bridge import router as bridge_router
 import audio_stream
 import blockchain
@@ -39,6 +42,10 @@ import logredact
 import moderation
 import keystore
 import first_post
+import seed_edits
+import verified_wallets
+import exclusive
+import filescan
 import referrals
 import reposts
 import signing
@@ -61,6 +68,22 @@ app = FastAPI(
 # CORS: only the origins in GFC_CORS_ORIGINS (none by default, i.e. same-origin only)
 app.add_middleware(NodeCORSMiddleware)
 
+
+@app.middleware("http")
+async def exclusive_media_gate(request, call_next):
+    """The full clip of a GFC Exclusive only opens with a signed link from /seeds/{id}/play."""
+    path = request.url.path
+    if path.startswith(exclusive.GATED_PREFIXES) and exclusive.locked(path):
+        q = request.query_params
+        if not exclusive.link_is_valid(path, q.get("exp"), q.get("sig")):
+            return JSONResponse({"detail": exclusive.LOCKED_DETAIL}, status_code=403)
+    # Downloads (zips) only once they've passed the virus scan (filescan.py)
+    if path.startswith(filescan.GATED_PREFIX):
+        reason = filescan.blocked(path)
+        if reason:
+            return JSONResponse({"detail": reason}, status_code=403)
+    return await call_next(request)
+
 # Include routers
 app.include_router(seeds_router)
 app.include_router(engagement_router)
@@ -75,6 +98,8 @@ app.include_router(web_router)
 app.include_router(moderation_router)
 app.include_router(webverify_router)
 app.include_router(treasury_router)
+app.include_router(release_router)
+app.include_router(recovery_router)
 app.include_router(bridge_router)
 
 # Static file serving (using absolute paths from config)
@@ -87,6 +112,8 @@ app.mount("/thumbs", StaticFiles(directory=str(SEEDS_THUMB_DIR), follow_symlink=
 app.mount("/avatars", StaticFiles(directory=str(AVATAR_DIR), follow_symlink=True), name="avatars")
 # Compressed streaming copies of big/lossless audio (audio_stream.py)
 app.mount("/streams", StaticFiles(directory=str(audio_stream.STREAMS_DIR), follow_symlink=True), name="streams")
+# 5, 10 or 30-second public teasers of GFC Exclusive videos (exclusive.py)
+app.mount("/teasers", StaticFiles(directory=str(exclusive.TEASERS_DIR), follow_symlink=True), name="teasers")
 
 # ============================================================================
 # MODELS
@@ -195,6 +222,10 @@ def init_db():
     keystore.init_keystore(conn)
     reposts.init_repost_tables(conn)
     first_post.init_first_post_tables(conn)
+    seed_edits.init_seed_edit_tables(conn)
+    verified_wallets.init_tables(conn)
+    exclusive.init_tables(conn)
+    filescan.init_tables(conn)
     migrate_plaintext_passwords(conn)
 
     conn.commit()
@@ -240,9 +271,13 @@ async def auth_register(
         conn.close()
 
     token = create_session(username)
-    keystore.attach_to_session(token, keystore.unlock_user_keys(username, password))
+    data_key = keystore.unlock_user_keys(username, password)
+    keystore.attach_to_session(token, data_key)
     invited_by = referrals.record_invite(DB_PATH, username, ref)
-    return {"ok": True, "token": token, "user": username, "invited_by": invited_by}
+    # Shown to the user once: with their phone or email it restores the account AND its wallets
+    # if they forget the password (account_recovery.py)
+    recovery_code = keystore.new_recovery_code(username, data_key)
+    return {"ok": True, "token": token, "user": username, "invited_by": invited_by, "recovery_code": recovery_code}
 
 
 @app.post("/auth/login")
@@ -304,6 +339,9 @@ def health():
     return {
         "ok": True,
         "timestamp": datetime.datetime.utcnow().isoformat(),
+        # Lets apps ask for phone verification before someone writes a post
+        "network": config.NETWORK,
+        "phone_required_to_post": config.REQUIRE_PHONE_TO_POST,
     }
 
 
@@ -345,6 +383,7 @@ async def create_wallet(name: str = Form("Default Wallet"), caller: Caller = Dep
     # Unverified owners get it when they verify (POST /verify/web/fb/check) instead.
     grant_balance = 0.0
     if owner:
+        verified_wallets.attest(DB_PATH, owner)  # treasury node: proof for peers, if verified
         grant_result = blockchain.process_user_grant(DB_PATH, owner, wallet_id)
         if grant_result:
             grant_balance = grant_result["amount"]  # 100.0
@@ -576,7 +615,7 @@ def search(q: str = "", caller: Caller = Depends(caller_from_query)):
             item["liked"] = item["id"] in liked_set
             item["bookmarked"] = item["id"] in bookmarked_set
 
-    seed_items = moderation.visible_items(conn, seed_items, owner)
+    seed_items = filescan.apply_to_items(exclusive.apply_to_items(moderation.visible_items(conn, seed_items, owner)))
     result["seeds"] = seed_items
     result["seed_count"] = len(seed_items)
 
@@ -652,6 +691,13 @@ from p2p_service import start_p2p, stop_p2p, p2p_status
 async def startup_event():
     """Start P2P services when the server starts."""
     logredact.install()  # no phone numbers or verify link codes in the logs
+    # Treasury node: proof of verification for verified accounts that don't have one yet
+    try:
+        issued = verified_wallets.backfill(DB_PATH)
+        if issued:
+            print(f"[Verified] Issued {issued} verified wallet records")
+    except Exception as e:
+        print(f"[Verified] Backfill failed: {e}")
     # Ensure firewall rules exist for P2P ports (best-effort, requires admin)
     _ensure_firewall_rules()
     # Fingerprint seeds stored before the repost check existed (a treasury node also
@@ -667,6 +713,12 @@ async def startup_event():
 
 
 def _backfill_fingerprints():
+    try:
+        made = exclusive.backfill(DB_PATH)
+        if made:
+            print(f"[Exclusive] Made {made} missing teasers")
+    except Exception as e:
+        print(f"[Exclusive] Teaser backfill failed: {e}")
     try:
         done = reposts.backfill(DB_PATH)
         if done:
