@@ -1,5 +1,5 @@
 """
-Tests for big posts (up to config.MAX_UPLOAD_BYTES, 1 GB by default): uploads and files from
+Tests for big posts (up to config.MAX_UPLOAD_BYTES, 5 GB by default; videos up to 8 GB before optimising): uploads and files from
 peers go to disk in pieces, never whole into memory; over the limit is refused; videos posted
 without a thumbnail get one from the node; ClamAV scans files that big.
 
@@ -52,8 +52,11 @@ class BigUploadTests(unittest.TestCase):
         return self.client.post("/seeds/upload", data={"title": "Big"}, headers=headers,
                                 files={"file": (name, data, "video/mp4")})
 
-    def test_default_limit_is_a_gigabyte(self):
-        self.assertEqual(self.saved[1], 1024 * 1024 * 1024)
+    def test_default_limits(self):
+        self.assertEqual(self.saved[1], 5 * 1024 ** 3)   # posts
+        self.assertEqual(self.saved[2], 8 * 1024 ** 3)   # videos as uploaded, before optimising
+        import app_seeds
+        self.assertEqual(app_seeds.download_limit(), 4000 * 1024 * 1024)  # zips: ClamAV's ceiling
 
     def test_uploads_up_to_the_limit_are_saved_whole_and_bigger_ones_refused(self):
         h = self.account()

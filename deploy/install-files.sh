@@ -17,9 +17,9 @@ install -m 755 "$APP_DIR/deploy/update.sh" /usr/local/sbin/gfc-update
 install -m 755 "$APP_DIR/deploy/gfc" /usr/local/bin/gfc
 if [[ -n "$DOMAIN" ]]; then
     sed "s#__DOMAIN__#$DOMAIN#g" "$APP_DIR/deploy/Caddyfile" > /etc/caddy/Caddyfile
-elif [[ -f /etc/caddy/Caddyfile ]] && grep -Eq 'max_size (200|1100)MB' /etc/caddy/Caddyfile; then
-    # Existing nodes: raise the upload limit to 4 GB videos (the rest of their Caddyfile stays as is)
-    sed -i -E 's/max_size (200|1100)MB/max_size 4200MB/' /etc/caddy/Caddyfile
+elif [[ -f /etc/caddy/Caddyfile ]] && grep -Eq 'max_size (200|1100|4200)MB' /etc/caddy/Caddyfile; then
+    # Existing nodes: raise the upload limit to 8 GB videos (the rest of their Caddyfile stays as is)
+    sed -i -E 's/max_size (200|1100|4200)MB/max_size 8300MB/' /etc/caddy/Caddyfile
     systemctl reload caddy >/dev/null 2>&1 || true
 fi
 systemctl daemon-reload

@@ -46,7 +46,14 @@ def detect_content_type(filename: str) -> str:
 
 
 MAX_THUMB_BYTES = 5 * 1024 * 1024
+def download_limit() -> int:
+    """Zips are virus-scanned, and ClamAV can't scan more than 4 GB."""
+    return min(config.MAX_UPLOAD_BYTES, config.CLAMAV_MAX_BYTES)
+
+
 def _too_big(limit: int) -> str:
+    if limit == config.CLAMAV_MAX_BYTES and limit < config.MAX_UPLOAD_BYTES:
+        return f"Downloads (.zip) can be up to {limit / 1024 ** 3:.1f} GB: the virus scanner can't check bigger files."
     if limit > config.MAX_UPLOAD_BYTES:
         return (f"Videos can be uploaded up to {limit / 1024 ** 3:.0f} GB, as long as GFC's optimised copy "
                 f"comes to {config.MAX_UPLOAD_BYTES / 1024 ** 3:.0f} GB or less.")
@@ -68,7 +75,7 @@ def check_big_video(path) -> None:
     if not info:
         raise HTTPException(status_code=413, detail=(
             f"This video is over {config.MAX_UPLOAD_BYTES / 1024 ** 3:.0f} GB and GFC can't read its length "
-            "to optimise it. Export it as MP4 (H.264) under 1 GB, then post it again."))
+            f"to optimise it. Export it as MP4 (H.264) under {config.MAX_UPLOAD_BYTES / 1024 ** 3:.0f} GB, then post it again."))
     if audio_stream.estimated_optimized_bytes(info, size) > config.MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=audio_stream.bitrate_tip(info, config.MAX_UPLOAD_BYTES, size))
 
@@ -297,7 +304,8 @@ async def seeds_upload(
     # (a 1 GB video on a 1 GB server would otherwise run it out of memory)
     try:
         is_video = detect_content_type(file.filename or "") == "video"
-        limit = config.MAX_VIDEO_UPLOAD_BYTES if is_video else config.MAX_UPLOAD_BYTES
+        limit = (config.MAX_VIDEO_UPLOAD_BYTES if is_video else download_limit()
+                 if filescan.is_download(file.filename or "") else config.MAX_UPLOAD_BYTES)
         file_size = await run_in_threadpool(_save_upload, file, orig_path, limit)
         if is_video:
             await run_in_threadpool(check_big_video, orig_path)
