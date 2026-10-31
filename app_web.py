@@ -165,7 +165,9 @@ def download_box(seed: dict, page: str) -> str:
     elif filescan.downloadable(status) and seed.get("full"):
         action = f'<a class="dl-button" href="{e(seed["full"])}" download>Download</a>'
     else:
-        action = '<p class="dl-wait">Checking for viruses&hellip; the download opens when it passes.</p>'
+        action = ('<p class="dl-wait">The virus scanner couldn&rsquo;t check this file yet. GFC tries again '
+                  'automatically; the download opens when it passes.</p>' if status == filescan.ERROR else
+                  '<p class="dl-wait">Checking for viruses&hellip; the download opens when it passes.</p>')
     scanned = ""
     if status == filescan.CLEAN:
         when = (d.get("scanned_at") or "")[:10]

@@ -212,11 +212,47 @@ def scan_seed(seed_id: str, db_path: str = DB_PATH, runner: Runner = None) -> st
     return status
 
 
+# When the scanner itself fails (not a detection: e.g. clamd restarting while its definitions
+# reload, about a minute), try again after these delays, then leave it to the daily rescan
+RETRY_DELAYS_S = (60, 300, 900)
+_retries: Dict[str, int] = {}
+_retries_lock = threading.Lock()
+
+
+def after_scan(seed_id: str, status: str, schedule=None) -> Optional[float]:
+    """Schedule a retry for a scanner error (returns its delay); forget the count otherwise."""
+    with _retries_lock:
+        if status != ERROR:
+            _retries.pop(seed_id, None)
+            return None
+        tries = _retries.get(seed_id, 0)
+        if tries >= len(RETRY_DELAYS_S):
+            _retries.pop(seed_id, None)
+            print(f"[FileScan] {seed_id}: still failing after {tries} retries; the daily rescan will try again")
+            return None
+        _retries[seed_id] = tries + 1
+    delay = RETRY_DELAYS_S[tries]
+    if schedule:
+        schedule(delay, seed_id)
+    else:
+        t = threading.Timer(delay, _queue.put, args=(seed_id,))
+        t.daemon = True
+        t.start()
+    print(f"[FileScan] {seed_id}: the scanner failed; retrying in {delay}s")
+    return delay
+
+
+def retrying(seed_id: str) -> bool:
+    with _retries_lock:
+        return seed_id in _retries
+
+
 def _work():
     while True:
         seed_id = _queue.get()
         try:
-            scan_seed(seed_id)  # run_clamav resolved at call time, so tests can swap it
+            status = scan_seed(seed_id)  # run_clamav resolved at call time, so tests can swap it
+            after_scan(seed_id, status)
         except Exception as ex:
             print(f"[FileScan] {seed_id}: {type(ex).__name__}")
         finally:
@@ -321,6 +357,7 @@ def apply_to_items(items: Iterable[Dict], db_path: str = DB_PATH) -> List[Dict]:
                 "name": filename.split("_", 1)[1] if "_" in filename else filename,
                 "size": size, "status": status, "scanned_at": scanned_at or "", "engine": engine or "",
                 "sha256": sha or "", "files": info.get("files"), "programs": info.get("programs"),
+                "retrying": status == ERROR and retrying(item["id"]),  # a scanner hiccup, not a detection
             }
             if not downloadable(status):
                 item["full"] = None
