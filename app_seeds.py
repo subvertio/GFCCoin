@@ -70,7 +70,7 @@ def check_big_video(path) -> None:
             f"This video is over {config.MAX_UPLOAD_BYTES / 1024 ** 3:.0f} GB and GFC can't read its length "
             "to optimise it. Export it as MP4 (H.264) under 1 GB, then post it again."))
     if audio_stream.estimated_optimized_bytes(info, size) > config.MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=audio_stream.bitrate_tip(info, config.MAX_UPLOAD_BYTES))
+        raise HTTPException(status_code=413, detail=audio_stream.bitrate_tip(info, config.MAX_UPLOAD_BYTES, size))
 
 
 def _save_upload(file: UploadFile, dest, limit: int) -> int:

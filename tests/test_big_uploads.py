@@ -235,9 +235,14 @@ class BigUploadTests(unittest.TestCase):
         modest = {"width": 1920, "height": 1080, "kbps": 9000, "duration": 300}
         self.assertEqual(audio_stream.estimated_optimized_bytes(modest, 337_000_000), 337_000_000)  # kept as is
         hour_4k = {"width": 3840, "height": 2160, "kbps": 80000, "duration": 3600}
-        tip = audio_stream.bitrate_tip(hour_4k, 1024 ** 3)
+        tip = audio_stream.bitrate_tip(hour_4k, 1024 ** 3, int(3.5 * 1024 ** 3))
         self.assertIn("60 min at 3840x2160", tip)
-        self.assertIn("Export it at 2 Mbit/s or less", tip)  # 1 GB over an hour, less the audio
+        self.assertIn("Export it at 2.1 Mbit/s or less", tip)  # 1 GB over an hour, less the audio
+        self.assertIn("at 720p", tip)
+        self.assertEqual(audio_stream.target_mbps(86 * 60, 1024 ** 3), 1.4)  # an 86-minute show
+        # Not oversized (2.3 Mbit/s 1080p) but over 1 GB as it is: the tip gives its real size
+        show = {"width": 1920, "height": 1080, "kbps": 2300, "duration": 86 * 60}
+        self.assertIn("about 1.48 GB", audio_stream.bitrate_tip(show, 1024 ** 3, int(1.48 * 1024 ** 3)))
 
     def test_a_video_over_the_limit_is_replaced_by_any_smaller_copy(self):
         config.MAX_UPLOAD_BYTES = 3000

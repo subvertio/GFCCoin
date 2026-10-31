@@ -252,15 +252,23 @@ def estimated_optimized_bytes(info: dict, size: int) -> int:
     return int(info["duration"] * (ceiling + OPTIMIZE_AUDIO_KBPS) * 1000 / 8)
 
 
-def bitrate_tip(info: dict, limit: int) -> str:
-    """What to tell someone whose video would still be over `limit` after optimising."""
-    minutes = info["duration"] / 60
-    target = max(1.0, (limit * 8 / 1000 / max(info["duration"], 1) - OPTIMIZE_AUDIO_KBPS) / 1000)
-    est = estimated_optimized_bytes(info, 0) / 1024 ** 3
-    return (f"This video would still be about {est:.1f} GB after GFC optimises it ({minutes:.0f} min at "
-            f"{info['width']}x{info['height']}), and posts can be up to {limit / 1024 ** 3:.0f} GB. "
-            f"Export it at {target:.0f} Mbit/s or less (the video bitrate in your editor's export settings), "
-            f"or at a lower resolution, or trim it, then post it again.")
+def target_mbps(duration: float, limit: int) -> float:
+    """The highest video bitrate (Mbit/s, one decimal, rounded down) that keeps `duration` under `limit`."""
+    return max(0.1, int((limit * 8 / 1000 / max(duration, 1) - OPTIMIZE_AUDIO_KBPS) / 100) / 10)
+
+
+def bitrate_tip(info: dict, limit: int, size: int) -> str:
+    """What to tell someone whose video would still be over `limit` after optimising (the app says the same)."""
+    target = target_mbps(info["duration"], limit)
+    short = min(info["width"], info["height"])
+    # Below about 3 Mbit/s, 1080p and up looks soft: 720p at the same bitrate looks better
+    res = (f", and at 720p (1280x720): at this bitrate it looks better than {short}p"
+           if target < 3 and short > 720 else "")
+    est = estimated_optimized_bytes(info, size) / 1024 ** 3
+    return (f"Tip: lower the bitrate. This video would still be about {est:.2f} GB after GFC optimises it "
+            f"({info['duration'] / 60:.0f} min at {info['width']}x{info['height']}), and posts can be up to "
+            f"{limit / 1024 ** 3:.0f} GB. Export it at {target:.1f} Mbit/s or less (the video bitrate in your "
+            f"editor's export settings){res}. Or split it into parts, then post them.")
 
 
 def optimize_args(src: Path, dest: Path, info: dict, exe: str) -> list:
