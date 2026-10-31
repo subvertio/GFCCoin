@@ -28,6 +28,7 @@ Config (environment):
 - GFC_FFMPEG=<path>           ffmpeg binary (default: "ffmpeg" on PATH)
 """
 
+import json
 import os
 import queue
 import shutil
@@ -37,7 +38,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from config import DATA_DIR, DB_PATH, SEEDS_ORIG_DIR
+from config import DATA_DIR, DB_PATH, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR
 
 STREAMS_DIR = DATA_DIR / "seeds" / "streams"
 STREAMS_DIR.mkdir(parents=True, exist_ok=True)
@@ -119,6 +120,171 @@ def _ffmpeg_args(content_type: str, src: Path, dest: Path, exe: str) -> list:
                    "-movflags", "+faststart", "-f", "mp4", str(dest)]
 
 
+def transcode_timeout(src: Path) -> int:
+    """30 minutes, or 6 s per MB for big files (a 1 GB video on a 1-CPU server takes a while)."""
+    try:
+        size_mb = src.stat().st_size / 1048576
+    except OSError:
+        size_mb = 0
+    return int(max(TRANSCODE_TIMEOUT_S, size_mb * 6))
+
+
+def make_video_thumbnail(seed_id: str, db_path: str = DB_PATH, runner: Runner = None) -> bool:
+    """
+    A first-frame thumbnail for a video posted without one (apps can't read a 1 GB clip into
+    memory to grab a frame). Taken from the streaming copy when there is one. True if made.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT filename, COALESCE(thumb_filename, '') FROM seeds WHERE id = ? "
+                           "AND content_type = 'video'", (seed_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row or row[1]:
+        return False
+    stream = stream_path(seed_id, "video")
+    src = stream if stream.exists() else SEEDS_ORIG_DIR / row[0]
+    if not src.is_file():
+        return False
+    name = f"{seed_id}_thumb.jpg"
+    dest = SEEDS_THUMB_DIR / name
+    try:
+        SEEDS_THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        (runner or run_thumbnail_ffmpeg)(src, dest)
+        if not dest.is_file() or dest.stat().st_size == 0:
+            return False
+    except Exception as ex:
+        print(f"[MediaStream] {seed_id}: thumbnail failed: {type(ex).__name__}")
+        return False
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("UPDATE seeds SET thumb_filename = ? WHERE id = ? AND COALESCE(thumb_filename, '') = ''",
+                     (name, seed_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return True
+
+
+def run_thumbnail_ffmpeg(src: Path, dest: Path) -> None:
+    """One frame (1 s in, or the first for very short clips), at most 512 px wide, as JPEG."""
+    exe = ffmpeg_path()
+    if not exe:
+        raise FileNotFoundError("ffmpeg not installed")
+    for seek in ("1", "0"):
+        subprocess.run([exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-ss", seek, "-i", str(src),
+                        "-frames:v", "1", "-vf", "scale='min(512,iw)':-2", "-q:v", "4", str(dest)],
+                       check=True, timeout=120, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if dest.is_file() and dest.stat().st_size:
+            return
+
+
+# ---------- optimising oversized originals (same resolution, same look) ----------
+#
+# Phones record far more bits than a picture needs (a 5-minute 1080p clip can be 1 GB, about
+# 27 Mbit/s). A video well over the ceiling for its resolution is re-encoded at the same size
+# and frame rate with H.264 CRF 20 (visually lossless) under that ceiling, and replaces the
+# original only if it's at least 25% smaller. Anything already reasonable is left untouched.
+OPTIMIZE_CRF = "20"
+OPTIMIZE_MIN_SAVING = 0.25
+# (max short side, bitrate ceiling in kbit/s): generous enough that quality isn't the limit
+OPTIMIZE_CEILINGS = ((720, 5000), (1080, 10000), (1440, 16000), (2160, 35000), (10 ** 6, 60000))
+
+
+def ceiling_kbps(width: int, height: int) -> int:
+    short = min(width, height) or 1080
+    return next(kbps for side, kbps in OPTIMIZE_CEILINGS if short <= side)
+
+
+def ffprobe_path() -> Optional[str]:
+    exe = ffmpeg_path()
+    if exe:
+        probe = Path(exe).with_name(Path(exe).name.replace("ffmpeg", "ffprobe"))
+        if probe.exists():
+            return str(probe)
+    return shutil.which("ffprobe")
+
+
+def probe_video(src: Path) -> Optional[dict]:
+    """{width, height, kbps, audio} of a video file, or None if ffprobe can't tell."""
+    exe = ffprobe_path()
+    if not exe:
+        return None
+    out = subprocess.run([exe, "-v", "error", "-show_entries", "format=duration,bit_rate:stream=codec_type,codec_name,width,height",
+                          "-of", "json", str(src)], capture_output=True, timeout=60)
+    if out.returncode:
+        return None
+    info = json.loads(out.stdout or b"{}")
+    streams = info.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    fmt = info.get("format") or {}
+    try:
+        kbps = int(fmt.get("bit_rate") or 0) / 1000 or src.stat().st_size * 8 / 1000 / float(fmt["duration"])
+    except (KeyError, ValueError, ZeroDivisionError):
+        return None
+    if not video or not kbps:
+        return None
+    return {"width": int(video.get("width") or 0), "height": int(video.get("height") or 0), "kbps": kbps,
+            "audio": (audio or {}).get("codec_name")}
+
+
+def optimize_args(src: Path, dest: Path, info: dict, exe: str) -> list:
+    ceiling = ceiling_kbps(info["width"], info["height"])
+    # AAC audio is kept as it is; anything else becomes high-quality AAC
+    audio = ["-c:a", "copy"] if info.get("audio") == "aac" else ["-c:a", "aac", "-b:a", "192k"]
+    return [exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+            "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "faster", "-crf", OPTIMIZE_CRF,
+            "-maxrate", f"{ceiling}k", "-bufsize", f"{ceiling * 2}k", "-pix_fmt", "yuv420p",
+            *audio, "-movflags", "+faststart", "-f", "mp4", str(dest)]
+
+
+def run_optimize_ffmpeg(src: Path, dest: Path, info: dict) -> None:
+    exe = ffmpeg_path()
+    if not exe:
+        raise FileNotFoundError("ffmpeg not installed")
+    kwargs = {}
+    if hasattr(os, "nice"):
+        kwargs["preexec_fn"] = lambda: os.nice(10)  # don't starve the API
+    subprocess.run(optimize_args(src, dest, info, exe), check=True, timeout=transcode_timeout(src) * 2,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **kwargs)
+
+
+def optimize_video(seed_id: str, filename: str, runner=None, prober=None) -> bool:
+    """
+    Re-encode an oversized original (same resolution and frame rate, visually lossless) and
+    replace it if that saves at least OPTIMIZE_MIN_SAVING. True if the original was replaced.
+    """
+    src = SEEDS_ORIG_DIR / filename
+    if not src.is_file():
+        return False
+    try:
+        info = (prober or probe_video)(src)
+    except Exception:
+        info = None
+    if not info or info["kbps"] <= ceiling_kbps(info["width"], info["height"]) * 1.2:
+        return False  # unknown, or not oversized: keep exactly what was uploaded
+    tmp = src.with_name(f".{src.name}.optimizing.mp4")
+    try:
+        (runner or run_optimize_ffmpeg)(src, tmp, info)
+        before, after = src.stat().st_size, tmp.stat().st_size if tmp.exists() else 0
+        if not after or after > before * (1 - OPTIMIZE_MIN_SAVING):
+            return False
+        os.replace(tmp, src)
+        print(f"[MediaStream] {seed_id}: optimised {before / 1048576:.0f} MB -> {after / 1048576:.0f} MB "
+              f"({info['kbps']:.0f} kbit/s at {info['width']}x{info['height']})")
+        return True
+    except Exception as ex:
+        print(f"[MediaStream] {seed_id}: optimising failed: {type(ex).__name__}")
+        return False
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def run_ffmpeg(src: Path, dest: Path) -> None:
     """Transcode src into dest (raises on failure). Video if dest is <id>.mp4[.part]."""
     content_type = "video" if ".mp4" in dest.name else "audio"
@@ -128,7 +294,7 @@ def run_ffmpeg(src: Path, dest: Path) -> None:
     kwargs = {}
     if hasattr(os, "nice"):
         kwargs["preexec_fn"] = lambda: os.nice(10)  # don't starve the API
-    subprocess.run(_ffmpeg_args(content_type, src, dest, exe), check=True, timeout=TRANSCODE_TIMEOUT_S,
+    subprocess.run(_ffmpeg_args(content_type, src, dest, exe), check=True, timeout=transcode_timeout(src),
                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **kwargs)
 
 
@@ -171,7 +337,11 @@ def _work():
         seed_id, filename, content_type = _queue.get()
         try:
             # Resolved at call time so tests can swap the transcoder
+            if content_type == "video":
+                optimize_video(seed_id, filename, runner=run_optimize_ffmpeg, prober=probe_video)
             make_stream(seed_id, filename, runner=run_ffmpeg, content_type=content_type)
+            if content_type == "video":
+                make_video_thumbnail(seed_id, runner=run_thumbnail_ffmpeg)
         finally:
             _queue.task_done()
 

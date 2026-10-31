@@ -17,6 +17,10 @@ install -m 755 "$APP_DIR/deploy/update.sh" /usr/local/sbin/gfc-update
 install -m 755 "$APP_DIR/deploy/gfc" /usr/local/bin/gfc
 if [[ -n "$DOMAIN" ]]; then
     sed "s#__DOMAIN__#$DOMAIN#g" "$APP_DIR/deploy/Caddyfile" > /etc/caddy/Caddyfile
+elif [[ -f /etc/caddy/Caddyfile ]] && grep -q 'max_size 200MB' /etc/caddy/Caddyfile; then
+    # Existing nodes: raise the upload limit to 1 GB posts (the rest of their Caddyfile stays as is)
+    sed -i 's/max_size 200MB/max_size 1100MB/' /etc/caddy/Caddyfile
+    systemctl reload caddy >/dev/null 2>&1 || true
 fi
 systemctl daemon-reload
 systemctl enable --now gfc-scan.timer >/dev/null 2>&1 || true

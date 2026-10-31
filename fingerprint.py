@@ -52,6 +52,9 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tga"}
 GLTF_EXTS = {".glb", ".gltf"}
 
 
+NEAR_DUP_MAX_BYTES = 64 * 1024 * 1024
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -64,6 +67,8 @@ def fingerprints_for_file(path: Path) -> List[str]:
     """All fingerprints of a stored seed file (sha256 always, plus a near-duplicate one if supported)."""
     prints = [f"sha256:{sha256_file(path)}"]
     ext = path.suffix.lower()
+    if path.stat().st_size > NEAR_DUP_MAX_BYTES:
+        return prints  # the near-duplicate pass reads the whole file into memory
     try:
         if ext in IMAGE_EXTS:
             value = image_hash(path.read_bytes())

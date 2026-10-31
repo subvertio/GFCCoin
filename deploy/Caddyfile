@@ -3,9 +3,9 @@
 __DOMAIN__ {
 	encode gzip
 
-	# Largest accepted upload (seeds, avatars)
+	# Largest accepted upload (seeds, avatars): 1 GB posts plus the thumbnail and form fields
 	request_body {
-		max_size 200MB
+		max_size 1100MB
 	}
 
 	# Operator/debug endpoints: reachable only on the server itself (curl 127.0.0.1:8000/...)
