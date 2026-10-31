@@ -38,6 +38,8 @@ from app_recovery import router as recovery_router
 from app_bridge import router as bridge_router
 from app_follows import router as follows_router
 from app_ads import router as ads_router
+from app_connect import router as connect_router
+import app_connect
 import ads
 import app_follows
 import audio_stream
@@ -107,6 +109,7 @@ app.include_router(recovery_router)
 app.include_router(bridge_router)
 app.include_router(follows_router)
 app.include_router(ads_router)
+app.include_router(connect_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
@@ -200,6 +203,7 @@ def init_db():
     )''')
     app_follows.init_tables(conn)
     ads.init_tables(conn)
+    app_connect.init_tables(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS bookmarks (
         id TEXT PRIMARY KEY,
         seed_id TEXT NOT NULL,
@@ -267,6 +271,9 @@ async def auth_register(
     username = username.strip()
     conn = sqlite3.connect(DB_PATH)
     try:
+        # Logins and lookups ignore case, so "Bob" and "bob" would be the same person to everyone
+        if conn.execute("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone():
+            raise HTTPException(status_code=409, detail="username already exists")
         conn.execute(
             "INSERT INTO users (id, username, password, first_name, last_name, email, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (str(uuid.uuid4()), username, hash_password(password), first_name.strip(), last_name.strip(), email.strip(), phone.strip(),
