@@ -41,7 +41,7 @@ GFC tries a different model. The community hosts the content, and the people who
 
 ## How it works (technical overview)
 
-GFC is a Python/FastAPI backend that each participant runs as a local node. The original desktop front end was built in Unreal Engine for browsing 3D content.
+GFC is a Python/FastAPI backend that each participant runs as a local node. The GFC app for Windows and Android (0.2.2) is built with Tauri and three.js in [subvertio/GFC-Tauri](https://github.com/subvertio/GFC-Tauri); download it from [node.galacticfederation.tech/app](https://node.galacticfederation.tech/app). The earlier Unreal Engine app ([subvertio/GFC-Client](https://github.com/subvertio/GFC-Client)) is retired.
 
 | Component | File | Role |
 |---|---|---|
@@ -112,29 +112,18 @@ Gateway settings (environment variables):
 
 `assetlinks.json` returns `[]` until both Android settings are set. Run the gateway behind HTTPS. X only fetches cards over HTTPS, and App Links require it.
 
-### Sharing from the Unreal Android app
+### Sharing from the app
 
-The share link is always `{GFC_PUBLIC_BASE_URL}/p/{seed_id}`. The seed must have synced to the gateway before the card renders, so sync first and then share. Two ways to share:
+The share link is always `{GFC_PUBLIC_BASE_URL}/p/{seed_id}`. The seed must have synced to the gateway before the card renders, so sync first and then share.
 
-1. **Android share sheet (recommended).** Add a small Java method through a UPL (Unreal Plugin Language) `.xml` in your plugin, and call it from C++ via JNI (`FJavaWrapper::CallVoidMethod`):
+- **On Android,** the GFC app uses the system share sheet, so people pick X or any other app. For a GFC Exclusive it shares the teaser clip with the text and link.
+- **On Windows,** it opens the X web intent, or the LinkedIn or Substack page, in the browser:
 
-   ```java
-   public void AndroidThunkJava_ShareText(String text, String url) {
-       Intent send = new Intent(Intent.ACTION_SEND);
-       send.setType("text/plain");
-       send.putExtra(Intent.EXTRA_TEXT, text + " " + url);
-       startActivity(Intent.createChooser(send, "Share"));
-   }
-   ```
+  ```
+  https://x.com/intent/post?text=<url-encoded text>&url=<url-encoded share link>
+  ```
 
-   The user picks X or any other app.
-2. **Direct "Post to X" button.** Open the X web intent with `FPlatformProcess::LaunchURL`. If the X app is installed, it handles the link:
-
-   ```
-   https://x.com/intent/post?text=<url-encoded text>&url=<url-encoded share link>
-   ```
-
-   `GET /p/{seed_id}/share` returns this URL ready-made in `x_intent_url`.
+  `GET /p/{seed_id}/share` returns this URL ready-made in `x_intent_url`, and an exclusive upload's response has `share` links for X, LinkedIn and Substack.
 
 To open shared links in the app, add an `intent-filter` with `android:autoVerify="true"` for `https://galacticfederation.tech/p/*` (App Links), and/or one for the `gfc://seed/*` scheme used by "Open in GFC".
 
@@ -154,7 +143,7 @@ These are known gaps, listed so you can make an informed choice:
 - **Fixed: wallet keys are encrypted at rest and can be backed up.** They can only be unlocked with your password or a live login session. **Export a backup** (`POST /wallets/export`) and keep it with its passphrase. There's no password reset, so a forgotten password or a lost data folder can only be recovered from that backup. Treasury operators: `python signing.py backup FILE`.
 - **Usernames aren't signed yet.** Someone can post content, likes or comments under another person's name. They can't collect that person's rewards, but they can impersonate them.
 - **API tokens are passed as form/query parameters.** Run the node on localhost, or behind HTTPS if it's exposed.
-- **The Unreal front end isn't in this repository.** Right now you use the node through its API.
+- **The app is in its own repository,** [subvertio/GFC-Tauri](https://github.com/subvertio/GFC-Tauri). This repository is the node and its API.
 
 ## Roadmap ideas
 

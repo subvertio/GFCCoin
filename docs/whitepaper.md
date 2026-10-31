@@ -90,8 +90,9 @@ creator. **Planned:** a bridge to the Base blockchain and a listing on a decentr
 - **The treasury node.** The public node at `node.galacticfederation.tech` also holds the
   treasury key. It signs new-coin payments ("mints"), runs phone verification, and serves the web
   feed, share pages and app downloads.
-- **Apps.** The GFC app is built with Unreal Engine for Android and Windows. The web feed works in
-  any browser. Anyone can build another app on the open API (section 2.8).
+- **Apps.** The GFC app (0.2.2) is built with Tauri and three.js for Android and Windows. It's
+  small: about 11 MB on Android and 3 MB on Windows. The web feed works in any browser. Anyone can
+  build another app on the open API (section 2.8).
 
 ### 2.2 Supply
 
@@ -227,8 +228,13 @@ Being clear about what isn't solved yet:
 - Creator rewards: sign-up grant, first post bonus, view rewards, invites, repost credit.
 - Fair play: phone verification, a network-wide proof of verification, originality receipts,
   moderation.
-- Apps: Android and Windows (0.1.5), the web feed with share pages for X, a 3D model viewer,
-  audio and video streaming, post editing.
+- Apps: Android and Windows (0.2.2, Tauri and three.js), the web feed with share pages for X, a 3D
+  model viewer, audio and video streaming, post editing.
+- Creator tools: follows and a Following feed, profiles with photos, comments under every post,
+  batch video upload, posts up to 5 GB with server-side video optimisation, and GFC Exclusives.
+- Ads: creators promote posts with GFC at a market rate set by a uniform-price auction; 70% of every
+  view is paid at once to the creator whose post the ad appears under.
+- Downloads: zip files (games, apps) checked and virus-scanned by ClamAV before anyone can get them.
 - Accounts: encrypted keys, backups, recovery codes, password reset.
 - An open API for third-party apps.
 
@@ -264,7 +270,8 @@ Being clear about what isn't solved yet:
 
 ## What changed since v0.1
 
-- **The app** is built with Unreal Engine (Android and Windows), not Unity.
+- **The app** is built with Tauri and three.js (Android and Windows), not Unity. It replaced an
+  earlier Unreal Engine app in October 2026 and updates it in place.
 - **Wallets** are Ed25519 key pairs. They are no longer IDs made from hashed UUIDs, and every
   payment is signed.
 - **The supply** is a fixed 100-trillion premine with capped, rule-checked mints. It is not an
