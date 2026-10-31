@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, HTTPException, Form, Query, Depends
 
+import app_follows
 import audio_stream
 import echohunt
 import exclusive
@@ -98,6 +99,7 @@ def get_feed_items(owner: str = "anonymous", author: str = "") -> Dict[str, Any]
             for item in items:
                 item["liked"] = item["id"] in liked_set
                 item["bookmarked"] = item["id"] in bookmarked_set
+        app_follows.apply_to_items(conn, items, owner)
 
         # Hidden after reports, or from an account this viewer blocked
         items = filescan.apply_to_items(exclusive.apply_to_items(moderation.visible_items(conn, items, owner)))
@@ -277,16 +279,16 @@ def get_bookmarks(caller: Caller = Depends(caller_from_query)):
             "ORDER BY seeds.created_at DESC",
             (owner,)
         ).fetchall()
+        items = []
+        for r in rows:
+            d = seed_row_to_dict(r)
+            d["bookmarked"] = True  # They're all bookmarked by definition
+            d["liked"] = False  # Could check but not critical for bookmarks view
+            items.append(d)
+        app_follows.apply_to_items(conn, items, owner)
         conn.close()
     except Exception:
         return {"items": []}
-
-    items = []
-    for r in rows:
-        d = seed_row_to_dict(r)
-        d["bookmarked"] = True  # They're all bookmarked by definition
-        d["liked"] = False  # Could check but not critical for bookmarks view
-        items.append(d)
 
     return {"items": filescan.apply_to_items(exclusive.apply_to_items(items))}
 

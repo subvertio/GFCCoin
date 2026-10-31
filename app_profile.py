@@ -11,6 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
+import app_follows
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH, AVATAR_DIR
 
@@ -172,7 +173,7 @@ async def upload_avatar(
 
 
 @router.get("/users/{username}")
-def get_public_profile(username: str):
+def get_public_profile(username: str, caller: Caller = Depends(caller_from_query)):
     """Return a user's public profile (no email/phone for privacy)."""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
@@ -196,4 +197,6 @@ def get_public_profile(username: str):
         "bio":        row[3] or "",
         "avatar":     avatar_url,
         "created_at": row[7] or "",
+        # followers, following, followed_by_me (the caller follows this account)
+        **app_follows.profile_extras(row[0], caller.owner("read")),
     }
