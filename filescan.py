@@ -112,6 +112,11 @@ def check_zip(path: Path) -> Tuple[bool, str, Dict]:
 
 # ---------- ClamAV ----------
 
+# ClamAV skips (and passes) files over its limits, 100 MB by default: raise them past the largest
+# post. deploy/clamav.sh sets the same limits for the daemon in clamd.conf.
+CLAMSCAN_LIMITS = ["--max-filesize=2000M", "--max-scansize=4000M"]
+
+
 def scanner_command(path: Path) -> Optional[List[str]]:
     custom = os.environ.get("GFC_CLAMSCAN", "").strip()
     if custom:
@@ -120,7 +125,7 @@ def scanner_command(path: Path) -> Optional[List[str]]:
         # --fdpass: the daemon reads the open file, so it doesn't need access to the node's data dir
         return ["clamdscan", "--no-summary", "--fdpass", str(path)]
     if shutil.which("clamscan"):
-        return ["clamscan", "--no-summary", "--scan-archive=yes", str(path)]
+        return ["clamscan", "--no-summary", "--scan-archive=yes", *CLAMSCAN_LIMITS, str(path)]
     return None
 
 

@@ -1,4 +1,5 @@
 import re
+import shutil
 import uuid
 import sqlite3
 import datetime
@@ -6,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
+from starlette.concurrency import run_in_threadpool
 
 import first_post
 import moderation
@@ -41,6 +43,29 @@ def detect_content_type(filename: str) -> str:
         if ext in extensions:
             return ctype
     return "other"
+
+
+MAX_THUMB_BYTES = 5 * 1024 * 1024
+_TOO_BIG = "Posts can be up to {} MB."
+
+
+def _save_upload(file: UploadFile, dest) -> int:
+    """Copy an upload to `dest` in pieces; 413 (and nothing kept) past config.MAX_UPLOAD_BYTES."""
+    limit = config.MAX_UPLOAD_BYTES
+    size = 0
+    file.file.seek(0)
+    with open(dest, "wb") as out:
+        while True:
+            chunk = file.file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                out.close()
+                dest.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail=_TOO_BIG.format(limit // (1024 * 1024)))
+            out.write(chunk)
+    return size
 
 
 def safe_name(name: str) -> str:
@@ -245,14 +270,15 @@ async def seeds_upload(
     sid = signing.seed_id_for(reward_wallet, orig_safe) if reward_wallet else nonce
     orig_path = ORIG_DIR / orig_safe
 
-    # Persist original
+    # Persist original: copied in 1 MB pieces from the request's temp file, never all in memory
+    # (a 1 GB video on a 1 GB server would otherwise run it out of memory)
     try:
-        raw = await file.read()
-        orig_path.write_bytes(raw)
+        file_size = await run_in_threadpool(_save_upload, file, orig_path)
+    except HTTPException:
+        raise
     except Exception as ex:
+        orig_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"failed to save file: {ex}")
-
-    file_size = len(raw)
     content_type = detect_content_type(file.filename or "")
     final_title = title or safe_name(file.filename or "")
 
@@ -261,7 +287,9 @@ async def seeds_upload(
     thumb_filename = ""
     if thumbnail is not None:
         try:
-            th_raw = await thumbnail.read()
+            th_raw = await thumbnail.read(MAX_THUMB_BYTES + 1)
+            if len(th_raw) > MAX_THUMB_BYTES:
+                raise ValueError("thumbnail too big")
             thumb_filename = f"{sid}_thumb.jpg"
             (THUMB_DIR / thumb_filename).write_bytes(th_raw)
             thumb_url = f"/thumbs/{thumb_filename}"

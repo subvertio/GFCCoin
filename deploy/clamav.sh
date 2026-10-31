@@ -34,6 +34,20 @@ if ! ls /var/lib/clamav/*.c[lv]d >/dev/null 2>&1; then
     systemctl start clamav-freshclam >/dev/null 2>&1 || true
 fi
 
+# The daemon's limits (clamscan gets the same on its command line, filescan.py): ClamAV
+# passes files over MaxFileSize unscanned, 100 MB by default; posts can be 1 GB
+if [[ -f /etc/clamav/clamd.conf ]]; then
+    for kv in "MaxFileSize 2000M" "MaxScanSize 4000M" "StreamMaxLength 2000M"; do
+        key="${kv%% *}"
+        if grep -q "^$key " /etc/clamav/clamd.conf; then
+            sed -i "s/^$key .*/$kv/" /etc/clamav/clamd.conf
+        else
+            echo "$kv" >> /etc/clamav/clamd.conf
+        fi
+    done
+    systemctl try-restart clamav-daemon >/dev/null 2>&1 || true
+fi
+
 if [[ $big_enough -eq 1 ]]; then
     if ! command -v clamdscan >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y -q clamav-daemon clamdscan >/dev/null

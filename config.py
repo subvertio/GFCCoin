@@ -71,3 +71,8 @@ BRIDGE_TOKENS = {
 BRIDGE_MIN_DEPOSIT_CENTS = int(os.environ.get("GFC_BRIDGE_MIN_DEPOSIT_CENTS", "10000"))
 BRIDGE_RELAY_FEE_CENTS = int(os.environ.get("GFC_BRIDGE_RELAY_FEE_CENTS", "0"))
 BRIDGE_FAUCET_HOLD_DAYS = float(os.environ.get("GFC_BRIDGE_FAUCET_HOLD_DAYS", "14"))
+
+
+# Largest post (upload or file synced from a peer). Uploads are streamed to disk, never held in
+# memory, so this is about disk and bandwidth. Caddy's request_body max_size must allow it too.
+MAX_UPLOAD_BYTES = int(float(os.environ.get("GFC_MAX_UPLOAD_MB", "1024")) * 1024 * 1024)

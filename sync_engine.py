@@ -17,6 +17,8 @@ signatures and be funded before they are accepted; see sync_ingest.py.
 
 import asyncio
 import json
+import os
+import uuid
 import struct
 import sqlite3
 import time
@@ -26,6 +28,7 @@ from typing import Dict, List, Optional, Set, TYPE_CHECKING
 from pathlib import Path
 
 import audio_stream
+import config
 import exclusive
 import filescan
 import reposts
@@ -44,6 +47,19 @@ FILE_CHUNK_SIZE = 256 * 1024  # 256 KB chunks for file transfer
 
 # Tables, columns and accept rules for synced rows live in sync_ingest.py
 # (shared with the tracker relay in peer_discovery.py).
+
+
+
+def _discard_part(pending: dict) -> None:
+    """Drop a half-received file (closed handle, .part deleted)."""
+    try:
+        pending["handle"].close()
+    except Exception:
+        pass
+    try:
+        pending["part"].unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 class SyncPeer:
@@ -606,13 +622,34 @@ class SyncEngine:
         file_size = msg.get("file_size", 0)
         logger.info(f"Peer {peer.peer_address} sending seed {file_type} {seed_id} ({filename}, {file_size} bytes)")
 
-        # Prepare to receive chunks
+        try:
+            file_size = int(file_size or 0)
+        except (TypeError, ValueError):
+            return
+        if file_size > config.MAX_UPLOAD_BYTES:
+            logger.info(f"Skipping {file_type} {seed_id} from {peer.peer_address}: {file_size} bytes is over the limit")
+            return
+
+        # Prepare to receive chunks: written to a .part file as they come, never held in memory
         chunk_key = f"{seed_id}:{file_type}"
+        old = self._pending_file_chunks.pop(chunk_key, None)
+        if old:
+            _discard_part(old)
+        dest_dir = SEEDS_THUMB_DIR if file_type == "thumbnail" else SEEDS_ORIG_DIR
+        part = dest_dir / f".{uuid.uuid4().hex}.part"
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            handle = open(part, "wb")
+        except OSError as e:
+            logger.warning(f"Can't receive {filename}: {e}")
+            return
         self._pending_file_chunks[chunk_key] = {
             "filename": filename,
             "file_type": file_type,
             "expected_size": file_size,
-            "chunks": [],
+            "part": part,
+            "handle": handle,
+            "received": 0,
         }
 
     def _on_seed_file_chunk(self, peer: SyncPeer, msg: dict):
@@ -629,12 +666,19 @@ class SyncEngine:
             logger.debug(f"Received chunk for unknown seed file {chunk_key}")
             return
 
-        # Decode and store chunk
+        # Decode and write the chunk at its place in the file
         try:
             chunk_data = base64.b64decode(data_b64)
-            pending["chunks"].append((chunk_idx, chunk_data))
+            idx = int(chunk_idx)
+            if idx < 0 or (idx * FILE_CHUNK_SIZE + len(chunk_data)) > max(pending["expected_size"], 1) + FILE_CHUNK_SIZE:
+                raise ValueError("chunk outside the announced file size")
+            pending["handle"].seek(idx * FILE_CHUNK_SIZE)
+            pending["handle"].write(chunk_data)
+            pending["received"] += len(chunk_data)
         except Exception as e:
-            logger.debug(f"Error decoding chunk {chunk_idx} for {chunk_key}: {e}")
+            logger.debug(f"Error with chunk {chunk_idx} for {chunk_key}: {e}")
+            self._pending_file_chunks.pop(chunk_key, None)
+            _discard_part(pending)
             return
 
         if is_last:
@@ -643,16 +687,17 @@ class SyncEngine:
             del self._pending_file_chunks[chunk_key]
 
     def _assemble_seed_file(self, seed_id: str, file_type: str, pending: dict):
-        """Assemble received chunks into a file on disk, then award PoDT credits."""
+        """Move the received .part file into place, then award PoDT credits."""
         filename = pending["filename"]
-        chunks = pending["chunks"]
-
-        if not chunks or not filename:
+        try:
+            pending["handle"].close()
+        except Exception:
+            pass
+        part: Path = pending["part"]
+        size = part.stat().st_size if part.exists() else 0
+        if not size or not filename:
+            _discard_part(pending)
             return
-
-        # Sort chunks by index and concatenate
-        chunks.sort(key=lambda x: x[0])
-        file_data = b"".join(c[1] for c in chunks)
 
         # Write to the appropriate directory
         if file_type == "thumbnail":
@@ -663,11 +708,11 @@ class SyncEngine:
         dest_path = dest_dir / filename
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(file_data)
-            logger.info(f"Saved synced seed {file_type} file: {filename} ({len(file_data)} bytes)")
+            os.replace(part, dest_path)
+            logger.info(f"Saved synced seed {file_type} file: {filename} ({size} bytes)")
         except Exception as e:
             logger.warning(f"Failed to save seed file {filename}: {e}")
+            _discard_part(pending)
             return
 
         # Fingerprint it (repost check; a treasury node notarises originals), then
@@ -682,15 +727,15 @@ class SyncEngine:
                 row = conn.execute("SELECT content_type, exclusive FROM seeds WHERE id = ?", (seed_id,)).fetchone()
                 conn.close()
                 if row:
-                    audio_stream.enqueue(seed_id, filename, row[0], len(file_data))
+                    audio_stream.enqueue(seed_id, filename, row[0], size)
                     if row[1] and row[0] == "video":  # a GFC Exclusive video: this node makes its own public teaser
                         exclusive.make_teaser_later(seed_id, filename)
                     if filescan.is_download(filename):  # every node scans downloads itself
                         filescan.enqueue(seed_id)
             except Exception as e:
                 logger.warning(f"Media stream queueing failed for seed {seed_id}: {e}")
-        if file_type != "thumbnail" and len(file_data) >= 1024:
-            self._award_podt_credits(seed_id, filename, len(file_data), pending)
+        if file_type != "thumbnail" and size >= 1024:
+            self._award_podt_credits(seed_id, filename, size, pending)
 
     def _award_podt_credits(self, seed_id: str, filename: str, file_size: int, pending: dict):
         """Award PoDT credits to the seeder after successful file transfer."""

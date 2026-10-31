@@ -6,6 +6,8 @@ Run from the repository root:
     python -m unittest discover -s tests -v
 """
 
+import base64
+import types
 import io
 import json
 import os
@@ -279,8 +281,13 @@ class RepostTests(unittest.TestCase):
         self.assertEqual(ingest_rows("seeds", columns, [[seed[c] for c in columns]])["inserted"], 1)
         alice_before = self.balance(alice_wallet)
         engine = sync_engine.SyncEngine.__new__(sync_engine.SyncEngine)  # no networking needed
+        engine._pending_file_chunks = {}
+        peer = types.SimpleNamespace(peer_address="peer")
         with as_treasury_node():
-            engine._assemble_seed_file(seed["id"], "original", {"filename": filename, "chunks": [(0, data)]})
+            engine._on_seed_file_response(peer, {"seed_id": seed["id"], "file_type": "original", "found": True,
+                                                 "filename": filename, "file_size": len(data)})
+            engine._on_seed_file_chunk(peer, {"seed_id": seed["id"], "file_type": "original", "chunk_idx": 0,
+                                              "data": base64.b64encode(data).decode(), "is_last": True})
         conn = sqlite3.connect(main.DB_PATH)
         self.assertEqual(reposts.repost_of(conn, seed["id"])["original_seed_id"], original["id"])
         conn.close()
