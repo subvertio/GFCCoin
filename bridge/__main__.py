@@ -62,6 +62,10 @@ def _serve_attester(cfg: BridgeConfig, host: str, port: int) -> int:
     secret_file = os.environ.get("GFC_ATTESTER_SECRET_FILE")
     if not cfg.attester_key_file or not secret_file:
         raise SystemExit("set GFC_BRIDGE_ATTESTER_KEY_FILE and GFC_ATTESTER_SECRET_FILE")
+    for p in cfg.attester_problems():  # refused everywhere: it would sign for the wrong thing, or blind
+        print(f"Refusing to start the attester: {p}", file=sys.stderr)
+    if cfg.attester_problems():
+        return 2
     problems = key_problems(cfg, {"attester": cfg.attester_key_file})
     why = keyfiles.access_problem(secret_file)
     if why:

@@ -143,6 +143,37 @@ class RemoteAttesterTests(EscrowTestCase):
                                  ).mainnet_problems(), [])
         self.assertTrue(replace(main, remote_attester_urls=["http://10.0.0.5:8300"]).mainnet_problems())
 
+    def test_a_tailscale_address_counts_as_private_but_a_name_doesnt(self):
+        ok = attester_http.is_private_url
+        self.assertTrue(ok("http://100.75.98.77:8300"))       # Tailscale: WireGuard already encrypts it
+        self.assertTrue(ok("http://127.0.0.1:8301"))
+        self.assertFalse(ok("http://odessius:8300"))          # a name could resolve anywhere
+        self.assertFalse(ok("http://100.128.0.1:8300"))       # just outside 100.64.0.0/10
+        self.assertFalse(ok("http://192.168.1.5:8300"))
+
+    def test_the_relayer_refuses_an_attester_whose_policy_would_refuse_every_mint(self):
+        # Another relay fee: every requested amount would differ from what the attester computes
+        with self.assertRaises(SystemExit) as caught:
+            self.client(cfg=replace(self.cfg, relay_fee_cents=100))
+        self.assertIn("relay_fee_cents", str(caught.exception))
+        # A relayer whose mint TTL is longer than the attester allows
+        with self.assertRaises(SystemExit) as caught:
+            self.client(cfg=replace(self.cfg, mint_ttl_seconds=self.cfg.mint_ttl_seconds * 2))
+        self.assertIn("TTL", str(caught.exception))
+        # A softer difference only warns
+        with self.assertLogs("gfc.bridge.attester_http", "WARNING"):
+            self.client(cfg=replace(self.cfg, faucet_hold_days=7))
+
+    def test_attest_serve_refuses_a_config_it_cant_sign_for(self):
+        self.assertEqual(self.cfg.attester_problems(), [])
+        self.assertTrue(any("GFC_BRIDGE_ADDRESS" in p for p in replace(self.cfg, bridge_address="").attester_problems()))
+        self.assertTrue(any("ESCROW" in p for p in replace(self.cfg, escrow_wallet="").attester_problems()))
+        self.assertTrue(any("LEDGER_DB" in p for p in replace(self.cfg, ledger_db="nowhere.db").attester_problems()))
+        main = replace(self.cfg, chain_id=8453)
+        self.assertTrue(any("CHECKPOINT" in p for p in main.attester_problems()))
+        self.assertEqual(replace(main, checkpoint_url="https://node", checkpoint_pubkeys=["ab" * 32]
+                                 ).attester_problems(), [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
