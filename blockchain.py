@@ -608,6 +608,9 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
 
     if sender_wallet == TREASURY_WALLET_ID or recipient_wallet == TREASURY_WALLET_ID:
         raise ValueError("Treasury funds move only through grants and rewards")
+    problem = recipient_problem(recipient_wallet)
+    if problem:
+        raise ValueError(problem)
     violation = bridge_rule_violation(sender_wallet, recipient_wallet, reason)
     if violation:
         raise ValueError(violation)
@@ -652,6 +655,22 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
         _insert_tx(conn, tx)
         tx["block_index"] = _append_block(conn, [tx_id])["block_index"]
     return tx
+
+
+_EVM_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def recipient_problem(recipient: str) -> Optional[str]:
+    """
+    Why a transfer can't go to this recipient, or None. Only a wallet key can ever spend what it
+    receives: GFC sent to anything else (an Ethereum address pasted into Send, a typo) is gone.
+    """
+    if signing.is_public_key(recipient):
+        return None
+    if isinstance(recipient, str) and _EVM_ADDRESS_RE.match(recipient):
+        return ("that's an Ethereum address, not a GFC wallet: use Bridge to Base to send GFC to it. "
+                "Sent here, it would be lost")
+    return "the recipient isn't a GFC wallet ID (64 hex characters)"
 
 
 def _require_balance(balance_cents: int, amount_cents: int):
@@ -947,6 +966,8 @@ def _check_stateless(tx: dict) -> Tuple[str, str]:
     if tx_type == TX_TYPE_TRANSFER:
         if not signing.is_public_key(sender):
             return REJECTED, "sender is not a public key"
+        if recipient_problem(recipient):  # GFC sent to a non-key can never be spent again
+            return REJECTED, "recipient is not a wallet key"
         if tx.get("signer") not in ("", None, sender):
             return REJECTED, "transfer must be signed by its sender"
         signer = sender

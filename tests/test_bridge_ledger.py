@@ -335,5 +335,32 @@ class BridgeApiTests(EscrowTestCase):
             "wallet_id": wallet, "chain_id": CHAIN, "evm_address": EVM, "amount": 150}).status_code, 401)
 
 
+class RecipientTests(EscrowTestCase):
+    """GFC sent to anything but a wallet key can never be spent again (found in the testnet rehearsal)."""
+
+    def setUp(self):
+        super().setUp()
+        self.db = new_ledger()
+        self.priv, self.pub = signing.generate_keypair()
+        mint(self.db, self.pub, 1_000_00)
+
+    def test_an_ethereum_address_is_refused_with_a_pointer_to_bridge_to_base(self):
+        with self.assertRaises(ValueError) as caught:
+            blockchain.process_transfer(self.db, self.pub, EVM, 100_00)
+        self.assertIn("Bridge to Base", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            blockchain.process_transfer(self.db, self.pub, "not-a-wallet", 100_00)
+        self.assertIn("isn't a GFC wallet ID", str(caught.exception))
+
+    def test_every_node_rejects_a_signed_transfer_to_a_non_wallet(self):
+        for bad in (EVM, "0x" + "ab" * 32, "ab" * 31, "zz" * 32):
+            (status, why), _ = send(self.db, self.priv, self.pub, bad, 100_00)
+            self.assertEqual(status, blockchain.REJECTED, bad)
+            self.assertIn("recipient", why)
+        (status, _), _ = send(self.db, self.priv, self.pub, signing.generate_keypair()[1], 100_00)
+        self.assertEqual(status, blockchain.ACCEPTED)
+        self.assertEqual(blockchain.get_balance_cents(self.db, self.pub), 900_00)
+
+
 if __name__ == "__main__":
     unittest.main()
