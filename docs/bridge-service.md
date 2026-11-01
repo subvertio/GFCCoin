@@ -339,10 +339,11 @@ python -m unittest discover -s tests -p "test_bridge*.py"
   mixes fresh credit with enough clean GFC in the same wallet can bridge the clean part
   first, and fresh credit becomes bridgeable once it ages. Phone verification (one
   account per number) is still the main defence against fake accounts.
-- **Attesters run in-process.** The relayer calls `Attester` objects directly, so one
-  operator holds every key, which is only acceptable on a testnet; mainnet refuses it. Before
-  mainnet, each attester needs a small signing endpoint of its own, on separate machines and
-  operators. Until that's built, a mainnet bridge can't reach its threshold of 2.
+- **Attesters need their own machines.** On a testnet the relayer may hold every attester key;
+  mainnet refuses more than one. The others run `python -m bridge attest-serve` next to their
+  own ledger node, and the relayer reaches them over HMAC-authenticated HTTP
+  ([remote-attesters.md](remote-attesters.md)). Separate operators, not just separate machines,
+  is what makes 2 of 3 mean something.
 - **Ledger finality is time-based.** It still relies on this node's ordering (see the
   double-spend note in `dex-plan.md`). Treasury-signed checkpoints should replace it.
 - **Refunds are run by hand.** `python -m bridge refund` handles deposits. A held release

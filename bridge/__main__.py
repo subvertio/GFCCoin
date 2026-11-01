@@ -10,6 +10,8 @@ python -m bridge <command>
   new-escrow-key FILE    create an encrypted escrow key file; prints only its public key
   new-evm-key FILE       create an encrypted EVM keystore file; prints only its address
   clear-incident ADDR    forget a latched watched-wallet alarm once its key is rotated
+  attest-serve           run this machine's attester as a signing endpoint (bridge/attester_http.py)
+  new-attester-secret FILE  create the secret an attester endpoint and the relayer share
   run [--interval S]     relay, release and reconcile in a loop; errors are logged and retried
   roles                  who holds every role on the token and bridge, and what's wrong (read-only)
 
@@ -17,8 +19,10 @@ Configuration is GFC_BRIDGE_* environment variables (bridge/config.py). In this
 version the relayer calls attesters in-process: GFC_BRIDGE_ATTESTER_KEY_FILE,
 plus GFC_BRIDGE_EXTRA_ATTESTER_KEY_FILES (comma-separated) for a single-operator
 testnet. On mainnet the service refuses to hold more than one attester key (that
-would put the whole quorum on one machine, audit F14): the other attesters must run
-on separate machines; see docs/bridge-service.md.
+would put the whole quorum on one machine, audit F14): the other attesters run
+`attest-serve` on their own machines, and the relayer reaches them through
+GFC_BRIDGE_REMOTE_ATTESTER_URLS and GFC_BRIDGE_REMOTE_ATTESTER_SECRET_FILES; see
+docs/remote-attesters.md.
 """
 
 import argparse
@@ -26,6 +30,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # node modules (blockchain, signing)
@@ -38,6 +43,44 @@ from bridge.store import Store  # noqa: E402
 
 
 logger = logging.getLogger("gfc.bridge")
+
+
+def _remote_attesters(cfg: BridgeConfig) -> list:
+    from bridge.attester_http import RemoteAttester, read_secret
+    if len(cfg.remote_attester_urls) != len(cfg.remote_attester_secret_files):
+        raise SystemExit("GFC_BRIDGE_REMOTE_ATTESTER_URLS and GFC_BRIDGE_REMOTE_ATTESTER_SECRET_FILES "
+                         "need one entry each per attester")
+    return [RemoteAttester(cfg, url, read_secret(f), label=f"remote attester #{i + 1}")
+            for i, (url, f) in enumerate(zip(cfg.remote_attester_urls, cfg.remote_attester_secret_files))]
+
+
+def _serve_attester(cfg: BridgeConfig, host: str, port: int) -> int:
+    """attest-serve: this machine's attester, its own ledger node and key, as a signing endpoint."""
+    from bridge import attester_http, keyfiles
+    from bridge.attester import Attester
+    secret_file = os.environ.get("GFC_ATTESTER_SECRET_FILE")
+    if not cfg.attester_key_file or not secret_file:
+        raise SystemExit("set GFC_BRIDGE_ATTESTER_KEY_FILE and GFC_ATTESTER_SECRET_FILE")
+    problems = key_problems(cfg, {"attester": cfg.attester_key_file})
+    why = keyfiles.access_problem(secret_file)
+    if why:
+        problems.append(f"the attester secret file is {why}")
+    for p in problems:
+        if cfg.is_testnet:
+            logger.warning(f"Testnet only: {p}")
+        else:
+            print(f"Refusing to sign on mainnet: {p}", file=sys.stderr)
+    if problems and not cfg.is_testnet:
+        return 2
+    attester = Attester(cfg, key=read_evm_key(cfg.attester_key_file))
+    server = attester_http.make_server(attester, attester_http.read_secret(secret_file), host, port)
+    logger.info(f"Attester {attester.address} signing for chain {cfg.chain_id} bridge {cfg.bridge_address} "
+                f"from ledger {cfg.ledger_db}, on {host}:{port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 MAX_BACKOFF_SECONDS = 600
 
@@ -95,6 +138,11 @@ def main(argv=None) -> int:
     ek.add_argument("file")
     ci = sub.add_parser("clear-incident")
     ci.add_argument("address")
+    sv = sub.add_parser("attest-serve")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8300)
+    ns = sub.add_parser("new-attester-secret")
+    ns.add_argument("file")
     rp = sub.add_parser("run")
     rp.add_argument("--interval", type=float, default=30.0)
     args = parser.parse_args(argv)
@@ -129,7 +177,21 @@ def main(argv=None) -> int:
             return 1
         print(f"Encrypted key written to {path}. Its address:\n  {keyfiles.write_evm_keystore(str(path), passphrase)}")
         return 0
+    if args.cmd == "new-attester-secret":
+        import signing
+        from bridge import attester_http, keyfiles
+        path = Path(args.file)
+        if path.exists():
+            print(f"{path} already exists; not overwriting it", file=sys.stderr)
+            return 1
+        signing._write_secret(path, attester_http.new_secret())
+        keyfiles.restrict_to_owner(str(path))
+        print(f"Secret written to {path}. Copy it to the relayer machine (never by chat or email) and set it as "
+              "GFC_ATTESTER_SECRET_FILE here and in GFC_BRIDGE_REMOTE_ATTESTER_SECRET_FILES there.")
+        return 0
     cfg = BridgeConfig.from_env()
+    if args.cmd == "attest-serve":
+        return _serve_attester(cfg, args.host, args.port)
     store = Store(cfg.state_db)
     store.pin_bridge(cfg.bridge_address)  # one state file per bridge contract
 
@@ -193,6 +255,9 @@ def main(argv=None) -> int:
                                            ("escrow", cfg.escrow_key_file)) if path}
     files.update({f"attester {i + 1}": f for i, f in enumerate(_attester_files(cfg))})
     problems = cfg.mainnet_problems() + key_problems(cfg, files)
+    from bridge.keyfiles import access_problem
+    problems += [f"remote attester secret {Path(f).name} is {why}" for f in cfg.remote_attester_secret_files
+                 if (why := access_problem(f))]
     if problems and cfg.is_testnet:
         for p in problems:
             logger.warning(f"Testnet only: {p}")
@@ -207,14 +272,20 @@ def main(argv=None) -> int:
     escrow_key = read_escrow_key(cfg.escrow_key_file) if cfg.escrow_key_file else None
     pauser_key = read_evm_key(cfg.pauser_key_file) if cfg.pauser_key_file else None
     attester_keys = [read_evm_key(f) for f in _attester_files(cfg)]
-    attesters = [Attester(cfg, key=k) for k in attester_keys]
+    attesters = [Attester(cfg, key=k) for k in attester_keys] + _remote_attesters(cfg)
     shared = _distinct({**({"relayer": relayer_key} if relayer_key else {}),
                         **({"pauser": pauser_key} if pauser_key else {}),
                         **{f"attester {i + 1}": k for i, k in enumerate(attester_keys)}})
+    addresses = [a.address for a in attesters]
+    if len(set(addresses)) != len(addresses):
+        shared.append("two attesters (local or remote) are the same wallet")
     if shared:
         for p in shared:
             print(p, file=sys.stderr)
         return 2
+    # Remote attesters' wallets never send transactions either: watch them like the local ones
+    remote = [a.address for a in attesters[len(attester_keys):]]
+    cfg = replace(cfg, watch_addresses=cfg.watch_addresses + remote, quiet_addresses=cfg.quiet_addresses + remote)
 
     def do_relay():
         if not relayer_key:

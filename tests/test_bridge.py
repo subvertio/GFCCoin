@@ -267,6 +267,23 @@ class BridgeServiceTest(unittest.TestCase):
         self.assertEqual(self.balance(self.user_evm.address), (500_00 - 1_00) * CENT)
         self.assertTrue(reconcile(self.cfg, self.store, self.bridge).ok)
 
+    def test_a_remote_attester_over_http_completes_the_quorum(self):
+        """One attester in this process, the other behind its own signing endpoint (attester_http)."""
+        import threading
+        from bridge import attester_http
+        secret = attester_http.new_secret().encode()
+        server = attester_http.make_server(Attester(self.cfg, key=self.attester_accts[1].key.hex()), secret,
+                                           "127.0.0.1", 0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        remote = attester_http.RemoteAttester(self.cfg, f"http://127.0.0.1:{server.server_address[1]}", secret)
+
+        dep = self.deposit(300_00)
+        self.assertEqual(self.relay([self.attesters()[0], remote])[MINTED], 1)
+        self.assertEqual(self.balance(self.user_evm.address), 299_00 * CENT)
+        self.assertEqual(self.store.deposit(dep["tx_hash"])["status"], MINTED)
+
     def test_not_final_deposit_waits(self):
         self.deposit(500_00, when=datetime.now(timezone.utc) - timedelta(seconds=5))
         self.relay()
