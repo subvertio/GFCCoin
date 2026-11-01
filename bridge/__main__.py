@@ -10,6 +10,7 @@ python -m bridge <command>
   new-escrow-key FILE    create an encrypted escrow key file; prints only its public key
   new-evm-key FILE       create an encrypted EVM keystore file; prints only its address
   clear-incident ADDR    forget a latched watched-wallet alarm once its key is rotated
+  reset-checkpoints      after a checkpoint halt has been investigated: rebuild the checkpoint copy
   attest-serve           run this machine's attester as a signing endpoint (bridge/attester_http.py)
   new-attester-secret FILE  create the secret an attester endpoint and the relayer share
   run [--interval S]     relay, release and reconcile in a loop; errors are logged and retried
@@ -138,6 +139,7 @@ def main(argv=None) -> int:
     ek.add_argument("file")
     ci = sub.add_parser("clear-incident")
     ci.add_argument("address")
+    sub.add_parser("reset-checkpoints")
     sv = sub.add_parser("attest-serve")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8300)
@@ -203,8 +205,24 @@ def main(argv=None) -> int:
             print(f"{table}: {counts or 'none'}")
         for addr, text in store.meta_like("incident:").items():
             print(f"INCIDENT {addr}: {text}")
+        from bridge import checkpoints
+        mirror = checkpoints.from_config(cfg)
+        if mirror is not None:
+            latest = mirror.latest()
+            print(f"checkpoints: {'HALTED: ' + mirror.halted() if mirror.halted() else 'ok'}"
+                  + (f", {latest['count']} rows, signed {latest['time']}" if latest else ", none copied yet"))
         if store.get_meta("last_error"):
             print(f"last error: {store.get_meta('last_error')}")
+        return 0
+    if args.cmd == "reset-checkpoints":
+        from bridge import checkpoints
+        mirror = checkpoints.from_config(cfg)
+        if mirror is None:
+            raise SystemExit("GFC_BRIDGE_CHECKPOINT_URL is not set")
+        print(f"was halted: {mirror.halted() or 'no'}")
+        mirror.reset()
+        mirror.sync(force=True)
+        print(f"rebuilt: {mirror.latest()['count']} rows checkpointed")
         return 0
     if args.cmd == "clear-incident":
         from bridge.reconcile import clear_incident
@@ -287,6 +305,9 @@ def main(argv=None) -> int:
     remote = [a.address for a in attesters[len(attester_keys):]]
     cfg = replace(cfg, watch_addresses=cfg.watch_addresses + remote, quiet_addresses=cfg.quiet_addresses + remote)
 
+    from bridge import checkpoints as checkpoint_mirror
+    mirror = checkpoint_mirror.from_config(cfg)
+
     def do_relay():
         if not relayer_key:
             raise SystemExit("GFC_BRIDGE_RELAYER_KEY_FILE is not set")
@@ -301,7 +322,7 @@ def main(argv=None) -> int:
 
     def do_reconcile() -> bool:
         report = reconcile(cfg, store, bridge, pauser_key, own_keys=[relayer_key, *attester_keys],
-                           quiet_keys=attester_keys, verifiers=verifiers)
+                           quiet_keys=attester_keys, verifiers=verifiers, checkpoints=mirror)
         print(f"reconcile: {'ok' if report.ok else 'PROBLEMS'} outstanding={report.outstanding_cents} "
               f"escrow={report.escrow_cents} unpaid={report.unpaid_release_cents}"
               + (" (bridge paused)" if report.paused else ""))

@@ -18,8 +18,10 @@ run against a throwaway ledger and a local `anvil` chain.
    - the row must really be in its block (the block exists, holds only that deposit, and its
      Merkle root is the deposit's hash), and **admitted** to this ledger more than
      `finality_seconds` ago. The timestamp the depositor signed doesn't count: anyone can
-     backdate it (audit F08). See [ledger-checkpoints.md](ledger-checkpoints.md) for what's
-     still trusted.
+     backdate it (audit F08);
+   - with checkpoints configured (mainnet requires them), the deposit is in the canonical
+     node's signed log, under a checkpoint signed more than `finality_seconds` ago, and that
+     log has never been rolled back ([ledger-checkpoints.md](ledger-checkpoints.md)).
 
    It doesn't matter how a row got into the DB. A row written straight into SQLite, or
    a forged peer row, fails the same checks.
@@ -344,8 +346,10 @@ python -m unittest discover -s tests -p "test_bridge*.py"
   own ledger node, and the relayer reaches them over HMAC-authenticated HTTP
   ([remote-attesters.md](remote-attesters.md)). Separate operators, not just separate machines,
   is what makes 2 of 3 mean something.
-- **Ledger finality is time-based.** It still relies on this node's ordering (see the
-  double-spend note in `dex-plan.md`). Treasury-signed checkpoints should replace it.
+- **The canonical node decides the order.** Signed checkpoints make its history public and
+  append-only for the attesters ([ledger-checkpoints.md](ledger-checkpoints.md)), but its
+  operator still decides which of two conflicting transfers counts (see the double-spend note
+  in `dex-plan.md`).
 - **Refunds are run by hand.** `python -m bridge refund` handles deposits. A held release
   to a bad wallet still needs a person: those tokens are already burned.
 - **The escrow key is hot.** It signs releases on the bridge host. Keep the release limits

@@ -34,6 +34,7 @@ from app_moderation import router as moderation_router
 from app_webverify import router as webverify_router
 from app_treasury import router as treasury_router
 from app_release import router as release_router
+from app_checkpoints import router as checkpoints_router
 from app_recovery import router as recovery_router
 from app_bridge import router as bridge_router
 from app_follows import router as follows_router
@@ -105,6 +106,7 @@ app.include_router(moderation_router)
 app.include_router(webverify_router)
 app.include_router(treasury_router)
 app.include_router(release_router)
+app.include_router(checkpoints_router)
 app.include_router(recovery_router)
 app.include_router(bridge_router)
 app.include_router(follows_router)
@@ -729,6 +731,12 @@ async def startup_event():
     # notarises them, oldest first). In the background: images and models take a while.
     import threading
     threading.Thread(target=_backfill_fingerprints, daemon=True).start()
+    # Canonical node: signed ledger checkpoints for the bridge attesters (only with a pinned key)
+    try:
+        import ledger_checkpoints
+        ledger_checkpoints.start_signer(DB_PATH)
+    except Exception as e:
+        print(f"[Checkpoints] CRITICAL: signer not started: {e}")
     try:
         await start_p2p()
     except Exception as e:
