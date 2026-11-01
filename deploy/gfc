@@ -40,9 +40,11 @@ usage: gfc <command>
                         make FILE the public Android download at /app (refuses
                         anything not signed with the release key in
                         GFC_ANDROID_CERT_SHA256)
-  publish-windows FILE VERSION
+  publish-windows FILE VERSION [SIGFILE]
                         make FILE (the installer .exe, or the .zip holding it)
-                        the public Windows download at /app/windows
+                        the public Windows download at /app/windows. With the
+                        build's .sig, the apps also update themselves to it
+                        (required once GFC_UPDATER_PUBKEY is set)
   wallets NAME          a user's wallet IDs and balances (to find who to grant to)
   rotate-treasury --activate
                         step 2, after the pin is merged and 'gfc update' has run:
@@ -336,9 +338,10 @@ case "${1:-}" in
     publish-app)      need_root; [[ $# -eq 3 ]] || die "usage: gfc publish-app FILE VERSION  (e.g. gfc publish-app /tmp/gfc.apk 0.1.0)"
                       [[ -r "$2" ]] || die "can't read $2"
                       as_gfc "$VENV/bin/python" app_release.py publish "$(readlink -f "$2")" "$3" ;;
-    publish-windows)  need_root; [[ $# -eq 3 ]] || die "usage: gfc publish-windows FILE VERSION  (e.g. gfc publish-windows /tmp/GFC-Setup-0.1.0-Windows.zip 0.1.0)"
+    publish-windows)  need_root; [[ $# -eq 3 || $# -eq 4 ]] || die "usage: gfc publish-windows FILE VERSION [SIGFILE]  (e.g. gfc publish-windows /tmp/GFC_0.2.3_x64-setup.exe 0.2.3 /tmp/GFC_0.2.3_x64-setup.exe.sig)"
                       [[ -r "$2" ]] || die "can't read $2"
-                      as_gfc "$VENV/bin/python" app_release.py publish-windows "$(readlink -f "$2")" "$3" ;;
+                      [[ $# -eq 3 || -r "$4" ]] || die "can't read $4"
+                      as_gfc "$VENV/bin/python" app_release.py publish-windows "$(readlink -f "$2")" "$3" ${4:+"$(readlink -f "$4")"} ;;
     wallets)          shift; cmd_wallets "$@" ;;
     reports)          need_root; as_gfc "$VENV/bin/python" moderation.py list ;;
     moderate)         need_root; [[ $# -eq 3 ]] || { usage; exit 2; }; as_gfc "$VENV/bin/python" moderation.py "$2" "$3" ;;

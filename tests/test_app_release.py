@@ -6,6 +6,7 @@ Run from the repository root:
     python -m unittest discover -s tests -v
 """
 
+import base64
 import datetime
 import hashlib
 import io
@@ -13,6 +14,7 @@ import os
 import struct
 import unittest
 import zipfile
+from unittest import mock
 
 # Sets up the isolated data dir and test treasury key before any GFC module loads config
 import test_signed_ledger  # noqa: F401
@@ -20,6 +22,7 @@ import test_signed_ledger  # noqa: F401
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -222,6 +225,80 @@ class AppReleaseTests(unittest.TestCase):
         self.assertIsNone(app_release.windows_info())
         self.assertEqual(self.client.get("/app/windows").status_code, 404)
         self.assertIn("Windows app is coming soon", self.client.get("/app").text)
+
+
+    # ---------- self-updates (Tauri updater) ----------
+
+    def test_signed_windows_update(self):
+        key = UpdaterKey()
+        exe_path = make_windows("GFC_0.2.3_x64-setup.exe")
+        exe = open(exe_path, "rb").read()
+        with mock.patch.dict(os.environ, {"GFC_UPDATER_PUBKEY": key.pub}):
+            # Once the key is set, every Windows publish must be signed
+            with self.assertRaisesRegex(app_release.ReleaseError, "sig"):
+                app_release.publish_windows(exe_path, "0.2.3")
+            with self.assertRaisesRegex(app_release.ReleaseError, "doesn't match"):
+                app_release.publish_windows(exe_path, "0.2.3", key.sign(exe + b"x"))
+            with self.assertRaisesRegex(app_release.ReleaseError, "different updater key"):
+                app_release.publish_windows(exe_path, "0.2.3", UpdaterKey().sign(exe))
+            sig_file = TMP / "setup.exe.sig"
+            sig_file.write_text(key.sign(exe))
+            self.assertEqual(app_release._cli(["publish-windows", exe_path, "0.2.3", str(sig_file)]), 0)
+            m = self.client.get("/app/windows/update.json").json()
+            self.assertEqual(m["version"], "0.2.3")
+            plat = m["platforms"]["windows-x86_64"]
+            self.assertEqual(plat["signature"], key.sign_cache)
+            self.assertTrue(plat["url"].endswith("/app/windows/update.exe"))
+            self.assertEqual(self.client.get("/app/windows/update.exe").content, exe)
+            # A zipped installer is signed over the .exe inside it, and served bare for updates
+            zipped = make_windows("GFC-Setup-0.2.4-Windows.zip", zipped=True)
+            with zipfile.ZipFile(zipped) as zf:
+                inner = zf.read(zf.namelist()[0])
+            app_release.publish_windows(zipped, "0.2.4", key.sign(inner))
+            self.assertEqual(self.client.get("/app/windows/update.json").json()["version"], "0.2.4")
+            self.assertEqual(self.client.get("/app/windows/update.exe").content, inner)
+            self.assertEqual(self.client.get("/app/windows").content, open(zipped, "rb").read())
+        # Unsigned publishes (no key set) aren't offered as updates
+        app_release.publish_windows(exe_path, "0.2.5")
+        self.assertEqual(self.client.get("/app/windows/update.json").status_code, 204)
+        self.assertEqual(self.client.get("/app/windows/update.exe").status_code, 404)
+
+    def test_signature_without_a_key_and_garbage(self):
+        exe_path = make_windows("x.exe")
+        exe = open(exe_path, "rb").read()
+        with mock.patch.dict(os.environ, {"GFC_UPDATER_PUBKEY": ""}):
+            with self.assertRaisesRegex(app_release.ReleaseError, "GFC_UPDATER_PUBKEY"):
+                app_release.publish_windows(exe_path, "0.2.3", UpdaterKey().sign(exe))
+        key = UpdaterKey()
+        for bad in ("not base64!", base64.b64encode(b"one line").decode()):
+            with self.assertRaises(app_release.ReleaseError):
+                app_release.verify_updater_signature(exe, bad, key.pub)
+        # Unhashed (legacy "Ed") signatures verify too
+        app_release.verify_updater_signature(exe, key.sign(exe, prehash=False), key.pub)
+
+
+class UpdaterKey:
+    """A minisign key in Tauri's updater format: the .pub and .sig files are base64 of minisign's."""
+
+    def __init__(self):
+        self.key = Ed25519PrivateKey.generate()
+        self.keyid = os.urandom(8)
+        raw = self.key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        text = f"untrusted comment: minisign public key: {self.keyid.hex().upper()}\n" \
+               f"{base64.b64encode(b'Ed' + self.keyid + raw).decode()}\n"
+        self.pub = base64.b64encode(text.encode()).decode()
+        self.sign_cache = ""
+
+    def sign(self, data: bytes, prehash: bool = True) -> str:
+        message = hashlib.blake2b(data, digest_size=64).digest() if prehash else data
+        sig = self.key.sign(message)
+        trusted = "timestamp:1793500000\tfile:GFC_x64-setup.exe"
+        global_sig = self.key.sign(sig + trusted.encode())
+        text = ("untrusted comment: signature from tauri secret key\n"
+                f"{base64.b64encode((b'ED' if prehash else b'Ed') + self.keyid + sig).decode()}\n"
+                f"trusted comment: {trusted}\n{base64.b64encode(global_sig).decode()}\n")
+        self.sign_cache = base64.b64encode(text.encode()).decode()
+        return self.sign_cache
 
 
 def make_windows(name: str, zipped: bool = False) -> str:

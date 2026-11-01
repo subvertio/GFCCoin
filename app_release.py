@@ -7,11 +7,14 @@ GFC app downloads - the Android APK and the Windows installer, straight from the
                          check for updates
 - GET /app/windows       the Windows installer (the .exe, or the .zip holding it)
 - GET /app/windows.json  its version, size and SHA-256
+- GET /app/windows/update.json  the app's own update check (Tauri updater format): version, the
+                         installer's URL and its updater signature; 204 when nothing is signed
+- GET /app/windows/update.exe   the signed installer the app downloads to update itself
 
 Publishing (on the node, as root, normally through `gfc publish-app FILE VERSION` and
 `gfc publish-windows FILE VERSION`):
     python app_release.py publish /tmp/gfc.apk 0.1.0
-    python app_release.py publish-windows /tmp/GFC-Setup-0.1.0-Windows.zip 0.1.0
+    python app_release.py publish-windows /tmp/GFC-Setup-0.1.0-Windows.zip 0.1.0 [/tmp/setup.exe.sig]
     python app_release.py info
 
 publish refuses an APK unless its signing certificate is one of GFC_ANDROID_CERT_SHA256 (the
@@ -20,13 +23,20 @@ can't be published by mistake: phones that installed it could never take a relea
 This reads the certificate from the APK Signature Scheme v2/v3 block (or the v1 JAR signature);
 Android itself checks the signature when installing.
 
-The Windows installer isn't code-signed yet, so there's no signature to check: publish-windows
-only checks that it's a Windows program (or a zip holding exactly one), so a wrong file can't go
-out by mistake. Its SHA-256 is shown on the download page.
+The Windows installer isn't code-signed yet, so there's no Authenticode signature to check:
+publish-windows checks that it's a Windows program (or a zip holding exactly one), so a wrong file
+can't go out by mistake. Its SHA-256 is shown on the download page.
+
+Self-updates: the app (Tauri's updater) only installs an update signed with the updater key, whose
+public half is built into the app and set on the node as GFC_UPDATER_PUBKEY (the contents of
+gfc-updater.key.pub). With that set, publish-windows needs the installer's .sig (made by the
+build) and refuses one that doesn't verify, so a bad publish can't break every app's updates.
 
 Both live in DATA_DIR/app/ (not in git, not in backups); a publish replaces them atomically.
 """
 
+import base64
+import binascii
 import datetime
 import hashlib
 import html
@@ -41,9 +51,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import pkcs7
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from config import DATA_DIR
 
@@ -54,6 +66,7 @@ APK_PATH = APP_DIR / "gfc.apk"
 INFO_PATH = APP_DIR / "release.json"
 MAX_APK_BYTES = 512 * 1024 * 1024
 WINDOWS_INFO_PATH = APP_DIR / "windows.json"
+WINDOWS_UPDATE_PATH = APP_DIR / "gfc-windows-update.exe"  # the bare installer, for self-updates
 WINDOWS_EXTENSIONS = (".exe", ".zip")
 MAX_WINDOWS_BYTES = 1024 * 1024 * 1024
 SITE_URL = "https://galacticfederation.tech"
@@ -250,8 +263,63 @@ def _check_windows_file(path: Path) -> str:
     return ext
 
 
-def publish_windows(src: str, version: str) -> dict:
-    """Check src is a Windows installer (or a zip of one), then make it the public download."""
+def _b64(text: str) -> bytes:
+    try:
+        return base64.b64decode(text.strip(), validate=True)
+    except (binascii.Error, ValueError):
+        raise ReleaseError("the updater signature or key isn't valid base64")
+
+
+def verify_updater_signature(data, signature: str, pubkey: str) -> None:
+    """
+    Check a Tauri updater signature (a base64 minisign signature file) over data (bytes or a
+    binary file object) with the updater public key (the base64 .pub file). ReleaseError if not.
+    """
+    try:
+        key = _b64(_b64(pubkey).decode().strip().splitlines()[-1])
+        lines = _b64(signature).decode().strip().splitlines()
+        sig_blob, trusted, global_sig = _b64(lines[1]), lines[2], _b64(lines[3])
+    except (IndexError, UnicodeDecodeError):
+        raise ReleaseError("the updater signature or key is malformed")
+    if len(key) != 42 or key[:2] != b"Ed" or len(sig_blob) != 74 or len(global_sig) != 64 \
+            or not trusted.startswith("trusted comment: "):
+        raise ReleaseError("the updater signature or key is malformed")
+    if sig_blob[2:10] != key[2:10]:
+        raise ReleaseError("the installer was signed with a different updater key")
+    if sig_blob[:2] == b"ED":  # prehashed: the signature covers the file's BLAKE2b-512
+        h = hashlib.blake2b(digest_size=64)
+        if isinstance(data, (bytes, bytearray)):
+            h.update(data)
+        else:
+            for chunk in iter(lambda: data.read(1024 * 1024), b""):
+                h.update(chunk)
+        message = h.digest()
+    elif sig_blob[:2] == b"Ed":
+        message = data if isinstance(data, (bytes, bytearray)) else data.read()
+    else:
+        raise ReleaseError("unknown updater signature algorithm")
+    pk = Ed25519PublicKey.from_public_bytes(key[10:])
+    try:
+        pk.verify(sig_blob[10:], message)
+        pk.verify(global_sig, sig_blob[10:] + trusted[len("trusted comment: "):].encode())
+    except InvalidSignature:
+        raise ReleaseError("the updater signature doesn't match this installer")
+
+
+def _installer_stream(path: Path, ext: str):
+    """The installer .exe itself: the file, or the one inside the zip."""
+    if ext == ".exe":
+        return open(path, "rb")
+    zf = zipfile.ZipFile(path)
+    return zf.open([i for i in zf.infolist() if not i.is_dir()][0])
+
+
+def publish_windows(src: str, version: str, signature: str = "") -> dict:
+    """
+    Check src is a Windows installer (or a zip of one), then make it the public download. With
+    the updater signature of the installer (the .sig's contents), it's also offered to the apps
+    as a self-update; that's required once GFC_UPDATER_PUBKEY is set.
+    """
     path = Path(src)
     if not path.is_file():
         raise ReleaseError(f"no such file: {src}")
@@ -261,6 +329,16 @@ def publish_windows(src: str, version: str) -> dict:
     if not 1024 < size <= MAX_WINDOWS_BYTES:
         raise ReleaseError("that file is too small or too big to be the GFC installer")
     ext = _check_windows_file(path)
+    pubkey = os.environ.get("GFC_UPDATER_PUBKEY", "").strip()
+    signature = (signature or "").strip()
+    if pubkey and not signature:
+        raise ReleaseError("apps update themselves from this download: give the installer's .sig too "
+                           "(gfc publish-windows FILE VERSION SIGFILE)")
+    if signature:
+        if not pubkey:
+            raise ReleaseError("set GFC_UPDATER_PUBKEY (gfc config) before publishing a signed update")
+        with _installer_stream(path, ext) as f:
+            verify_updater_signature(f, signature, pubkey)
     digest = hashlib.sha256()
     APP_DIR.mkdir(parents=True, exist_ok=True)
     tmp = APP_DIR / f"gfc-windows{ext}.part"
@@ -271,6 +349,16 @@ def publish_windows(src: str, version: str) -> dict:
     os.chmod(tmp, 0o644)
     release = {"version": version, "size": size, "sha256": digest.hexdigest(), "ext": ext,
                "published_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+    if signature:
+        update_tmp = APP_DIR / "gfc-windows-update.exe.part"
+        with _installer_stream(path, ext) as fin, open(update_tmp, "wb") as fout:
+            for chunk in iter(lambda: fin.read(1024 * 1024), b""):
+                fout.write(chunk)
+        os.chmod(update_tmp, 0o644)
+        os.replace(update_tmp, WINDOWS_UPDATE_PATH)
+        release["updater_signature"] = signature
+    elif WINDOWS_UPDATE_PATH.exists():
+        WINDOWS_UPDATE_PATH.unlink()  # an unsigned release isn't offered as an update
     os.replace(tmp, _windows_path(ext))
     for other in WINDOWS_EXTENSIONS:  # a .zip replacing an .exe (or the reverse) leaves no stale file
         if other != ext and _windows_path(other).exists():
@@ -307,6 +395,34 @@ def windows_json():
     if not rel:
         return JSONResponse({"published": False}, headers={"Cache-Control": "no-cache"})
     return JSONResponse({"published": True, "url": "/app/windows", **rel}, headers={"Cache-Control": "no-cache"})
+
+
+@router.get("/app/windows/update.json")
+def windows_update(request: Request):
+    """Tauri's updater manifest. 204 (no update) when the release isn't signed for updates."""
+    rel = windows_info()
+    if not rel or not rel.get("updater_signature") or not WINDOWS_UPDATE_PATH.is_file():
+        return Response(status_code=204, headers={"Cache-Control": "no-cache"})
+    from app_share import public_base_url  # app_share imports this module
+    base = (public_base_url() if os.environ.get("GFC_PUBLIC_BASE_URL", "").strip()
+            else str(request.base_url).rstrip("/"))
+    return JSONResponse({
+        "version": rel["version"],
+        "notes": f"GFC {rel['version']}",
+        "pub_date": rel["published_at"],
+        "platforms": {"windows-x86_64": {"signature": rel["updater_signature"],
+                                         "url": f"{base}/app/windows/update.exe"}},
+    }, headers={"Cache-Control": "no-cache"})
+
+
+@router.get("/app/windows/update.exe")
+def windows_update_exe():
+    rel = windows_info()
+    if not rel or not rel.get("updater_signature") or not WINDOWS_UPDATE_PATH.is_file():
+        raise HTTPException(status_code=404, detail="no signed Windows update is published")
+    return FileResponse(WINDOWS_UPDATE_PATH, media_type="application/vnd.microsoft.portable-executable",
+                        filename=f"GFC-Setup-{rel['version']}.exe",
+                        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
 
 
 @router.get("/app/windows")
@@ -437,10 +553,13 @@ def _cli(argv: List[str]) -> int:
             print(f"Signed with the release key {rel['cert_sha256']}")
             print("Download page: /app")
             return 0
-        if len(argv) == 3 and argv[0] == "publish-windows":
-            rel = publish_windows(argv[1], argv[2])
+        if len(argv) in (3, 4) and argv[0] == "publish-windows":
+            sig = Path(argv[3]).read_text(encoding="utf-8") if len(argv) == 4 else ""
+            rel = publish_windows(argv[1], argv[2], sig)
             print(f"Published GFC {rel['version']} for Windows ({rel['size'] / 1048576:.1f} MB, {rel['ext']})")
             print(f"SHA-256: {rel['sha256']}")
+            print("Apps update themselves to it" if rel.get("updater_signature")
+                  else "Not offered as a self-update (no updater signature)")
             print("Download: /app/windows  (page: /app#windows)")
             return 0
         if argv == ["info"]:
