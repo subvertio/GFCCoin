@@ -9,6 +9,7 @@ python -m bridge <command>
   refund TX_HASH         send a deposit marked refund/held back to its sender
   new-escrow-key FILE    create an encrypted escrow key file; prints only its public key
   run [--interval S]     relay, release and reconcile in a loop
+  roles                  who holds every role on the token and bridge, and what's wrong (read-only)
 
 Configuration is GFC_BRIDGE_* environment variables (bridge/config.py). In this
 version the relayer calls attesters in-process: GFC_BRIDGE_ATTESTER_KEY_FILE,
@@ -42,7 +43,7 @@ def _attesters(cfg: BridgeConfig) -> list:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python -m bridge")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    for name in ("status", "relay", "release", "reconcile"):
+    for name in ("status", "relay", "release", "reconcile", "roles"):
         sub.add_parser(name)
     ap = sub.add_parser("approve-release")
     ap.add_argument("nonce", type=int)
@@ -127,6 +128,17 @@ def main(argv=None) -> int:
             print("  -", p)
         return report.ok
 
+    if args.cmd == "roles":
+        from bridge.roles import inventory
+        inv = inventory(chain, bridge, bridge.token(), cfg.start_block, cfg.log_chunk_blocks)
+        for name, held in inv["roles"].items():
+            for role, holders in sorted(held.items()):
+                print(f"{name} {role}: {', '.join(sorted(holders)) or '(nobody)'}")
+        print(f"bridge threshold: {inv['threshold']}")
+        print("roles: ok" if not inv["problems"] else "roles: PROBLEMS")
+        for p in inv["problems"]:
+            print("  -", p)
+        return 0 if not inv["problems"] else 1
     if args.cmd == "relay":
         do_relay()
     elif args.cmd == "release":

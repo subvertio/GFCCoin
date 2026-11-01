@@ -122,19 +122,41 @@ contract GFCTokenTest is Test {
         assertFalse(token.paused());
     }
 
-    function test_BurnFromNeedsAllowance() public {
+    function test_OnlyTheBurnerBurns_AndOnlyWithAllowance() public {
+        bytes32 burner = token.BURNER_ROLE();
+        vm.prank(admin);
+        token.grantRole(burner, minter); // the bridge holds both roles
         vm.prank(minter);
         token.mint(alice, 10e18);
 
-        vm.prank(bob);
-        vm.expectRevert();
-        token.burnFrom(alice, 1e18);
-
+        // An approved spender without BURNER_ROLE can't burn (audit F03)
         vm.prank(alice);
         token.approve(bob, 1e18);
         vm.prank(bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, bob, burner)
+        );
+        token.burnFrom(alice, 1e18);
+
+        // The burner still needs the holder's allowance
+        vm.prank(minter);
+        vm.expectRevert();
+        token.burnFrom(alice, 1e18);
+        vm.prank(alice);
+        token.approve(minter, 1e18);
+        vm.prank(minter);
         token.burnFrom(alice, 1e18);
         assertEq(token.totalSupply(), 9e18);
+        assertEq(token.allowance(alice, minter), 0);
+    }
+
+    function test_NoPublicBurn() public {
+        vm.prank(minter);
+        token.mint(alice, 10e18);
+        vm.prank(alice);
+        (bool ok,) = address(token).call(abi.encodeWithSignature("burn(uint256)", 1));
+        assertFalse(ok);
+        assertEq(token.totalSupply(), 10e18);
     }
 
     function test_Permit() public {

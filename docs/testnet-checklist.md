@@ -255,7 +255,9 @@ $env:GFC_BRIDGE_WATCH_ADDRESSES = '<owner1>,<owner2>,<owner3>,<pauser>,<attester
    that account as a Foundry keystore), approve the bridge for 50 GFC and call `bridgeOut`
    with your ledger wallet ID as `bytes32`. Once the block is finalized, the ledger wallet
    gets +50.
-4. `python -m bridge status` and `python -m bridge reconcile` should both be clean.
+4. `python -m bridge status`, `python -m bridge reconcile` and `python -m bridge roles` should all
+   be clean. `roles` rebuilds who holds every role from the contracts' events: only the Safe is
+   admin, only the bridge mints and burns, and nobody (the deployer included) kept anything else.
 
 ### B8. Drills (each one a separate approval)
 
@@ -265,7 +267,7 @@ $env:GFC_BRIDGE_WATCH_ADDRESSES = '<owner1>,<owner2>,<owner3>,<pauser>,<attester
 | One attester down | Remove one file from `GFC_BRIDGE_EXTRA_ATTESTER_KEY_FILES` and restart | Still mints (2 of 3). With two down, deposits wait |
 | Fresh free credit | Verify a new account's phone (welcome grant) and try to bridge it, directly and after sending it to a second wallet | The client says only X can be bridged, and the node refuses |
 | Small deposit | Deposit 50 GFC through `POST /bridge/deposit` | The node refuses it (minimum 100) |
-| Daily limit | Bridge 1,000 GFC six times in a day | The 6th waits for the window to reset |
+| Daily limit | Bridge 1,000 GFC six times in a day | The 6th waits until the 1st is more than a day (up to an hour more) old: the limit is rolling |
 | Release limit | Bridge out more than `GFC_BRIDGE_MAX_RELEASE_CENTS` | Held until `python -m bridge approve-release <nonce>` |
 | Refund | A deposit marked `held` | `python -m bridge refund <tx_hash>` returns it once |
 | Unbacked supply | Stop the bridge, then have 2 attester keys sign a mint with no deposit (a one-off script, testnet only) | `reconcile` reports it and auto-pauses the bridge |

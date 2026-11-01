@@ -16,7 +16,8 @@ import {IGFCToken} from "./interfaces/IGFCToken.sol";
 ///
 /// Limits on what a compromised attester set can do before someone pulls the pause:
 /// - each ledger deposit mints once (`processed`), and only before its `deadline`;
-/// - at most `maxMintCents` per mint and `windowLimitCents` per `windowDuration`;
+/// - at most `maxMintCents` per mint, and never more than `windowLimitCents` in any span of
+///   `windowDuration` (a rolling window, not a calendar day: see _consumeWindow);
 /// - the token's own `supplyCap`.
 contract GFCBridge is IGFCBridge, AccessControlDefaultAdminRules, Pausable, EIP712 {
     bytes32 public constant ATTESTER_ROLE = keccak256("ATTESTER_ROLE");
@@ -36,8 +37,17 @@ contract GFCBridge is IGFCBridge, AccessControlDefaultAdminRules, Pausable, EIP7
     uint256 public windowDuration;
     uint256 public minBridgeOutCents;
 
-    uint256 public windowStart;
+    /// @notice The rolling window is kept in BUCKETS + 1 buckets of windowDuration / BUCKETS
+    /// seconds (an hour, for a day). Usage is summed over all of them, so any true window of
+    /// windowDuration seconds fits inside the counted span: no span of windowDuration ever
+    /// mints more than windowLimitCents (it can be stricter by one bucket, never looser).
+    uint256 public constant BUCKETS = 24;
+
+    /// @notice Cents minted in the counted span (the last BUCKETS + 1 buckets). Recorded usage
+    /// only ever expires with time: changing the limits never forgets it (audit F11).
     uint256 public mintedInWindowCents;
+    uint256 public lastBucket; // index of the newest bucket, block.timestamp / bucketLength
+    mapping(uint256 => uint256) private _bucketCents; // slot (bucket % (BUCKETS + 1)) -> cents
 
     /// @notice Running totals, for the off-chain reconciler:
     /// token.totalSupply() == (totalMintedCents - totalBridgedOutCents) * CENT while this is the only minter.
@@ -128,8 +138,12 @@ contract GFCBridge is IGFCBridge, AccessControlDefaultAdminRules, Pausable, EIP7
     }
 
     function remainingInWindowCents() external view returns (uint256) {
-        if (block.timestamp >= windowStart + windowDuration) return windowLimitCents;
-        return windowLimitCents - mintedInWindowCents;
+        uint256 used = _usageAfterExpiry();
+        return used >= windowLimitCents ? 0 : windowLimitCents - used;
+    }
+
+    function bucketLength() public view returns (uint256) {
+        return windowDuration / BUCKETS;
     }
 
     // ------------------------------------------------------------------ internals
@@ -146,13 +160,38 @@ contract GFCBridge is IGFCBridge, AccessControlDefaultAdminRules, Pausable, EIP7
     }
 
     function _consumeWindow(uint256 cents) internal {
-        if (block.timestamp >= windowStart + windowDuration) {
-            windowStart = block.timestamp;
-            mintedInWindowCents = 0;
-        }
-        uint256 remaining = windowLimitCents - mintedInWindowCents;
+        _expireBuckets();
+        uint256 remaining =
+            mintedInWindowCents >= windowLimitCents ? 0 : windowLimitCents - mintedInWindowCents;
         if (cents > remaining) revert WindowLimitExceeded(cents, remaining);
+        _bucketCents[lastBucket % (BUCKETS + 1)] += cents;
         mintedInWindowCents += cents;
+    }
+
+    /// @dev Moves the window to the current bucket, dropping buckets that fell out of it.
+    function _expireBuckets() internal {
+        uint256 current = block.timestamp / bucketLength();
+        if (current == lastBucket) return;
+        uint256 steps = current - lastBucket;
+        if (steps > BUCKETS + 1) steps = BUCKETS + 1; // after a long quiet spell, all of them
+        for (uint256 i = 1; i <= steps; ++i) {
+            uint256 slot = (lastBucket + i) % (BUCKETS + 1);
+            mintedInWindowCents -= _bucketCents[slot];
+            _bucketCents[slot] = 0;
+        }
+        lastBucket = current;
+    }
+
+    /// @dev What _expireBuckets would leave in mintedInWindowCents, without writing.
+    function _usageAfterExpiry() internal view returns (uint256 used) {
+        used = mintedInWindowCents;
+        uint256 current = block.timestamp / bucketLength();
+        if (current == lastBucket) return used;
+        uint256 steps = current - lastBucket;
+        if (steps > BUCKETS + 1) steps = BUCKETS + 1;
+        for (uint256 i = 1; i <= steps; ++i) {
+            used -= _bucketCents[(lastBucket + i) % (BUCKETS + 1)];
+        }
     }
 
     function _setThreshold(uint256 newThreshold) internal {
@@ -162,13 +201,28 @@ contract GFCBridge is IGFCBridge, AccessControlDefaultAdminRules, Pausable, EIP7
     }
 
     function _setLimits(Limits memory l) internal {
-        if (l.windowDuration == 0 || l.maxMintCents > l.windowLimitCents) revert BadLimits();
+        if (
+            l.windowDuration < BUCKETS || l.windowDuration % BUCKETS != 0
+                || l.maxMintCents > l.windowLimitCents
+        ) {
+            revert BadLimits();
+        }
+        if (windowDuration != 0) _expireBuckets();
+        if (l.windowDuration != windowDuration) {
+            // New bucket size: carry what's still counted into the current new bucket, so it
+            // stays counted for a whole new window (stricter, never forgotten)
+            uint256 carried = mintedInWindowCents;
+            for (uint256 i; i <= BUCKETS; ++i) {
+                _bucketCents[i] = 0;
+            }
+            windowDuration = l.windowDuration;
+            lastBucket = block.timestamp / bucketLength();
+            _bucketCents[lastBucket % (BUCKETS + 1)] = carried;
+        }
         maxMintCents = l.maxMintCents;
+        // A lowered limit applies at once: if more is already counted, nothing more until it expires
         windowLimitCents = l.windowLimitCents;
-        windowDuration = l.windowDuration;
         minBridgeOutCents = l.minBridgeOutCents;
-        // A lowered limit applies to the current window too
-        if (mintedInWindowCents > windowLimitCents) mintedInWindowCents = windowLimitCents;
         emit LimitsChanged(l.maxMintCents, l.windowLimitCents, l.windowDuration, l.minBridgeOutCents);
     }
 }

@@ -178,8 +178,9 @@ class BridgeServiceTest(unittest.TestCase):
                                         [self.token_addr, self.admin.address, 0, 2, LIMITS])
         admin_key = self.admin.key.hex()
         grant = "grantRole(bytes32,address)"
-        self.chain.send(admin_key, self.token_addr,
-                        calldata(grant, ["bytes32", "address"], [keccak(text="MINTER_ROLE"), self.bridge_addr]))
+        for role in ("MINTER_ROLE", "BURNER_ROLE"):  # the bridge mints and is the only burner
+            self.chain.send(admin_key, self.token_addr,
+                            calldata(grant, ["bytes32", "address"], [keccak(text=role), self.bridge_addr]))
         self.chain.send(admin_key, self.bridge_addr,
                         calldata(grant, ["bytes32", "address"], [keccak(text="PAUSER_ROLE"), self.pauser.address]))
         for a in self.attester_accts:
