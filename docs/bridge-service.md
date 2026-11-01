@@ -165,6 +165,7 @@ python -m bridge status
 python -m bridge relay
 python -m bridge release
 python -m bridge reconcile
+python -m bridge roles            # who holds every role (from the events), and anything wrong
 python -m bridge approve-release 12
 python -m bridge refund <deposit tx_hash>
 python -m bridge new-escrow-key D:\keys\escrow-84532.json

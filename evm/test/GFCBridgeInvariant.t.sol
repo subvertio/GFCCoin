@@ -61,6 +61,20 @@ contract BridgeHandler is Test {
         token.transfer(users[toSeed % users.length], amount);
     }
 
+    /// Holders and approved spenders try to burn outside the bridge (audit F03): never works.
+    function burnDirectly(uint256 userSeed, uint256 amount) external {
+        address user = users[userSeed % users.length];
+        amount = bound(amount, 1, 1e18);
+        vm.prank(user);
+        (bool ok,) = address(token).call(abi.encodeWithSignature("burn(uint256)", amount));
+        require(!ok, "public burn worked");
+        vm.prank(user);
+        token.approve(address(this), amount);
+        try token.burnFrom(user, amount) {
+            revert("an approved spender burned");
+        } catch {}
+    }
+
     function warp(uint256 secs) external {
         vm.warp(block.timestamp + bound(secs, 1, 2 days));
     }
@@ -85,5 +99,10 @@ contract GFCBridgeInvariantTest is BridgeFixture {
 
     function invariant_WindowNeverOverspent() public view {
         assertLe(bridge.mintedInWindowCents(), bridge.windowLimitCents());
+    }
+
+    function invariant_NoBurnOutsideTheBridge() public view {
+        // With burnDirectly in the mix, supply still matches the bridge's books to the wei
+        assertEq(token.totalSupply() % 1e16, 0);
     }
 }

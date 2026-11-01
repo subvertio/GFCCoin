@@ -59,6 +59,7 @@ contract BridgeFixture is Test {
 
         vm.startPrank(admin);
         token.grantRole(token.MINTER_ROLE(), address(bridge));
+        token.grantRole(token.BURNER_ROLE(), address(bridge));
         bridge.grantRole(bridge.PAUSER_ROLE(), pauser);
         for (uint256 i; i < 3; ++i) {
             bridge.grantRole(bridge.ATTESTER_ROLE(), attesters[i]);
@@ -211,10 +212,99 @@ contract GFCBridgeTest is BridgeFixture {
         vm.expectRevert(abi.encodeWithSelector(IGFCBridge.WindowLimitExceeded.selector, 1, 0));
         bridge.mintFromLedger(req, sigs);
 
-        vm.warp(block.timestamp + WINDOW);
+        // Rolling: a full window later, what was minted has expired (it's counted for a window
+        // plus up to one bucket, never less)
+        vm.warp(block.timestamp + WINDOW + bridge.bucketLength());
         req = _req(keccak256("over"), alice, 1);
         bridge.mintFromLedger(req, _sign(req, 0, 1));
         assertEq(bridge.remainingInWindowCents(), WINDOW_LIMIT - 1);
+    }
+
+    // ---- audit F11: no burst at a window boundary, and cap changes never forget usage ----
+
+    function test_NoDoubleLimitAcrossAWindowBoundary() public {
+        // The audit's scenario: anchor a window with 1 cent, fill it just before it ends, then
+        // try again just after. A calendar window allowed ~2x the limit within a second.
+        _mint(keccak256("anchor"), alice, 1);
+        vm.warp(block.timestamp + WINDOW - 10);
+        for (uint256 i; i < 4; ++i) {
+            _mint(keccak256(abi.encode("late", i)), alice, MAX_MINT);
+        }
+        _mint(keccak256("late-rest"), alice, MAX_MINT - 1);
+        assertEq(bridge.remainingInWindowCents(), 0);
+        vm.warp(block.timestamp + 20); // a calendar window would have reset 10 seconds ago
+        IGFCBridge.MintRequest memory req = _req(keccak256("burst"), alice, MAX_MINT);
+        bytes[] memory sigs = _sign(req, 0, 1);
+        vm.expectRevert(abi.encodeWithSelector(IGFCBridge.WindowLimitExceeded.selector, MAX_MINT, 0));
+        bridge.mintFromLedger(req, sigs);
+        // The anchor cent expires a window (plus at most one bucket) after it was minted
+        vm.warp(block.timestamp + bridge.bucketLength());
+        assertEq(bridge.remainingInWindowCents(), 1, "only the 1-cent anchor has aged out");
+    }
+
+    function test_LoweringThenRaisingTheCapForgetsNothing() public {
+        // The audit's scenario: mint 50,000, lower the cap to 10,000, put it back to 50,000 in the
+        // same window. The old code rewrote usage to 10,000 and freed 40,000 more.
+        for (uint256 i; i < 5; ++i) {
+            _mint(keccak256(abi.encode("full", i)), alice, MAX_MINT);
+        }
+        vm.startPrank(admin);
+        bridge.setLimits(GFCBridge.Limits(MAX_MINT, 10_000_00, WINDOW, MIN_OUT));
+        assertEq(bridge.remainingInWindowCents(), 0);
+        bridge.setLimits(GFCBridge.Limits(MAX_MINT, WINDOW_LIMIT, WINDOW, MIN_OUT));
+        vm.stopPrank();
+        assertEq(bridge.remainingInWindowCents(), 0, "usage survives cap changes");
+        assertEq(bridge.mintedInWindowCents(), WINDOW_LIMIT);
+    }
+
+    function test_ChangingTheWindowLengthKeepsUsageCounted() public {
+        _mint(keccak256("before"), alice, MAX_MINT);
+        vm.prank(admin);
+        bridge.setLimits(GFCBridge.Limits(MAX_MINT, WINDOW_LIMIT, 2 days, MIN_OUT));
+        assertEq(bridge.remainingInWindowCents(), WINDOW_LIMIT - MAX_MINT);
+        vm.warp(block.timestamp + 1 days + 2 hours); // the old window has passed, the new one hasn't
+        assertEq(bridge.remainingInWindowCents(), WINDOW_LIMIT - MAX_MINT);
+        vm.warp(block.timestamp + 1 days);
+        assertEq(bridge.remainingInWindowCents(), WINDOW_LIMIT);
+    }
+
+    function testFuzz_NoSpanOfOneWindowExceedsTheLimit(uint256 seed) public {
+        // Random mints at random times; every mint is checked against an independent history
+        uint256[] memory times = new uint256[](40);
+        uint256[] memory amounts = new uint256[](40);
+        uint256 n;
+        uint256 t = block.timestamp;
+        for (uint256 i; i < 40; ++i) {
+            seed = uint256(keccak256(abi.encode(seed, i)));
+            t += seed % 3 hours;
+            vm.warp(t);
+            uint256 cents = 1 + (seed >> 32) % MAX_MINT;
+            if (cents > bridge.remainingInWindowCents()) continue;
+            _mint(keccak256(abi.encode("fz", seed, i)), alice, cents);
+            times[n] = t;
+            amounts[n] = cents;
+            ++n;
+            uint256 inSpan;
+            for (uint256 j; j < n; ++j) {
+                if (times[j] + WINDOW > t) inSpan += amounts[j];
+            }
+            assertLe(inSpan, WINDOW_LIMIT, "a 1-day span minted more than the limit");
+        }
+    }
+
+    // ---- audit F03: nobody but the bridge can burn ----
+
+    function test_HoldersCannotBurnOutsideTheBridge() public {
+        _mint(keccak256("held"), alice, 100_00);
+        vm.startPrank(alice);
+        (bool ok,) = address(token).call(abi.encodeWithSignature("burn(uint256)", 1));
+        assertFalse(ok, "there's no public burn()");
+        token.approve(relayer, 1);
+        vm.stopPrank();
+        vm.prank(relayer); // an approved spender isn't a burner either
+        vm.expectRevert();
+        token.burnFrom(alice, 1);
+        assertEq(token.totalSupply(), (bridge.totalMintedCents() - bridge.totalBridgedOutCents()) * CENT);
     }
 
     function test_PausedBridgeRefusesBothWays() public {

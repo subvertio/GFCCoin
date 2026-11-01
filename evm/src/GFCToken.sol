@@ -2,7 +2,6 @@
 pragma solidity 0.8.28;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {ERC20Burnable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import {ERC20Pausable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Pausable.sol";
 import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import {
@@ -18,18 +17,16 @@ import {IGFCToken} from "./interfaces/IGFCToken.sol";
 /// - DEFAULT_ADMIN_ROLE ("treasury"): a multisig. Grants roles, raises/lowers the supply cap,
 ///   unpauses. Handover is two-step with a delay (AccessControlDefaultAdminRules).
 /// - MINTER_ROLE: the bridge contract only. Never an EOA, never the ledger treasury key.
+/// - BURNER_ROLE: the bridge contract only. There's no public burn: every burn is a
+///   bridgeOut, which the bridge counts in cents and the ledger pays back. A burn the bridge
+///   didn't count would leave supply and the bridge's books apart for good (audit F03: one
+///   token-wei burned by anyone kept the bridge paused).
 /// - PAUSER_ROLE: a fast-response guardian. Can pause, cannot unpause, so a leaked guardian
 ///   key can freeze the token but can't be used to resume it after the team has paused.
-contract GFCToken is
-    ERC20,
-    ERC20Burnable,
-    ERC20Pausable,
-    ERC20Permit,
-    AccessControlDefaultAdminRules,
-    IGFCToken
-{
+contract GFCToken is ERC20, ERC20Pausable, ERC20Permit, AccessControlDefaultAdminRules, IGFCToken {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
 
     /// @notice Hard ceiling: the ledger premine (blockchain.PREMINE_CENTS = 100 trillion GFC).
     /// The wrapped supply can never exceed what the ledger could ever have issued.
@@ -58,8 +55,11 @@ contract GFCToken is
         _mint(to, amount);
     }
 
-    function burnFrom(address account, uint256 amount) public override(ERC20Burnable, IGFCToken) {
-        super.burnFrom(account, amount);
+    /// @notice Burns `amount` of `account`'s tokens, spending the allowance `account` gave the
+    /// caller (as ERC20Burnable.burnFrom did). Only the bridge (BURNER_ROLE) may call it.
+    function burnFrom(address account, uint256 amount) external onlyRole(BURNER_ROLE) {
+        _spendAllowance(account, _msgSender(), amount);
+        _burn(account, amount);
     }
 
     function pause() external onlyRole(PAUSER_ROLE) {

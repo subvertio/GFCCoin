@@ -266,16 +266,21 @@ and invariant testing are built in, `forge script` simulates locally without an 
 nothing in `evm/` needs a Node toolchain. Hardhat's advantage, its TypeScript plugin
 ecosystem, isn't needed here.
 
-- **`GFCToken`**: `ERC20`, `ERC20Permit`, `ERC20Burnable`, `ERC20Pausable` and
+- **`GFCToken`**: `ERC20`, `ERC20Permit`, `ERC20Pausable` and
   `AccessControlDefaultAdminRules`.
-  - Roles: `DEFAULT_ADMIN_ROLE` (the treasury multisig), `MINTER_ROLE` (the bridge only)
-    and `PAUSER_ROLE` (a guardian that can pause but not unpause).
+  - Roles: `DEFAULT_ADMIN_ROLE` (the treasury multisig), `MINTER_ROLE` and `BURNER_ROLE`
+    (the bridge only) and `PAUSER_ROLE` (a guardian that can pause but not unpause).
+  - No public `burn`: tokens are only burned by `bridgeOut`, which the bridge counts, so
+    supply always equals the bridge's books (audit F03: a one-wei public burn kept the
+    bridge paused for good).
   - Supply: `supplyCap ≤ MAX_SUPPLY`. Nothing is minted on chain at deployment.
 - **`GFCBridge`**: `mintFromLedger(MintRequest, signatures)`.
   - Signatures are EIP-712 over `(ledgerTxHash, to, amountCents, deadline)`, bound to the
     chain ID and the bridge address. Signers must be strictly increasing, which also rules
     out duplicates.
-  - Limits: a per-mint cap, a per-window cap, and a deadline.
+  - Limits: a per-mint cap, a rolling cap (no span of `windowDuration` ever mints more than
+    `windowLimitCents`; it can be one bucket, an hour, stricter), and a deadline. Changing
+    the caps never forgets what was already minted (audit F11).
   - `processed` is set only on success, so a mint that fails at the token's cap doesn't
     consume the deposit.
   - `bridgeOut(amount, ledgerWallet)` burns through the allowance (or a permit) and emits
