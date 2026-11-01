@@ -75,6 +75,10 @@ class BridgeConfig:
     # Independently run RPC providers that must confirm every burn before it's paid, and the
     # bridge's totals during reconcile (audit F09). Mainnet needs at least one.
     verify_rpc_urls: List[str] = field(default_factory=list)
+    # Attesters on other machines (bridge/attester_http.py): their URLs, and for each a file with
+    # the secret it shares with this relayer
+    remote_attester_urls: List[str] = field(default_factory=list)
+    remote_attester_secret_files: List[str] = field(default_factory=list)
 
     @property
     def is_testnet(self) -> bool:
@@ -92,6 +96,10 @@ class BridgeConfig:
                             "to confirm burns")
         if self.rpc_url in self.verify_rpc_urls:
             problems.append("a verifying RPC is the main RPC itself")
+        from bridge.attester_http import is_private_url
+        for url in self.remote_attester_urls:
+            if not is_private_url(url):
+                problems.append(f"remote attester {url} isn't https: put it behind TLS or a private network")
         return problems
 
     @classmethod
@@ -107,7 +115,7 @@ class BridgeConfig:
 
         from config import DB_PATH, DATA_DIR
         return cls(
-            rpc_url=e["GFC_BRIDGE_RPC_URL"],
+            rpc_url=e.get("GFC_BRIDGE_RPC_URL", ""),  # an attester server doesn't need one
             chain_id=int(e["GFC_BRIDGE_CHAIN_ID"]),
             bridge_address=e["GFC_BRIDGE_ADDRESS"],
             escrow_wallet=e["GFC_BRIDGE_ESCROW_WALLET"].lower(),
@@ -136,6 +144,8 @@ class BridgeConfig:
             watch_addresses=_list(e.get("GFC_BRIDGE_WATCH_ADDRESSES", "")),
             quiet_addresses=_list(e.get("GFC_BRIDGE_QUIET_ADDRESSES", "")),
             verify_rpc_urls=_list(e.get("GFC_BRIDGE_VERIFY_RPC_URLS", "")),
+            remote_attester_urls=_list(e.get("GFC_BRIDGE_REMOTE_ATTESTER_URLS", "")),
+            remote_attester_secret_files=_list(e.get("GFC_BRIDGE_REMOTE_ATTESTER_SECRET_FILES", "")),
             max_gas_per_mint=num("GFC_BRIDGE_MAX_GAS_PER_MINT", "max_gas_per_mint"),
             max_fee_per_gas_wei=int(float(e["GFC_BRIDGE_MAX_FEE_GWEI"]) * GWEI) if e.get("GFC_BRIDGE_MAX_FEE_GWEI")
             else defaults["max_fee_per_gas_wei"].default,

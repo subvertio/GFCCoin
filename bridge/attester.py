@@ -14,7 +14,10 @@ Policy (on top of validity):
 - the deposit is covered by GFC that isn't fresh free credit: grants, referrals,
   first-post and repost bonuses younger than faucet_hold_days don't count, also
   when they were passed through other wallets (deposits.fresh_faucet_cents);
-- deposits above manual_review_cents need their tx_hash in the approvals file.
+- deposits above manual_review_cents need their tx_hash in the approvals file;
+- the deadline is in the future and no further out than the mint TTL (plus a minute of
+  clock skew): a far-off deadline would keep a signature usable long after the relayer
+  thinks it expired, and a refund could then race it.
 """
 
 import sqlite3
@@ -46,6 +49,8 @@ class Attester:
     def attest(self, tx_hash: str, evm_to: str, mint_cents: int, deadline: int,
                now: Optional[datetime] = None) -> Attestation:
         now = now or datetime.now(timezone.utc)
+        if not now.timestamp() < deadline <= now.timestamp() + self.cfg.mint_ttl_seconds + 60:
+            return Attestation(self.address, None, f"deadline must be within {self.cfg.mint_ttl_seconds} s from now")
         conn = sqlite3.connect(self.ledger_db)
         try:
             tx = deposits.deposit_by_hash(conn, tx_hash)

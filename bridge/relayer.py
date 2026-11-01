@@ -90,6 +90,9 @@ def relay(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: Li
             continue
 
         deadline = int(now.timestamp()) + cfg.mint_ttl_seconds
+        # Recorded before asking: a signature may exist from here on, even if its reply is lost or
+        # overheard, so no refund until this deadline has passed (releases.refund_deposit)
+        store.note_attested(tx_hash, deadline)
         results = [a.attest(tx_hash, d["evm_to"], d["mint_cents"], deadline, now) for a in attesters]
         sigs = sorted(((int(r.signer, 16), r.signature) for r in results if r.signature),
                       key=lambda s: s[0])
@@ -100,8 +103,6 @@ def relay(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: Li
                  f"{len(sigs)}/{threshold} attestations ({refusals})")
             continue
 
-        # Signatures exist from here on: no refund until they expire (releases.refund_deposit)
-        store.note_attested(tx_hash, deadline)
         req = eip712.mint_request(tx_hash, d["evm_to"], d["mint_cents"], deadline)
         try:
             receipt = bridge.mint_from_ledger(relayer_key, req, [s for _, s in sigs], max_gas=cfg.max_gas_per_mint,
