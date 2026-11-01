@@ -72,13 +72,32 @@ def mint(db: str, wallet: str, cents: int, tx_type=blockchain.TX_TYPE_OPERATOR, 
     reason = "Operator grant (other): bridge ledger test" if tx_type == blockchain.TX_TYPE_OPERATOR else "test"
     tx = signed(TREASURY_PRIV, TREASURY_PUB, sender=blockchain.TREASURY_WALLET_ID, recipient=wallet,
                 amount_cents=cents, reason=reason, tx_type=tx_type, timestamp=when.isoformat())
-    return blockchain.accept_synced_transaction(db, tx)
+    result = blockchain.accept_synced_transaction(db, tx)
+    admitted_as_of_its_timestamp(db, tx)
+    return result
 
 
-def send(db: str, priv: str, pub: str, to: str, cents: int, reason: str = "test", when=None):
+def send(db: str, priv: str, pub: str, to: str, cents: int, reason: str = "test", when=None,
+         admit_at_timestamp: bool = True):
     tx = signed(priv, pub, sender=pub, recipient=to, amount_cents=cents, reason=reason,
                 timestamp=(when or NOW - timedelta(hours=2)).isoformat())
-    return blockchain.accept_synced_transaction(db, tx), tx
+    result = blockchain.accept_synced_transaction(db, tx)
+    if admit_at_timestamp:
+        admitted_as_of_its_timestamp(db, tx)
+    return result, tx
+
+def admitted_as_of_its_timestamp(db: str, tx: dict):
+    """
+    Test fixtures only: record the transaction as admitted at its own timestamp, as if this
+    ledger had received it then. The bridge reads admission times (block timestamps), never
+    signed ones, so an "old" fixture has to be old on the ledger too.
+    """
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE blocks SET timestamp = ? WHERE block_index = "
+                 "(SELECT block_index FROM transactions WHERE id = ?)", (tx["timestamp"], tx["id"]))
+    conn.commit()
+    conn.close()
+
 
 
 class EscrowTestCase(unittest.TestCase):

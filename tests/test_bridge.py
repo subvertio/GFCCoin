@@ -71,6 +71,19 @@ CENT = 10 ** 16
 LIMITS = (10_000_00, 50_000_00, 86_400, 10_00)  # maxMint, windowLimit, window, minOut (cents / seconds)
 
 
+def admitted_as_of_its_timestamp(db: str, tx: dict):
+    """
+    Test fixtures only: record the transaction as admitted at its own timestamp, as if this
+    ledger had received it then. The bridge reads admission times (block timestamps), never
+    signed ones, so an "old" fixture has to be old on the ledger too.
+    """
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE blocks SET timestamp = ? WHERE block_index = "
+                 "(SELECT block_index FROM transactions WHERE id = ?)", (tx["timestamp"], tx["id"]))
+    conn.commit()
+    conn.close()
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -104,6 +117,7 @@ def treasury_mint(db: str, wallet: str, cents: int, tx_type: str = blockchain.TX
                   "amount_cents": cents, "reason": reason, "timestamp": when.isoformat(), "tx_type": tx_type},
                  TREASURY_PRIV, TREASURY_PUB)
     status, why = blockchain.accept_synced_transaction(db, tx)
+    admitted_as_of_its_timestamp(db, tx)
     assert status == blockchain.ACCEPTED, why
     return tx
 
@@ -116,6 +130,7 @@ def transfer(db: str, priv: str, pub: str, recipient: str, cents: int, reason: s
                  priv, pub)
     status, why = blockchain.accept_synced_transaction(db, tx)
     assert status == blockchain.ACCEPTED, why
+    admitted_as_of_its_timestamp(db, tx)
     return tx
 
 
