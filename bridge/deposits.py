@@ -16,7 +16,7 @@ deposit past the finality wait, or a transfer past the free-credit hold (audit F
 A deposit must also really be in its block: the block exists, holds exactly that deposit,
 and its Merkle root is that deposit's hash (F08: a row pointed at a made-up block number).
 That still trusts this node's database as a whole; signed checkpoints are what would let
-attesters on other nodes check it (docs/bridge-service.md).
+attesters on other nodes check it (docs/ledger-checkpoints.md).
 """
 
 import re
