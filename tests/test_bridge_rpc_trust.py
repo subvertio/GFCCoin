@@ -9,6 +9,7 @@ Run from the repository root:
 
 import json
 import os
+from datetime import datetime, timezone
 import unittest
 import uuid
 from pathlib import Path
@@ -156,7 +157,8 @@ class RPCTrustTests(EscrowTestCase):
         from dataclasses import replace
         self.assertTrue(any("CHECKPOINT" in p for p in problems))
         self.assertEqual(replace(main, chain_finality="finalized", verify_rpc_urls=["https://b"],
-                                 checkpoint_url="https://node", checkpoint_pubkeys=["ab" * 32]).mainnet_problems(), [])
+                                 checkpoint_url="https://node", checkpoint_pubkeys=["ab" * 32],
+                                 deposits_from=datetime.now(timezone.utc)).mainnet_problems(), [])
         self.assertEqual(replace(main, chain_id=84532).mainnet_problems(), [])
 
     def test_key_checks_refuse_a_quorum_plain_keys_and_shared_wallets(self):

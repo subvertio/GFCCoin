@@ -11,6 +11,7 @@ Run from the repository root:
 import sqlite3
 import unittest
 import uuid
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
@@ -92,6 +93,26 @@ class AdmissionTimeTests(EscrowTestCase):
         with mock.patch.object(deposits, "FRESH_TRACE_BUDGET", 1):  # can't look behind b at all
             self.assertEqual(self.clean(self.b), (300_00, 0))
         self.assertEqual(self.clean(self.b), (300_00, 300_00))
+
+    # ---- a redeployed bridge never mints a deposit made for the contract before it ----
+
+    def test_a_deposit_from_before_the_contract_cutoff_is_not_this_bridges(self):
+        mint(self.db, self.a, 500_00)
+        (_, _), dep = send(self.db, self.a_priv, self.a, self.escrow_pub, 200_00, f"bridge:v1:{CHAIN}:{EVM}")
+        row = self.deposit_row(dep)
+        admitted = deposits.parse_ts(row["admitted_at"])
+        later = admitted + timedelta(days=1)
+        self.assertEqual(deposits.validate_deposit(row, self.cfg, later)[0], deposits.OK)
+
+        # The bridge was redeployed after this deposit: the new contract must not mint it again
+        redeployed = replace(self.cfg, deposits_from=admitted + timedelta(seconds=1))
+        result, detail, _ = deposits.validate_deposit(row, redeployed, later)
+        self.assertEqual(result, deposits.OTHER_CHAIN)
+        self.assertIn("DEPOSITS_FROM", detail)
+        self.assertEqual(deposits.validate_deposit(row, replace(self.cfg, deposits_from=admitted), later)[0],
+                         deposits.OK)
+        self.assertTrue(any("DEPOSITS_FROM" in p for p in replace(redeployed, chain_id=8453,
+                                                                   deposits_from=None).mainnet_problems()))
 
     # ---- F08 B: a deposit must really be in its block ----
 

@@ -138,7 +138,8 @@ class RemoteAttesterTests(EscrowTestCase):
 
     def test_mainnet_refuses_a_plain_http_attester_elsewhere(self):
         main = replace(self.cfg, chain_id=8453, chain_finality="finalized", rpc_url="https://a",
-                       verify_rpc_urls=["https://b"], checkpoint_url="https://node", checkpoint_pubkeys=["ab" * 32])
+                       verify_rpc_urls=["https://b"], checkpoint_url="https://node", checkpoint_pubkeys=["ab" * 32],
+                       deposits_from=datetime.now(timezone.utc))
         self.assertEqual(replace(main, remote_attester_urls=["https://att.example", "http://127.0.0.1:8300"]
                                  ).mainnet_problems(), [])
         self.assertTrue(replace(main, remote_attester_urls=["http://10.0.0.5:8300"]).mainnet_problems())
@@ -171,8 +172,9 @@ class RemoteAttesterTests(EscrowTestCase):
         self.assertTrue(any("LEDGER_DB" in p for p in replace(self.cfg, ledger_db="nowhere.db").attester_problems()))
         main = replace(self.cfg, chain_id=8453)
         self.assertTrue(any("CHECKPOINT" in p for p in main.attester_problems()))
-        self.assertEqual(replace(main, checkpoint_url="https://node", checkpoint_pubkeys=["ab" * 32]
-                                 ).attester_problems(), [])
+        self.assertTrue(any("DEPOSITS_FROM" in p for p in main.attester_problems()))
+        self.assertEqual(replace(main, checkpoint_url="https://node", checkpoint_pubkeys=["ab" * 32],
+                                 deposits_from=datetime.now(timezone.utc)).attester_problems(), [])
 
 
 if __name__ == "__main__":
