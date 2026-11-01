@@ -52,7 +52,9 @@ REQUIRE_PHONE_TO_POST = not IS_TESTNET
 # with one of these (ledger_checkpoints.py), and bridge attesters trust only these. Empty
 # until a checkpoint key exists (`python ledger_checkpoints.py new-key FILE`).
 # GFC_CHECKPOINT_PUBKEYS (comma-separated) replaces this, for test networks.
-PINNED_CHECKPOINT_PUBKEYS = ()
+PINNED_CHECKPOINT_PUBKEYS = (
+    "f71bc7a73fded685316761c072c254f9f9e17aca98356f1cbb4335d34c5ecd05",  # created 2026-11-01 on the live node
+)
 _env_checkpoint = os.environ.get("GFC_CHECKPOINT_PUBKEYS", "")
 CHECKPOINT_PUBKEYS = tuple(
     k.strip().lower() for k in _env_checkpoint.split(",") if k.strip()
