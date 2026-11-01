@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 from bridge import deposits, eip712
 from bridge.chain import BridgeContract, RPCError
 from bridge.config import BridgeConfig
-from bridge.store import HELD, MINTED, REFUND, SEEN, WAITING, Store
+from bridge.store import HELD, MINTED, REFUND, REFUNDED, SEEN, SUBMITTED, WAITING, Store
 
 logger = logging.getLogger("gfc.bridge.relayer")
 
@@ -37,6 +37,9 @@ def scan_deposits(cfg: BridgeConfig, store: Store, now: Optional[datetime] = Non
                 continue
             result, detail, dep = deposits.validate_deposit(tx, cfg, now)
             counts[result] += 1
+            if dep and deposits.refunded(conn, cfg.escrow_wallet, tx["tx_hash"]):
+                store.add_deposit(dep, REFUNDED, "refunded on the ledger")  # a rebuilt state remembers
+                continue
             if result == deposits.OK:
                 store.add_deposit(dep)
             elif result == deposits.REFUND:
@@ -53,7 +56,8 @@ def relay(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: Li
           now: Optional[datetime] = None) -> Dict[str, int]:
     """Try to mint every pending deposit once. Returns counts by new status."""
     now = now or datetime.now(timezone.utc)
-    counts = {MINTED: 0, WAITING: 0, HELD: 0}
+    counts = {MINTED: 0, SUBMITTED: 0, WAITING: 0, HELD: 0, SEEN: 0}
+    settle_mints(cfg, store, bridge, counts)
     if bridge.paused():
         logger.warning("Bridge is paused: not relaying")
         return counts
@@ -68,7 +72,7 @@ def relay(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: Li
     for d in store.deposits(SEEN, WAITING):
         tx_hash = d["tx_hash"]
         if bridge.processed(bytes.fromhex(tx_hash)):
-            mark(tx_hash, MINTED, "already processed on chain")
+            mark(tx_hash, SUBMITTED, "processed on chain: waiting for finality")
             continue
         if d["mint_cents"] > max_mint:
             mark(tx_hash, HELD, f"above the per-mint cap of {max_mint / 100:.2f} GFC: refund it")
@@ -94,19 +98,47 @@ def relay(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: Li
                  f"{len(sigs)}/{threshold} attestations ({refusals})")
             continue
 
+        # Signatures exist from here on: no refund until they expire (releases.refund_deposit)
+        store.note_attested(tx_hash, deadline)
         req = eip712.mint_request(tx_hash, d["evm_to"], d["mint_cents"], deadline)
         try:
             receipt = bridge.mint_from_ledger(relayer_key, req, [s for _, s in sigs])
         except RPCError as e:
             if e.error_name == "AlreadyProcessed":
-                mark(tx_hash, MINTED, "already processed on chain")
+                mark(tx_hash, SUBMITTED, "processed on chain: waiting for finality")
             else:
                 mark(tx_hash, WAITING, f"mint failed: {e}")
             continue
         store.add_gas(int(receipt["gasUsed"], 16))
-        mark(tx_hash, MINTED, "", receipt["transactionHash"])
-        logger.info(f"Minted {d['mint_cents'] / 100:.2f} GFC to {d['evm_to']} for {tx_hash[:16]}")
+        mark(tx_hash, SUBMITTED, "sent: minted once it's in a finalized block", receipt["transactionHash"])
+        logger.info(f"Mint sent: {d['mint_cents'] / 100:.2f} GFC to {d['evm_to']} for {tx_hash[:16]}")
     return counts
+
+
+def settle_mints(cfg: BridgeConfig, store: Store, bridge: BridgeContract, counts: Optional[Dict[str, int]] = None):
+    """
+    Submitted mints become minted once `processed` is set in a finalized block. One that's no
+    longer processed even at the latest block (a reorg dropped it, or it reverted) goes back
+    to seen and is tried again; the contract's `processed` still stops a double mint
+    (audit F10: a mint marked done on its receipt alone was never retried).
+    """
+    pending = store.deposits(SUBMITTED)
+    if not pending:
+        return
+    final = bridge.chain.final_block(cfg.chain_finality)
+    for d in pending:
+        h = bytes.fromhex(d["tx_hash"])
+        if bridge.processed(h, final):
+            store.set_deposit(d["tx_hash"], MINTED, "")
+            status = MINTED
+        elif not bridge.processed(h):
+            store.set_deposit(d["tx_hash"], SEEN, "the mint isn't on chain any more (reorg or revert): retrying")
+            logger.warning(f"Mint for {d['tx_hash'][:16]} disappeared from the chain: retrying")
+            status = SEEN
+        else:
+            continue  # on chain, not final yet
+        if counts is not None:
+            counts[status] += 1
 
 
 def run_forever(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: List, relayer_key: str,

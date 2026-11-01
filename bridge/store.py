@@ -2,12 +2,20 @@
 Bridge state: a SQLite file of its own, never the node's ledger DB.
 
 deposits: ledger -> chain, keyed by the deposit's ledger tx_hash
-  seen -> minted, or waiting (retried), or held (needs a person), or refund (never minted)
+  seen -> submitted (mint sent) -> minted (in a finalized block), or waiting (retried), or held
+  (needs a person), or refund (never minted); submitted goes back to seen if the mint
+  disappears (a reorg or a revert)
   refund/held -> refunded (`python -m bridge refund TX_HASH`)
+  attested_until: the latest deadline of any attestation issued for it (no refund before then)
 releases: chain -> ledger, keyed by BridgedOut nonce
   seen -> paid, or waiting (retried), or held (needs a person)
+  intent: the payout exactly as signed, saved before it's submitted and resent byte for byte on
+  every retry, so one burn has one signed payout; paid only once the ledger holds its tx_hash
+meta: bridge_address pins the file to one bridge contract (its nonces and deposits aren't
+  another bridge's); created_at is when this state started
 """
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -24,7 +32,8 @@ CREATE TABLE IF NOT EXISTS deposits (
     status TEXT NOT NULL,
     detail TEXT DEFAULT '',
     evm_tx TEXT DEFAULT '',
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    attested_until INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS releases (
     nonce INTEGER PRIMARY KEY,
@@ -37,7 +46,9 @@ CREATE TABLE IF NOT EXISTS releases (
     detail TEXT DEFAULT '',
     ledger_tx_id TEXT DEFAULT '',
     approved INTEGER DEFAULT 0,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    intent TEXT DEFAULT '',
+    ledger_tx_hash TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS gas_spent (
     day TEXT PRIMARY KEY,
@@ -51,6 +62,14 @@ CREATE TABLE IF NOT EXISTS meta (
 
 # Deposit statuses
 SEEN, MINTED, WAITING, HELD, REFUND, REFUNDED = "seen", "minted", "waiting", "held", "refund", "refunded"
+SUBMITTED = "submitted"  # mint sent; minted once it's in a finalized block
+
+# Columns added after the first version: (table, column, definition)
+MIGRATIONS = (
+    ("deposits", "attested_until", "INTEGER DEFAULT 0"),
+    ("releases", "intent", "TEXT DEFAULT ''"),
+    ("releases", "ledger_tx_hash", "TEXT DEFAULT ''"),
+)
 # Release statuses (also SEEN, WAITING, HELD)
 PAID = "paid"
 
@@ -64,8 +83,27 @@ class Store:
         self.path = path
         conn = self._conn()
         conn.executescript(SCHEMA)
+        for table, column, definition in MIGRATIONS:
+            if column not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', ?)", (_now(),))
         conn.commit()
         conn.close()
+
+    def pin_bridge(self, bridge_address: str):
+        """
+        Tie this state file to one bridge contract. A replacement contract restarts its
+        nonces, so another bridge's state would mark its releases paid or its deposits done.
+        """
+        pinned = self.get_meta("bridge_address")
+        if not pinned:
+            self.set_meta("bridge_address", bridge_address.lower())
+        elif pinned != bridge_address.lower():
+            raise ValueError(f"this bridge state belongs to {pinned}, not {bridge_address}: "
+                             "use a new GFC_BRIDGE_STATE_DB for a new bridge")
+
+    def created_at(self) -> str:
+        return self.get_meta("created_at")
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -125,10 +163,18 @@ class Store:
 
     def mints_by_sender_since(self, sender: str, since_iso: str) -> int:
         conn = self._conn()
-        n = conn.execute("SELECT COUNT(*) FROM deposits WHERE sender = ? AND status = ? AND updated_at >= ?",
-                         (sender, MINTED, since_iso)).fetchone()[0]
+        n = conn.execute("SELECT COUNT(*) FROM deposits WHERE sender = ? AND status IN (?, ?) AND updated_at >= ?",
+                         (sender, MINTED, SUBMITTED, since_iso)).fetchone()[0]
         conn.close()
         return n
+
+    def note_attested(self, tx_hash: str, deadline: int):
+        """Remember the latest deadline of an attestation issued for this deposit."""
+        conn = self._conn()
+        conn.execute("UPDATE deposits SET attested_until = MAX(attested_until, ?) WHERE tx_hash = ?",
+                     (deadline, tx_hash))
+        conn.commit()
+        conn.close()
 
     # ----------------------------------------------------------------- gas budget
 
@@ -158,13 +204,27 @@ class Store:
         conn.close()
         return cur.rowcount > 0
 
-    def set_release(self, nonce: int, status: str, detail: str = "", ledger_tx_id: str = ""):
+    def set_release(self, nonce: int, status: str, detail: str = "", ledger_tx_id: str = "",
+                    ledger_tx_hash: str = ""):
         conn = self._conn()
         conn.execute("UPDATE releases SET status = ?, detail = ?, "
-                     "ledger_tx_id = COALESCE(NULLIF(?, ''), ledger_tx_id), updated_at = ? WHERE nonce = ?",
-                     (status, detail, ledger_tx_id, _now(), nonce))
+                     "ledger_tx_id = COALESCE(NULLIF(?, ''), ledger_tx_id), "
+                     "ledger_tx_hash = COALESCE(NULLIF(?, ''), ledger_tx_hash), updated_at = ? WHERE nonce = ?",
+                     (status, detail, ledger_tx_id, ledger_tx_hash, _now(), nonce))
         conn.commit()
         conn.close()
+
+    def save_release_intent(self, nonce: int, intent: dict) -> dict:
+        """
+        Save the signed payout before it's submitted, and return the one saved: an earlier
+        saved payout is never replaced, so every retry resends the same signed bytes.
+        """
+        conn = self._conn()
+        conn.execute("UPDATE releases SET intent = ? WHERE nonce = ? AND intent = ''", (json.dumps(intent), nonce))
+        conn.commit()
+        saved = conn.execute("SELECT intent FROM releases WHERE nonce = ?", (nonce,)).fetchone()["intent"]
+        conn.close()
+        return json.loads(saved)
 
     def approve_release(self, nonce: int) -> bool:
         conn = self._conn()

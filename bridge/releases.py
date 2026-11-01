@@ -4,15 +4,23 @@ Chain -> ledger: pay finalized BridgedOut events from the escrow wallet.
 Each payout is an ordinary TRANSFER signed by the escrow key and added through
 blockchain.accept_synced_transaction(), so it passes exactly the checks a peer
 row would (signature, hash, funding) and the node's sync shares it like any
-other signed transfer. It is paid at most once per BridgedOut nonce:
-- the ledger tx id is derived from (chain id, nonce), so a second insert is a
-  duplicate, and
-- the ledger is searched for an existing `bridge-out:v1:<chainId>:<nonce>:` row
-  before signing (covers a crash between paying and recording it).
+other signed transfer. One burn is paid once:
+- the payout's reason names the bridge-out (bridge-out:v2:<chain>:<bridge>:<nonce>:<evm tx>),
+  and every node accepts only one payout per (chain, bridge, nonce): a retry, a replayed
+  old signature or a payout under another id is rejected (blockchain._escrow_outflow_problem);
+- the payout is signed once and saved (releases.intent) before it's submitted; every retry
+  resends exactly those bytes, so a crash, a timeout or a restored state never signs a second
+  payout for the same burn;
+- a release is paid only when the ledger holds a confirmed row with that payout's tx_hash
+  (and the right recipient and amount). An id that happens to exist proves nothing: ids
+  aren't signed, anyone can take one (audit F04);
+- every pass re-checks paid releases against the ledger, and resends the saved payout if its
+  row has gone (a ledger restored from an older backup: audit F06).
 Only blocks at or behind the configured chain finality are read, so a reorg
 can't un-burn tokens that were already paid out.
 """
 
+import json
 import logging
 import sqlite3
 import uuid
@@ -22,20 +30,23 @@ from typing import TYPE_CHECKING, Dict, Optional
 import blockchain
 import signing
 from bridge.config import BridgeConfig
-from bridge.deposits import RELEASE_REASON_PREFIX
-from bridge.store import HELD, PAID, REFUND, REFUNDED, SEEN, WAITING, Store
+from bridge.store import HELD, MINTED, PAID, REFUND, REFUNDED, WAITING, SEEN, Store
 
 if TYPE_CHECKING:  # payouts and refunds work without the EVM dependencies
     from bridge.chain import BridgeContract
 
 logger = logging.getLogger("gfc.bridge.releases")
 
-RELEASE_ID_NAMESPACE = uuid.UUID("6f1c2b0e-8f8e-4b8e-9d3a-6a1f5e2c9b70")
 CURSOR_KEY = "release_cursor"
 
 
-def release_tx_id(chain_id: int, nonce: int) -> str:
-    return str(uuid.uuid5(RELEASE_ID_NAMESPACE, f"{chain_id}:{nonce}"))
+def payout_reason(cfg: BridgeConfig, nonce: int, evm_tx: str) -> str:
+    """The signed reason of a payout: it names the bridge-out it pays (blockchain.bridge_payout_key)."""
+    return f"bridge-out:v2:{cfg.chain_id}:{cfg.bridge_address.lower()}:{nonce}:{evm_tx}"
+
+
+def refund_reason(deposit_hash: str) -> str:
+    return f"bridge-refund:v1:{deposit_hash}"
 
 
 def scan_bridged_out(cfg: BridgeConfig, store: Store, bridge: "BridgeContract") -> int:
@@ -49,11 +60,47 @@ def scan_bridged_out(cfg: BridgeConfig, store: Store, bridge: "BridgeContract") 
     return new
 
 
-def _existing_payout(conn: sqlite3.Connection, cfg: BridgeConfig, nonce: int) -> Optional[str]:
-    prefix = f"{RELEASE_REASON_PREFIX}{cfg.chain_id}:{nonce}:"
-    row = conn.execute("SELECT id FROM transactions WHERE sender = ? AND substr(reason, 1, ?) = ?",
-                       (cfg.escrow_wallet, len(prefix), prefix)).fetchone()
-    return row[0] if row else None
+def _payouts_for(conn: sqlite3.Connection, cfg: BridgeConfig, nonce: int) -> list:
+    """Confirmed escrow rows paying this bridge-out: (tx_hash, id, recipient, amount_cents)."""
+    key = blockchain.bridge_payout_key(payout_reason(cfg, nonce, "0x" + "00" * 32))
+    return conn.execute("SELECT tx_hash, id, recipient, amount_cents FROM transactions WHERE sender = ? "
+                        "AND substr(reason, 1, ?) = ? AND block_index IS NOT NULL",
+                        (cfg.escrow_wallet, len(key), key)).fetchall()
+
+
+def _confirmed(conn: sqlite3.Connection, tx_hash: str, sender: str, recipient: str, cents: int) -> bool:
+    """The ledger holds this exact signed transaction, in a block, paying what it should."""
+    return conn.execute("SELECT 1 FROM transactions WHERE tx_hash = ? AND sender = ? AND recipient = ? "
+                        "AND amount_cents = ? AND block_index IS NOT NULL",
+                        (tx_hash, sender, recipient, cents)).fetchone() is not None
+
+
+def audit_paid(cfg: BridgeConfig, store: Store) -> int:
+    """
+    Check every paid release against the ledger. A payout row that's gone (a ledger restored
+    from an older backup) goes back to waiting, to resend the same saved payout; without a
+    saved payout, a person has to look. Returns how many came back.
+    """
+    back = 0
+    conn = sqlite3.connect(cfg.ledger_db)
+    try:
+        for r in store.releases(PAID):
+            if r["ledger_tx_hash"] and _confirmed(conn, r["ledger_tx_hash"], cfg.escrow_wallet,
+                                                  r["ledger_wallet"], r["amount_cents"]):
+                continue
+            if not r["ledger_tx_hash"] and _payouts_for(conn, cfg, r["nonce"]):
+                continue  # paid before payouts were tracked by hash
+            if r["intent"]:
+                store.set_release(r["nonce"], WAITING, "its payout is missing from the ledger: resending the "
+                                                       "same signed payout")
+            else:
+                store.set_release(r["nonce"], HELD, "marked paid but no payout is on the ledger: a person "
+                                                    "must check before anything is resent")
+            logger.error(f"BridgedOut #{r['nonce']} was marked paid but its payout isn't on the ledger")
+            back += 1
+    finally:
+        conn.close()
+    return back
 
 
 def pay_releases(cfg: BridgeConfig, store: Store, escrow_key: str,
@@ -64,17 +111,19 @@ def pay_releases(cfg: BridgeConfig, store: Store, escrow_key: str,
     now = now or datetime.now(timezone.utc)
     counts = {PAID: 0, WAITING: 0, HELD: 0}
     day_ago = (now - timedelta(days=1)).isoformat()
+    audit_paid(cfg, store)
 
-    def mark(nonce: int, status: str, detail: str = "", ledger_tx_id: str = ""):
-        store.set_release(nonce, status, detail, ledger_tx_id)
+    def mark(nonce: int, status: str, detail: str = "", tx: Optional[dict] = None):
+        store.set_release(nonce, status, detail, tx["id"] if tx else "", tx["tx_hash"] if tx else "")
         counts[status] += 1
 
     for r in store.releases(SEEN, WAITING):
         nonce, wallet, cents = r["nonce"], r["ledger_wallet"], r["amount_cents"]
+        intent = json.loads(r["intent"]) if r["intent"] else None
         if not signing.is_public_key(wallet) or wallet in (cfg.escrow_wallet, blockchain.TREASURY_WALLET_ID):
             mark(nonce, HELD, "not a ledger wallet key: the tokens are burned, a person must make this right")
             continue
-        if not r["approved"]:
+        if intent is None and not r["approved"]:  # a saved payout already passed the limits
             if cents > cfg.max_release_cents:
                 mark(nonce, HELD, f"above the {cfg.max_release_cents / 100:.2f} GFC per-release limit")
                 continue
@@ -84,64 +133,105 @@ def pay_releases(cfg: BridgeConfig, store: Store, escrow_key: str,
 
         conn = sqlite3.connect(cfg.ledger_db)
         try:
-            existing = _existing_payout(conn, cfg, nonce)
+            existing = _payouts_for(conn, cfg, nonce)
         finally:
             conn.close()
         if existing:
-            mark(nonce, PAID, "already paid", existing)
+            tx_hash, tx_id, recipient, amount = existing[0]
+            if recipient == wallet and amount == cents:
+                mark(nonce, PAID, "already paid", {"id": tx_id, "tx_hash": tx_hash})
+            else:
+                mark(nonce, HELD, f"the ledger has a different payout for this bridge-out ({tx_hash[:16]}): "
+                                  "a person must check")
             continue
 
-        tx = {
-            "id": release_tx_id(cfg.chain_id, nonce),
-            "sender": cfg.escrow_wallet,
-            "recipient": wallet,
-            "amount": cents / 100.0,
-            "amount_cents": cents,
-            "reason": f"{RELEASE_REASON_PREFIX}{cfg.chain_id}:{nonce}:{r['evm_tx']}",
-            "timestamp": now.isoformat(),
-            "tx_type": blockchain.TX_TYPE_TRANSFER,
-        }
-        tx["tx_hash"] = blockchain.compute_tx_hash(tx)
-        tx["signer"] = cfg.escrow_wallet
-        tx["signature"] = signing.sign_tx_hash(escrow_key, tx["tx_hash"])
+        if intent is None:
+            # Signed once: saved before it's submitted, resent unchanged on every retry
+            intent = {
+                "id": str(uuid.uuid4()),
+                "sender": cfg.escrow_wallet,
+                "recipient": wallet,
+                "amount": cents / 100.0,
+                "amount_cents": cents,
+                "reason": payout_reason(cfg, nonce, r["evm_tx"]),
+                "timestamp": now.isoformat(),
+                "tx_type": blockchain.TX_TYPE_TRANSFER,
+            }
+            intent["tx_hash"] = blockchain.compute_tx_hash(intent)
+            intent["signer"] = cfg.escrow_wallet
+            intent["signature"] = signing.sign_tx_hash(escrow_key, intent["tx_hash"])
+            intent = store.save_release_intent(nonce, intent)  # an earlier saved one wins
 
-        status, why = blockchain.accept_synced_transaction(cfg.ledger_db, tx)
-        if status in (blockchain.ACCEPTED, blockchain.DUPLICATE):
-            mark(nonce, PAID, "", tx["id"])
+        status, why = blockchain.accept_synced_transaction(cfg.ledger_db, intent)
+        conn = sqlite3.connect(cfg.ledger_db)
+        try:
+            paid = _confirmed(conn, intent["tx_hash"], cfg.escrow_wallet, wallet, cents)
+        finally:
+            conn.close()
+        if paid:
+            mark(nonce, PAID, "", intent)
             logger.info(f"Released {cents / 100:.2f} GFC to {wallet[:16]} for BridgedOut #{nonce}")
         elif status == blockchain.PENDING:
             mark(nonce, WAITING, "escrow balance too low")
             logger.error(f"Escrow can't cover BridgedOut #{nonce}: check reconcile")
+        elif status == blockchain.DUPLICATE:
+            mark(nonce, HELD, "another ledger transaction has this payout's id: a person must check")
         else:
             mark(nonce, HELD, f"ledger rejected the payout: {why}")
     return counts
 
 
 def refund_deposit(cfg: BridgeConfig, store: Store, escrow_key: str, tx_hash: str,
-                   now: Optional[datetime] = None) -> str:
+                   now: Optional[datetime] = None, bridge: Optional["BridgeContract"] = None) -> str:
     """
     Send a deposit that will never be minted (status refund or held) back to its sender,
-    with reason bridge-refund:v1:<tx_hash>. Returns the refund's ledger tx id. At most
-    once per deposit: an existing refund row is reused.
+    with reason bridge-refund:v1:<tx_hash>. Returns the refund's ledger tx id. Every node
+    accepts one refund per deposit, of exactly that deposit, to its sender.
+
+    A deposit must never be both refunded and minted (audit F07), so a refund is refused
+    while it could still be minted:
+    - when `bridge` is given, if it's already processed on chain;
+    - while an attestation issued for it hasn't expired (deposits.attested_until), or, if it
+      was ever attested, when the chain can't be checked;
+    - for a deposit older than this state file while the state is younger than one mint TTL:
+      a lost or restored state may not remember attestations issued before it.
     """
     if signing.public_key_of(escrow_key) != cfg.escrow_wallet:
         raise ValueError("escrow key does not match GFC_BRIDGE_ESCROW_WALLET")
     d = store.deposit(tx_hash)
     if d is None or d["status"] not in (REFUND, HELD):
         raise ValueError("only deposits marked refund or held can be refunded")
-    reason = f"bridge-refund:v1:{tx_hash}"
+    reason = refund_reason(tx_hash)
     conn = sqlite3.connect(cfg.ledger_db)
     try:
-        row = conn.execute("SELECT id FROM transactions WHERE sender = ? AND reason = ?",
+        row = conn.execute("SELECT id FROM transactions WHERE sender = ? AND reason = ? AND block_index IS NOT NULL",
                            (cfg.escrow_wallet, reason)).fetchone()
     finally:
         conn.close()
     if row:
         store.set_deposit(tx_hash, REFUNDED, "already refunded")
         return row[0]
+
     now = now or datetime.now(timezone.utc)
+    if bridge is not None and bridge.processed(bytes.fromhex(tx_hash)):
+        store.set_deposit(tx_hash, MINTED, "minted on chain: not refunding")
+        raise ValueError("this deposit was minted on chain: it can't be refunded")
+    if d["attested_until"]:
+        if d["attested_until"] > now.timestamp():
+            raise ValueError(f"an attestation for this deposit can be used until "
+                             f"{datetime.fromtimestamp(d['attested_until'], timezone.utc):%Y-%m-%d %H:%M} UTC: "
+                             "refund it after that")
+        if bridge is None:
+            raise ValueError("this deposit was attested: check the chain (pass the bridge) before refunding")
+    created = blockchain._parse_timestamp(store.created_at())
+    deposited = blockchain._parse_timestamp(d["ledger_ts"])
+    if created and deposited and deposited < created and now - created < timedelta(seconds=cfg.mint_ttl_seconds):
+        raise ValueError(f"this bridge state started {created:%H:%M} UTC, after the deposit: attestations from "
+                         f"before it may still be usable, so wait until "
+                         f"{created + timedelta(seconds=cfg.mint_ttl_seconds):%H:%M} UTC")
+
     tx = {
-        "id": str(uuid.uuid5(RELEASE_ID_NAMESPACE, f"refund:{tx_hash}")),
+        "id": str(uuid.uuid4()),
         "sender": cfg.escrow_wallet,
         "recipient": d["sender"],
         "amount": d["amount_cents"] / 100.0,
@@ -154,7 +244,12 @@ def refund_deposit(cfg: BridgeConfig, store: Store, escrow_key: str, tx_hash: st
     tx["signer"] = cfg.escrow_wallet
     tx["signature"] = signing.sign_tx_hash(escrow_key, tx["tx_hash"])
     status, why = blockchain.accept_synced_transaction(cfg.ledger_db, tx)
-    if status not in (blockchain.ACCEPTED, blockchain.DUPLICATE):
-        raise ValueError(f"ledger refused the refund: {why}")
+    conn = sqlite3.connect(cfg.ledger_db)
+    try:
+        done = _confirmed(conn, tx["tx_hash"], cfg.escrow_wallet, d["sender"], d["amount_cents"])
+    finally:
+        conn.close()
+    if not done:
+        raise ValueError(f"ledger refused the refund: {why or status}")
     store.set_deposit(tx_hash, REFUNDED)
     return tx["id"]

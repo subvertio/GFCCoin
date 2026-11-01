@@ -64,7 +64,7 @@ if HAVE_ETH:
     from bridge.chain import BridgeContract, Chain, calldata, token_total_supply  # noqa: E402
     from bridge.config import BridgeConfig  # noqa: E402
     from bridge.reconcile import reconcile  # noqa: E402
-    from bridge.store import HELD, MINTED, PAID, REFUND, WAITING, Store  # noqa: E402
+    from bridge.store import HELD, MINTED, PAID, REFUND, SUBMITTED, WAITING, Store  # noqa: E402
 
 CHAIN_ID = 31337
 CENT = 10 ** 16
@@ -212,9 +212,15 @@ class BridgeServiceTest(unittest.TestCase):
                         f"bridge:v1:{chain_id}:{evm_to}", **kw)
 
     def relay(self, attesters=None):
+        """One relay pass, then settle: chain_finality "0" makes a sent mint final at once."""
         relayer.scan_deposits(self.cfg, self.store)
-        return relayer.relay(self.cfg, self.store, self.bridge, attesters or self.attesters(),
-                             self.relayer_acct.key.hex())
+        counts = relayer.relay(self.cfg, self.store, self.bridge, attesters or self.attesters(),
+                               self.relayer_acct.key.hex())
+        settled = {MINTED: 0, "seen": 0}
+        relayer.settle_mints(self.cfg, self.store, self.bridge, settled)
+        counts[MINTED] += settled[MINTED]
+        counts[SUBMITTED] -= settled[MINTED]
+        return counts
 
     def balance(self, addr: str) -> int:
         return self.chain.call(self.token_addr, "balanceOf(address)", ["address"], [addr])
@@ -448,7 +454,8 @@ class BridgeServiceTest(unittest.TestCase):
 
         # A paused bridge relays nothing
         self.deposit(100_00)
-        self.assertEqual(self.relay(), {MINTED: 0, WAITING: 0, HELD: 0})
+        counts = self.relay()
+        self.assertEqual((counts[MINTED], counts[SUBMITTED], counts[WAITING], counts[HELD]), (0, 0, 0, 0))
         self.assertEqual(token_total_supply(self.chain, self.token_addr), (499_00 + 1_000_00) * CENT)
 
 
