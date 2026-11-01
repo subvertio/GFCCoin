@@ -283,5 +283,41 @@ class AccountRecoveryTests(unittest.TestCase):
             account_recovery.operator_reset_link("nobody-" + uuid.uuid4().hex[:6])
         self.assertEqual(ctx.exception.status, 404)
 
+    # ---------- usernames typed as they're shown: "@Name" ----------
+
+    def test_login_ignores_a_leading_at(self):
+        name, _, _ = self.register()
+        self.assertEqual(self.login("@" + name.upper(), "first-password").json()["user"], name)
+        self.assertEqual(self.login(" @" + name + " ", "first-password").status_code, 200)
+        self.assertEqual(self.login("@@" + name, "first-password").status_code, 200)
+
+    def test_login_says_which_part_was_wrong(self):
+        name, _, _ = self.register()
+        wrong = self.login(name, "not-the-password")
+        self.assertEqual((wrong.status_code, wrong.json()["detail"]), (401, "Wrong password."))
+        missing = self.login("@nobody-" + uuid.uuid4().hex[:6], "first-password")
+        self.assertEqual((missing.status_code, missing.json()["detail"]), (401, "No account with that username."))
+        self.assertEqual(self.login("@", "first-password").status_code, 401)
+
+    def test_usernames_cannot_start_with_at(self):
+        r = self.client.post("/auth/register", data={"username": "@r" + uuid.uuid4().hex[:8], "password": "first-password"})
+        self.assertEqual((r.status_code, r.json()["detail"]), (400, "Usernames can't start with @."))
+
+    def test_account_named_with_at_still_logs_in(self):
+        # Older nodes allowed "@" names: the exact name wins over dropping the @
+        name = "@r" + uuid.uuid4().hex[:8]
+        conn = sqlite3.connect(main.DB_PATH)
+        conn.execute("INSERT INTO users (id, username, password, created_at) VALUES (?, ?, ?, ?)",
+                     (uuid.uuid4().hex, name, main.hash_password("first-password"), "2026-01-01T00:00:00"))
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.login(name, "first-password").json()["user"], name)
+
+    def test_reset_link_and_recovery_accept_a_leading_at(self):
+        name, _, _ = self.register()
+        user, f = account_recovery.operator_reset_link("@" + name)
+        self.assertEqual(user, name)
+        self.assertIn("Choose a new password", self.client.get(f"/reset/set?f={f}").text)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -56,7 +56,7 @@ import referrals
 import reposts
 import signing
 from security import (
-    hash_password, verify_password, migrate_plaintext_passwords,
+    find_username, hash_password, verify_password, migrate_plaintext_passwords,
     init_sessions_table, create_session, Caller, caller_from_form, caller_from_query,
     bearer_token, resolve_caller, reserve_spend, release_spend, NodeCORSMiddleware,
 )
@@ -269,6 +269,9 @@ async def auth_register(
         raise HTTPException(status_code=400, detail="username and password required")
 
     username = username.strip()
+    if username.startswith("@"):
+        # Names are shown as "@Name"; one that starts with @ would be shown "@@Name"
+        raise HTTPException(status_code=400, detail="Usernames can't start with @.")
     conn = sqlite3.connect(DB_PATH)
     try:
         # Logins and lookups ignore case, so "Bob" and "bob" would be the same person to everyone
@@ -304,16 +307,18 @@ async def auth_login(
     if not username.strip() or not password:
         raise HTTPException(status_code=400, detail="username and password required")
 
-    username = username.strip()
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT username, password FROM users WHERE LOWER(username) = LOWER(?)",
-        (username,)
-    ).fetchone()
-    conn.close()
+    try:
+        name = find_username(conn, username)  # ignores case and a leading "@"
+        row = conn.execute("SELECT username, password FROM users WHERE username = ?", (name,)).fetchone()             if name else None
+    finally:
+        conn.close()
 
-    if not row or not verify_password(password, row[1]):
-        raise HTTPException(status_code=401, detail="invalid credentials")
+    # Usernames are public (profiles, search), so saying which part was wrong gives nothing away
+    if not row:
+        raise HTTPException(status_code=401, detail="No account with that username.")
+    if not verify_password(password, row[1]):
+        raise HTTPException(status_code=401, detail="Wrong password.")
 
     # Return the canonical username from the database, not the user input
     canonical_username = row[0]

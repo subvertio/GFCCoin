@@ -34,7 +34,7 @@ from typing import Optional
 import keystore
 import phone_verify
 from config import DB_PATH
-from security import hash_password
+from security import find_username, hash_password
 
 FLOW_TTL = datetime.timedelta(minutes=30)     # long enough to fetch an email
 PROVEN_TTL = datetime.timedelta(minutes=15)   # from proof to the new password
@@ -102,9 +102,7 @@ def verified_email(conn: sqlite3.Connection, username: str) -> str:
 
 
 def _canonical_user(conn: sqlite3.Connection, username: str) -> str:
-    row = conn.execute("SELECT username FROM users WHERE LOWER(username) = LOWER(?)",
-                       ((username or "").strip(),)).fetchone()
-    return row[0] if row else ""
+    return find_username(conn, username)
 
 
 def _phone_hash_of(conn: sqlite3.Connection, username: str) -> str:
