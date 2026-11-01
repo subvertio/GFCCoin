@@ -6,7 +6,9 @@ The relayer holds only a gas wallet; the signatures are the authorization. It
 pays gas for every mint it submits, so it refuses work that would let someone
 drain that wallet: deposits under the minimum are never minted, each sender
 gets a few mints per day, the relayer has a daily gas budget, and an optional
-relay fee (kept in escrow) is taken out of the minted amount.
+relay fee (kept in escrow) is taken out of the minted amount. Each mint has a gas
+and fee-per-gas cap, and a reverted mint's gas counts against the budget too
+(audit F12).
 """
 
 import logging
@@ -57,7 +59,7 @@ def relay(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: Li
     """Try to mint every pending deposit once. Returns counts by new status."""
     now = now or datetime.now(timezone.utc)
     counts = {MINTED: 0, SUBMITTED: 0, WAITING: 0, HELD: 0, SEEN: 0}
-    settle_mints(cfg, store, bridge, counts)
+    settle_mints(cfg, store, bridge, counts, now)
     if bridge.paused():
         logger.warning("Bridge is paused: not relaying")
         return counts
@@ -102,10 +104,15 @@ def relay(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: Li
         store.note_attested(tx_hash, deadline)
         req = eip712.mint_request(tx_hash, d["evm_to"], d["mint_cents"], deadline)
         try:
-            receipt = bridge.mint_from_ledger(relayer_key, req, [s for _, s in sigs])
+            receipt = bridge.mint_from_ledger(relayer_key, req, [s for _, s in sigs], max_gas=cfg.max_gas_per_mint,
+                                              max_fee_per_gas=cfg.max_fee_per_gas_wei)
         except RPCError as e:
+            if e.receipt:  # sent and reverted: its gas is spent all the same
+                store.add_gas(int(e.receipt["gasUsed"], 16))
             if e.error_name == "AlreadyProcessed":
                 mark(tx_hash, SUBMITTED, "processed on chain: waiting for finality")
+            elif e.tx_hash and not e.receipt:  # sent, no receipt yet: it may still land
+                mark(tx_hash, SUBMITTED, "sent, no receipt yet", e.tx_hash)
             else:
                 mark(tx_hash, WAITING, f"mint failed: {e}")
             continue
@@ -115,22 +122,29 @@ def relay(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: Li
     return counts
 
 
-def settle_mints(cfg: BridgeConfig, store: Store, bridge: BridgeContract, counts: Optional[Dict[str, int]] = None):
+def settle_mints(cfg: BridgeConfig, store: Store, bridge: BridgeContract, counts: Optional[Dict[str, int]] = None,
+                 now: Optional[datetime] = None):
     """
     Submitted mints become minted once `processed` is set in a finalized block. One that's no
     longer processed even at the latest block (a reorg dropped it, or it reverted) goes back
     to seen and is tried again; the contract's `processed` still stops a double mint
-    (audit F10: a mint marked done on its receipt alone was never retried).
+    (audit F10: a mint marked done on its receipt alone was never retried). A mint sent
+    without a receipt yet is left alone while its attestations can still be used: sending
+    another would only pay gas for a revert.
     """
     pending = store.deposits(SUBMITTED)
     if not pending:
         return
+    now = now or datetime.now(timezone.utc)
     final = bridge.chain.final_block(cfg.chain_finality)
     for d in pending:
         h = bytes.fromhex(d["tx_hash"])
         if bridge.processed(h, final):
             store.set_deposit(d["tx_hash"], MINTED, "")
             status = MINTED
+        elif d["evm_tx"] and d["attested_until"] > now.timestamp() and not bridge.processed(h) and \
+                bridge.chain.receipt(d["evm_tx"]) is None:
+            continue  # still in flight
         elif not bridge.processed(h):
             store.set_deposit(d["tx_hash"], SEEN, "the mint isn't on chain any more (reorg or revert): retrying")
             logger.warning(f"Mint for {d['tx_hash'][:16]} disappeared from the chain: retrying")

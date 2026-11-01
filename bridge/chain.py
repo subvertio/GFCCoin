@@ -35,11 +35,18 @@ ERROR_NAMES = {"0x" + keccak(text=sig)[:4].hex(): sig.split("(")[0] for sig in _
 
 
 class RPCError(Exception):
-    def __init__(self, message: str, data: Optional[str] = None):
+    """
+    An RPC failure. Never carries the RPC URL (it often holds an API key). A transaction that
+    was sent carries tx_hash, and receipt when it reverted: its gas was spent all the same.
+    """
+    def __init__(self, message: str, data: Optional[str] = None, tx_hash: Optional[str] = None,
+                 receipt: Optional[dict] = None):
         name = ERROR_NAMES.get((data or "")[:10])
         super().__init__(f"{message} ({name})" if name else message)
         self.data = data
         self.error_name = name
+        self.tx_hash = tx_hash
+        self.receipt = receipt
 
 
 def selector(signature: str) -> bytes:
@@ -51,26 +58,36 @@ def calldata(signature: str, types: Sequence[str] = (), args: Sequence[Any] = ()
 
 
 class Chain:
-    def __init__(self, rpc_url: str, timeout: float = 30.0):
+    def __init__(self, rpc_url: str, timeout: float = 30.0, label: str = "rpc"):
         self._http = httpx.Client(timeout=timeout)
         self._url = rpc_url
         self._id = 0
+        self.label = label  # how logs and errors name this provider: never its URL
 
     def close(self):
         self._http.close()
 
     def rpc(self, method: str, params: list) -> Any:
         self._id += 1
-        resp = self._http.post(self._url, json={"jsonrpc": "2.0", "id": self._id, "method": method,
-                                                "params": params})
-        resp.raise_for_status()
-        body = resp.json()
+        try:
+            resp = self._http.post(self._url, json={"jsonrpc": "2.0", "id": self._id, "method": method,
+                                                    "params": params})
+            resp.raise_for_status()
+            body = resp.json()
+        except httpx.HTTPStatusError as e:  # httpx's own message holds the URL
+            raise RPCError(f"{self.label} {method}: HTTP {e.response.status_code}") from None
+        except (httpx.HTTPError, ValueError) as e:
+            raise RPCError(f"{self.label} {method}: {type(e).__name__}") from None
+        if not isinstance(body, dict):
+            raise RPCError(f"{self.label} {method}: malformed response")
         if "error" in body:
             err = body["error"]
             data = err.get("data")
             if isinstance(data, dict):
                 data = data.get("data")
             raise RPCError(f"{method}: {err.get('message')}", data if isinstance(data, str) else None)
+        if "result" not in body:
+            raise RPCError(f"{self.label} {method}: malformed response")
         return body["result"]
 
     # ----------------------------------------------------------------- reads
@@ -100,6 +117,18 @@ class Chain:
         """The code at an address: empty for a plain wallet, 0xef0100 + target for an EIP-7702 delegation."""
         return bytes.fromhex(self.rpc("eth_getCode", [address, "latest"])[2:])
 
+    def nonce(self, address: str, block: Any = "latest") -> int:
+        """Transactions sent from an address. An EIP-7702 authorization raises it too."""
+        tag = hex(block) if isinstance(block, int) else block
+        return int(self.rpc("eth_getTransactionCount", [address, tag]), 16)
+
+    def block_hash(self, number: int) -> Optional[str]:
+        block = self.rpc("eth_getBlockByNumber", [hex(number), False])
+        return block["hash"].lower() if block else None
+
+    def receipt(self, tx_hash: str) -> Optional[dict]:
+        return self.rpc("eth_getTransactionReceipt", [tx_hash])
+
     def logs(self, address: str, topic0: str, from_block: int, to_block: int, chunk: int = 5_000) -> List[dict]:
         out = []
         start = from_block
@@ -113,21 +142,35 @@ class Chain:
     # ----------------------------------------------------------------- writes
 
     def send(self, key: str, to: Optional[str], data: str, value: int = 0, gas: Optional[int] = None,
-             wait: float = 60.0) -> Dict[str, Any]:
-        """Sign and send an EIP-1559 tx, wait for the receipt, raise RPCError on revert."""
+             wait: float = 60.0, max_gas: Optional[int] = None,
+             max_fee_per_gas: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Sign and send an EIP-1559 tx, wait for the receipt, raise RPCError on revert (with the
+        receipt: a reverted tx still pays gas) or timeout (with the tx hash: it may still land).
+        max_gas / max_fee_per_gas cap what the RPC's estimates may spend (audit F12): over a cap,
+        nothing is sent.
+        """
         acct = Account.from_key(key)
         tx = {"from": acct.address, "data": data, "value": hex(value)}
         if to:
             tx["to"] = to_checksum_address(to)
         if gas is None:
             gas = int(int(self.rpc("eth_estimateGas", [tx]), 16) * 1.25)  # raises with the revert reason
+        if max_gas is not None and gas > max_gas:
+            raise RPCError(f"needs {gas} gas, above the {max_gas} cap: not sent")
         base_fee = int(self.rpc("eth_getBlockByNumber", ["latest", False])["baseFeePerGas"], 16)
         tip = int(self.rpc("eth_maxPriorityFeePerGas", []), 16)
+        max_fee = 2 * base_fee + tip
+        if max_fee_per_gas is not None:
+            if base_fee >= max_fee_per_gas:
+                raise RPCError(f"base fee {base_fee} wei is at or above the {max_fee_per_gas} wei cap: not sent")
+            max_fee = min(max_fee, max_fee_per_gas)
+            tip = min(tip, max_fee - base_fee)
         unsigned = {
             "chainId": self.chain_id(),
             "nonce": int(self.rpc("eth_getTransactionCount", [acct.address, "pending"]), 16),
             "data": data, "value": value, "gas": gas,
-            "maxFeePerGas": 2 * base_fee + tip, "maxPriorityFeePerGas": tip, "type": 2,
+            "maxFeePerGas": max_fee, "maxPriorityFeePerGas": tip, "type": 2,
         }
         if to:
             unsigned["to"] = tx["to"]
@@ -139,10 +182,10 @@ class Chain:
             if receipt:
                 break
             if time.monotonic() > deadline:
-                raise RPCError(f"timed out waiting for {tx_hash}")
+                raise RPCError(f"timed out waiting for {tx_hash}", tx_hash=tx_hash)
             time.sleep(0.2)
         if int(receipt["status"], 16) != 1:
-            raise RPCError(f"transaction {tx_hash} reverted")
+            raise RPCError(f"transaction {tx_hash} reverted", tx_hash=tx_hash, receipt=receipt)
         return receipt
 
 
@@ -153,11 +196,11 @@ class BridgeContract:
         self.chain = chain
         self.address = to_checksum_address(address)
 
-    def _u(self, sig: str) -> int:
-        return self.chain.call(self.address, sig)
+    def _u(self, sig: str, block: Any = "latest") -> int:
+        return self.chain.call(self.address, sig, block=block)
 
-    def token(self) -> str:
-        return to_checksum_address(self.chain.call(self.address, "token()", returns=("address",)))
+    def token(self, block: Any = "latest") -> str:
+        return to_checksum_address(self.chain.call(self.address, "token()", returns=("address",), block=block))
 
     def threshold(self) -> int:
         return self._u("threshold()")
@@ -168,11 +211,11 @@ class BridgeContract:
     def remaining_in_window_cents(self) -> int:
         return self._u("remainingInWindowCents()")
 
-    def total_minted_cents(self) -> int:
-        return self._u("totalMintedCents()")
+    def total_minted_cents(self, block: Any = "latest") -> int:
+        return self._u("totalMintedCents()", block)
 
-    def total_bridged_out_cents(self) -> int:
-        return self._u("totalBridgedOutCents()")
+    def total_bridged_out_cents(self, block: Any = "latest") -> int:
+        return self._u("totalBridgedOutCents()", block)
 
     def paused(self) -> bool:
         return self.chain.call(self.address, "paused()", returns=("bool",))
@@ -189,27 +232,28 @@ class BridgeContract:
         return self.chain.call(self.address, f"mintDigest({MINT_REQUEST_TUPLE})", [MINT_REQUEST_TUPLE],
                                [req], ("bytes32",))
 
-    def mint_from_ledger(self, key: str, req: tuple, signatures: List[bytes]) -> Dict[str, Any]:
+    def mint_from_ledger(self, key: str, req: tuple, signatures: List[bytes], max_gas: Optional[int] = None,
+                         max_fee_per_gas: Optional[int] = None) -> Dict[str, Any]:
         data = calldata(f"mintFromLedger({MINT_REQUEST_TUPLE},bytes[])", [MINT_REQUEST_TUPLE, "bytes[]"],
                         [req, signatures])
-        return self.chain.send(key, self.address, data)
+        return self.chain.send(key, self.address, data, max_gas=max_gas, max_fee_per_gas=max_fee_per_gas)
 
     def pause(self, key: str) -> Dict[str, Any]:
         return self.chain.send(key, self.address, calldata("pause()"))
 
     def bridged_out_logs(self, from_block: int, to_block: int, chunk: int) -> List[dict]:
-        """BridgedOut events as dicts: nonce, from, ledger_wallet (hex), amount_cents, block, evm_tx."""
+        """
+        BridgedOut events as dicts: nonce, from, ledger_wallet (hex), amount_cents, block,
+        evm_tx, block_hash, log_index. A log that isn't exactly a BridgedOut of this bridge in
+        the asked range raises RPCError: the provider is wrong or lying (audit F09).
+        """
         out = []
         for log in self.chain.logs(self.address, TOPIC_BRIDGED_OUT, from_block, to_block, chunk):
-            t = log["topics"]
-            out.append({
-                "nonce": int(t[1], 16),
-                "from": to_checksum_address("0x" + t[2][-40:]),
-                "ledger_wallet": t[3][2:].lower(),
-                "amount_cents": int(log["data"], 16),
-                "block": int(log["blockNumber"], 16),
-                "evm_tx": log["transactionHash"],
-            })
+            ev = decode_bridged_out(log, self.address)
+            if not from_block <= ev["block"] <= to_block:
+                raise RPCError(f"{self.chain.label}: BridgedOut log from block {ev['block']}, outside "
+                               f"{from_block}..{to_block}")
+            out.append(ev)
         return out
 
     def minted_logs(self, from_block: int, to_block: int, chunk: int) -> List[dict]:
@@ -226,5 +270,41 @@ class BridgeContract:
         return out
 
 
-def token_total_supply(chain: Chain, token: str) -> int:
-    return chain.call(token, "totalSupply()")
+def _word(value: Any) -> int:
+    """A 32-byte hex word as an int; anything else raises ValueError."""
+    if not isinstance(value, str) or not value.startswith("0x") or len(value) != 66:
+        raise ValueError(f"not a 32-byte word: {value!r}")
+    return int(value, 16)
+
+
+def decode_bridged_out(log: dict, bridge_address: str) -> dict:
+    """One BridgedOut log, checked field by field; RPCError if it isn't exactly one."""
+    try:
+        if log.get("removed"):
+            raise ValueError("removed (reorged out)")
+        if (log.get("address") or "").lower() != bridge_address.lower():
+            raise ValueError(f"from {log.get('address')}, not the bridge")
+        t = log.get("topics") or []
+        if len(t) != 4 or t[0].lower() != TOPIC_BRIDGED_OUT:
+            raise ValueError("not a BridgedOut event")
+        nonce, sender, wallet, amount = _word(t[1]), _word(t[2]), _word(t[3]), _word(log.get("data"))
+        if sender >> 160:
+            raise ValueError("sender isn't an address")
+        tx_hash, block_hash = log.get("transactionHash"), log.get("blockHash")
+        _word(tx_hash), _word(block_hash)
+        return {
+            "nonce": nonce,
+            "from": to_checksum_address("0x" + format(sender, "040x")),
+            "ledger_wallet": format(wallet, "064x"),
+            "amount_cents": amount,
+            "block": int(log["blockNumber"], 16),
+            "evm_tx": tx_hash.lower(),
+            "block_hash": block_hash.lower(),
+            "log_index": int(log["logIndex"], 16),
+        }
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        raise RPCError(f"malformed BridgedOut log: {e}") from None
+
+
+def token_total_supply(chain: Chain, token: str, block: Any = "latest") -> int:
+    return chain.call(token, "totalSupply()", block=block)

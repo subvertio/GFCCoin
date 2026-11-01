@@ -2,15 +2,23 @@
 Bridge configuration, read from GFC_BRIDGE_* environment variables.
 
 Keys are read from files (never from env values or the command line) and are
-never logged. EVM keys are 0x-prefixed or bare hex secp256k1 keys; the escrow
-key uses the treasury key file format (plain hex, or encrypted with
-`python signing.py encrypt`, unlocked by GFC_BRIDGE_ESCROW_PASSPHRASE).
+never logged. EVM keys are encrypted Ethereum keystore files (bridge/keyfiles.py), or
+on testnets 0x-prefixed or bare hex secp256k1 keys; the escrow key uses the treasury
+key file format (encrypted, unlocked by GFC_BRIDGE_ESCROW_PASSPHRASE; plain hex on
+testnets only).
+
+Mainnet (any chain not in TESTNET_CHAIN_IDS) refuses settings that make one party or one
+machine enough to move funds: see mainnet_problems().
 """
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
+
+# Chains where single-operator shortcuts are allowed: Base Sepolia, Ethereum Sepolia, anvil
+TESTNET_CHAIN_IDS = {84532, 11155111, 31337}
+GWEI = 10 ** 9
 
 
 @dataclass
@@ -37,6 +45,9 @@ class BridgeConfig:
     manual_review_cents: int = 10_000_00    # deposits above this need an explicit approval
     max_mints_per_sender_per_day: int = 3
     relayer_daily_gas_limit: int = 5_000_000
+    # Caps on what one mint may spend, whatever the RPC estimates (audit F12)
+    max_gas_per_mint: int = 400_000
+    max_fee_per_gas_wei: int = 1 * GWEI     # Base usually charges well under 0.1 gwei
 
     # Releases (chain -> ledger)
     max_release_cents: int = 10_000_00
@@ -56,6 +67,32 @@ class BridgeConfig:
     # delegation means someone made that key sign an authorization). The keys this service
     # holds are watched too, without being listed here. Never list the Safe itself.
     watch_addresses: List[str] = field(default_factory=list)
+    # Wallets that never send transactions (attesters only sign messages). Any new nonce is an
+    # alarm: an EIP-7702 authorization raises the nonce too, so a delegation set and cleared
+    # between two checks is still caught (audit F13). The attester keys this service holds and
+    # its pauser are watched this way without being listed.
+    quiet_addresses: List[str] = field(default_factory=list)
+    # Independently run RPC providers that must confirm every burn before it's paid, and the
+    # bridge's totals during reconcile (audit F09). Mainnet needs at least one.
+    verify_rpc_urls: List[str] = field(default_factory=list)
+
+    @property
+    def is_testnet(self) -> bool:
+        return self.chain_id in TESTNET_CHAIN_IDS
+
+    def mainnet_problems(self) -> List[str]:
+        """Settings mainnet refuses (key checks are in bridge/__main__.py)."""
+        if self.is_testnet:
+            return []
+        problems = []
+        if self.chain_finality != "finalized":
+            problems.append(f"GFC_BRIDGE_CHAIN_FINALITY is {self.chain_finality!r}: mainnet needs 'finalized'")
+        if not self.verify_rpc_urls:
+            problems.append("GFC_BRIDGE_VERIFY_RPC_URLS is empty: mainnet needs an independent RPC provider "
+                            "to confirm burns")
+        if self.rpc_url in self.verify_rpc_urls:
+            problems.append("a verifying RPC is the main RPC itself")
+        return problems
 
     @classmethod
     def from_env(cls) -> "BridgeConfig":
@@ -96,12 +133,24 @@ class BridgeConfig:
             denylist_file=opt("GFC_BRIDGE_DENYLIST_FILE"),
             approvals_file=opt("GFC_BRIDGE_APPROVALS_FILE"),
             peer_ledger_dbs=[p for p in e.get("GFC_BRIDGE_PEER_LEDGER_DBS", "").split(",") if p],
-            watch_addresses=[a.strip() for a in e.get("GFC_BRIDGE_WATCH_ADDRESSES", "").split(",") if a.strip()],
+            watch_addresses=_list(e.get("GFC_BRIDGE_WATCH_ADDRESSES", "")),
+            quiet_addresses=_list(e.get("GFC_BRIDGE_QUIET_ADDRESSES", "")),
+            verify_rpc_urls=_list(e.get("GFC_BRIDGE_VERIFY_RPC_URLS", "")),
+            max_gas_per_mint=num("GFC_BRIDGE_MAX_GAS_PER_MINT", "max_gas_per_mint"),
+            max_fee_per_gas_wei=int(float(e["GFC_BRIDGE_MAX_FEE_GWEI"]) * GWEI) if e.get("GFC_BRIDGE_MAX_FEE_GWEI")
+            else defaults["max_fee_per_gas_wei"].default,
         )
 
 
+def _list(value: str) -> List[str]:
+    return [a.strip() for a in value.split(",") if a.strip()]
+
+
 def read_evm_key(path: str) -> str:
-    """A secp256k1 private key from a file, as 0x-hex."""
+    """A secp256k1 private key from a file (an encrypted keystore, or plain hex), as 0x-hex."""
+    from bridge import keyfiles
+    if keyfiles.is_keystore(path):
+        return keyfiles.read_evm_keystore(path)
     key = Path(path).read_text().strip()
     return key if key.startswith("0x") else "0x" + key
 

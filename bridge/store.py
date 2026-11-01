@@ -9,10 +9,14 @@ deposits: ledger -> chain, keyed by the deposit's ledger tx_hash
   attested_until: the latest deadline of any attestation issued for it (no refund before then)
 releases: chain -> ledger, keyed by BridgedOut nonce
   seen -> paid, or waiting (retried), or held (needs a person)
+  block_hash, log_index: the event's exact identity; verified_at: when every configured RPC
+  confirmed that event's receipt in a final block. Nothing is signed for a release before that
+  (audit F09: one lying RPC could invent a burn)
   intent: the payout exactly as signed, saved before it's submitted and resent byte for byte on
   every retry, so one burn has one signed payout; paid only once the ledger holds its tx_hash
 meta: bridge_address pins the file to one bridge contract (its nonces and deposits aren't
-  another bridge's); created_at is when this state started
+  another bridge's); created_at is when this state started; incident:<address> latches a
+  watched-wallet alarm until a person clears it; nonce:<address> is a quiet key's last nonce
 """
 
 import json
@@ -69,6 +73,9 @@ MIGRATIONS = (
     ("deposits", "attested_until", "INTEGER DEFAULT 0"),
     ("releases", "intent", "TEXT DEFAULT ''"),
     ("releases", "ledger_tx_hash", "TEXT DEFAULT ''"),
+    ("releases", "block_hash", "TEXT DEFAULT ''"),
+    ("releases", "log_index", "INTEGER DEFAULT -1"),
+    ("releases", "verified_at", "TEXT DEFAULT ''"),
 )
 # Release statuses (also SEEN, WAITING, HELD)
 PAID = "paid"
@@ -124,6 +131,19 @@ class Store:
                      "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
         conn.commit()
         conn.close()
+
+    def meta_like(self, prefix: str) -> dict:
+        conn = self._conn()
+        rows = conn.execute("SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?", (len(prefix), prefix)).fetchall()
+        conn.close()
+        return {r["key"][len(prefix):]: r["value"] for r in rows}
+
+    def delete_meta(self, key: str) -> bool:
+        conn = self._conn()
+        cur = conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
 
     # ----------------------------------------------------------------- deposits
 
@@ -197,12 +217,24 @@ class Store:
         conn = self._conn()
         cur = conn.execute(
             "INSERT OR IGNORE INTO releases (nonce, evm_tx, block, evm_from, ledger_wallet, amount_cents, "
-            "status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "status, updated_at, block_hash, log_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (ev["nonce"], ev["evm_tx"], ev["block"], ev["from"], ev["ledger_wallet"], ev["amount_cents"],
-             SEEN, _now()))
+             SEEN, _now(), ev.get("block_hash", ""), ev.get("log_index", -1)))
         conn.commit()
         conn.close()
         return cur.rowcount > 0
+
+    def release(self, nonce: int) -> Optional[sqlite3.Row]:
+        conn = self._conn()
+        row = conn.execute("SELECT * FROM releases WHERE nonce = ?", (nonce,)).fetchone()
+        conn.close()
+        return row
+
+    def mark_release_verified(self, nonce: int):
+        conn = self._conn()
+        conn.execute("UPDATE releases SET verified_at = ? WHERE nonce = ?", (_now(), nonce))
+        conn.commit()
+        conn.close()
 
     def set_release(self, nonce: int, status: str, detail: str = "", ledger_tx_id: str = "",
                     ledger_tx_hash: str = ""):
