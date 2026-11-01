@@ -14,6 +14,7 @@ import re
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -195,6 +196,30 @@ def init_blockchain_tables(db_path: str = DB_PATH):
     conn.close()
 
 
+WRITE_LOCK_TIMEOUT = 30  # seconds to wait for another writer to finish
+
+
+@contextmanager
+def _write(db_path: str):
+    """
+    One ledger write transaction. BEGIN IMMEDIATE takes SQLite's write lock before anything
+    is read, so a balance check, the row it allows and its block commit together: two
+    requests (threads, processes or the sync engine) can never both spend the same balance.
+    Commits on success, rolls everything back on any exception.
+    """
+    conn = sqlite3.connect(db_path, timeout=WRITE_LOCK_TIMEOUT, isolation_level=None)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+
 def _insert_tx(conn: sqlite3.Connection, tx: dict):
     """Insert a transaction dict (block_index is set later by create_block)."""
     conn.execute(
@@ -374,8 +399,12 @@ def create_block(db_path: str, tx_ids: List[str]) -> dict:
     Updates each transaction's block_index.
     Returns the block dict.
     """
-    conn = sqlite3.connect(db_path)
+    with _write(db_path) as conn:
+        return _append_block(conn, tx_ids)
 
+
+def _append_block(conn: sqlite3.Connection, tx_ids: List[str]) -> dict:
+    """create_block inside the caller's write transaction (see _write); doesn't commit."""
     # Get the latest block
     last_block = conn.execute(
         "SELECT block_index, prev_hash, merkle_root, timestamp FROM blocks ORDER BY block_index DESC LIMIT 1"
@@ -398,7 +427,6 @@ def create_block(db_path: str, tx_ids: List[str]) -> dict:
     tx_hashes = [r[0] for r in rows if r[0]]
 
     if not tx_hashes:
-        conn.close()
         raise ValueError("No valid transaction hashes found for block creation")
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -416,9 +444,6 @@ def create_block(db_path: str, tx_ids: List[str]) -> dict:
         f"UPDATE transactions SET block_index = ? WHERE id IN ({placeholders})",
         [new_index] + tx_ids
     )
-
-    conn.commit()
-    conn.close()
 
     return {
         "block_index": new_index,
@@ -439,7 +464,14 @@ def get_balance_cents(db_path: str, wallet_id: str) -> int:
     Returns balance in cents (integer).
     """
     conn = sqlite3.connect(db_path)
+    try:
+        return _balance_cents(conn, wallet_id)
+    finally:
+        conn.close()
 
+
+def _balance_cents(conn: sqlite3.Connection, wallet_id: str) -> int:
+    """get_balance_cents on the caller's connection (inside _write: the locked, current view)."""
     # Sum of all amount_cents received (where block_index IS NOT NULL = confirmed)
     received = conn.execute(
         "SELECT COALESCE(SUM(amount_cents), 0) FROM transactions "
@@ -453,8 +485,6 @@ def get_balance_cents(db_path: str, wallet_id: str) -> int:
         "WHERE sender = ? AND block_index IS NOT NULL",
         (wallet_id,)
     ).fetchone()[0]
-
-    conn.close()
     return received - sent
 
 
@@ -472,23 +502,9 @@ def process_user_grant(db_path: str, username: str, wallet_id: str) -> Optional[
     Grant 100 GFC to a user's first wallet, once their phone is verified.
     Returns the transaction dict if grant was issued, None if the user is not
     phone-verified or already received the grant.
-    Thread-safe via SQLite's built-in locking.
+    The checks and the grant are one write transaction, so it's paid once even if two
+    requests race.
     """
-    conn = sqlite3.connect(db_path)
-
-    if not phone_verify.is_verified(conn, username):
-        conn.close()
-        return None  # Grants need a verified phone (one per number), see phone_verify.py
-
-    # Check if this username already received a grant
-    existing = conn.execute(
-        "SELECT username FROM user_grants WHERE username = ?", (username,)
-    ).fetchone()
-
-    if existing:
-        conn.close()
-        return None  # Already granted
-
     now_iso = datetime.now(timezone.utc).isoformat()
     tx_id = str(uuid.uuid4())
 
@@ -505,19 +521,18 @@ def process_user_grant(db_path: str, username: str, wallet_id: str) -> Optional[
 
     tx["tx_hash"] = compute_tx_hash(tx)
     _sign_mint(tx)
-    _insert_tx(conn, tx)
 
-    # Record grant
-    conn.execute(
-        "INSERT INTO user_grants (username, wallet_id, granted_at) VALUES (?, ?, ?)",
-        (username, wallet_id, now_iso)
-    )
-
-    conn.commit()
-    conn.close()
-
-    # Create block for this transaction
-    block = create_block(db_path, [tx_id])
+    with _write(db_path) as conn:
+        if not phone_verify.is_verified(conn, username):
+            return None  # Grants need a verified phone (one per number), see phone_verify.py
+        if conn.execute("SELECT username FROM user_grants WHERE username = ?", (username,)).fetchone():
+            return None  # Already granted
+        _insert_tx(conn, tx)
+        conn.execute(
+            "INSERT INTO user_grants (username, wallet_id, granted_at) VALUES (?, ?, ?)",
+            (username, wallet_id, now_iso)
+        )
+        block = _append_block(conn, [tx_id])
     tx["block_index"] = block["block_index"]
 
     print(f"[Blockchain] Grant: {NEW_USER_GRANT_CENTS / 100:.2f} GFC -> {wallet_id} (user: {username}, block: {block['block_index']})")
@@ -548,13 +563,9 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
     if violation:
         raise ValueError(violation)
 
-    # Check sender balance
-    sender_balance = get_balance_cents(db_path, sender_wallet)
-    if sender_balance < amount_cents:
-        raise ValueError(
-            f"Insufficient balance: {sender_balance / 100:.2f} GFC available, "
-            f"{amount_cents / 100:.2f} GFC required"
-        )
+    # A quick check before signing (a clear error without unlocking the key); the binding
+    # check is repeated below, under the write lock
+    _require_balance(get_balance_cents(db_path, sender_wallet), amount_cents)
 
     now_iso = datetime.now(timezone.utc).isoformat()
     tx_id = str(uuid.uuid4())
@@ -584,15 +595,32 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
         tx["signer"] = ""
         tx["signature"] = ""
 
-    conn = sqlite3.connect(db_path)
-    _insert_tx(conn, tx)
-    conn.commit()
-    conn.close()
+    with _write(db_path) as conn:
+        _require_balance(_balance_cents(conn, sender_wallet), amount_cents)
+        _insert_tx(conn, tx)
+        tx["block_index"] = _append_block(conn, [tx_id])["block_index"]
+    return tx
 
-    # Create block
-    block = create_block(db_path, [tx_id])
-    tx["block_index"] = block["block_index"]
 
+def _require_balance(balance_cents: int, amount_cents: int):
+    if balance_cents < amount_cents:
+        raise ValueError(
+            f"Insufficient balance: {balance_cents / 100:.2f} GFC available, "
+            f"{amount_cents / 100:.2f} GFC required"
+        )
+
+
+def _commit_mint(db_path: str, tx: dict, label: str) -> Optional[dict]:
+    """
+    Insert a signed treasury mint and its block in one write transaction, after checking
+    (under the lock) that the treasury can pay it. None if it can't.
+    """
+    with _write(db_path) as conn:
+        if _balance_cents(conn, TREASURY_WALLET_ID) < tx["amount_cents"]:
+            print(f"[Blockchain] WARNING: Treasury depleted, cannot pay {label} {tx['amount_cents'] / 100:.2f} GFC")
+            return None
+        _insert_tx(conn, tx)
+        tx["block_index"] = _append_block(conn, [tx["id"]])["block_index"]
     return tx
 
 
@@ -617,24 +645,6 @@ def process_podt_reward(db_path: str, seeder_wallet: str, proof_id: str,
     if reward_cents <= 0:
         return None  # Round-down to zero
 
-    conn = sqlite3.connect(db_path)
-
-    # Check for duplicate proof (prevents double-claiming)
-    existing_proof = conn.execute(
-        "SELECT proof_id FROM podt_proofs WHERE proof_id = ?", (proof_id,)
-    ).fetchone()
-
-    if existing_proof:
-        conn.close()
-        return None  # Already claimed
-
-    # Check Treasury balance
-    treasury_balance = get_balance_cents(db_path, TREASURY_WALLET_ID)
-    if treasury_balance < reward_cents:
-        conn.close()
-        print(f"[Blockchain] WARNING: Treasury depleted, cannot award {reward_cents / 100:.2f} GFC")
-        return None
-
     now_iso = datetime.now(timezone.utc).isoformat()
     tx_id = str(uuid.uuid4())
 
@@ -650,21 +660,22 @@ def process_podt_reward(db_path: str, seeder_wallet: str, proof_id: str,
     }
     tx["tx_hash"] = compute_tx_hash(tx)
     _sign_mint(tx)
-    _insert_tx(conn, tx)
 
-    # Record proof
-    conn.execute(
-        "INSERT INTO podt_proofs (proof_id, seeder_wallet, receiver_wallet, file_hash, "
-        "file_size_bytes, reward_cents, tx_id, created_at, seed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (proof_id, seeder_wallet, receiver_wallet, file_hash,
-         bytes_transferred, reward_cents, tx_id, now_iso, seed_id)
-    )
-
-    conn.commit()
-    conn.close()
-
-    # Create block
-    block = create_block(db_path, [tx_id])
+    with _write(db_path) as conn:
+        # A proof pays once (prevents double-claiming, even by racing requests)
+        if conn.execute("SELECT proof_id FROM podt_proofs WHERE proof_id = ?", (proof_id,)).fetchone():
+            return None
+        if _balance_cents(conn, TREASURY_WALLET_ID) < reward_cents:
+            print(f"[Blockchain] WARNING: Treasury depleted, cannot award {reward_cents / 100:.2f} GFC")
+            return None
+        _insert_tx(conn, tx)
+        conn.execute(
+            "INSERT INTO podt_proofs (proof_id, seeder_wallet, receiver_wallet, file_hash, "
+            "file_size_bytes, reward_cents, tx_id, created_at, seed_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (proof_id, seeder_wallet, receiver_wallet, file_hash,
+             bytes_transferred, reward_cents, tx_id, now_iso, seed_id)
+        )
+        block = _append_block(conn, [tx_id])
     tx["block_index"] = block["block_index"]
 
     print(f"[Blockchain] PoDT: {reward_cents / 100:.2f} GFC -> {seeder_wallet} "
@@ -679,9 +690,6 @@ def process_referral_mint(db_path: str, wallet_id: str, amount_cents: int, reaso
     """
     if amount_cents not in (REFERRAL_REWARD_CENTS, REFERRAL_BONUS_CENTS):
         raise ValueError("referral mints are REFERRAL_REWARD_CENTS or REFERRAL_BONUS_CENTS")
-    if get_balance_cents(db_path, TREASURY_WALLET_ID) < amount_cents:
-        print(f"[Blockchain] WARNING: Treasury depleted, cannot pay referral {amount_cents / 100:.2f} GFC")
-        return None
     tx = {
         "id": str(uuid.uuid4()),
         "sender": TREASURY_WALLET_ID,
@@ -694,12 +702,7 @@ def process_referral_mint(db_path: str, wallet_id: str, amount_cents: int, reaso
     }
     tx["tx_hash"] = compute_tx_hash(tx)
     _sign_mint(tx)
-    conn = sqlite3.connect(db_path)
-    _insert_tx(conn, tx)
-    conn.commit()
-    conn.close()
-    tx["block_index"] = create_block(db_path, [tx["id"]])["block_index"]
-    return tx
+    return _commit_mint(db_path, tx, "referral")
 
 
 def process_repost_mint(db_path: str, wallet_id: str, reason: str) -> Optional[dict]:
@@ -709,9 +712,6 @@ def process_repost_mint(db_path: str, wallet_id: str, reason: str) -> Optional[d
     (reposter, original) pays once. None if the treasury is short.
     """
     amount_cents = REPOST_CREDIT_CENTS
-    if get_balance_cents(db_path, TREASURY_WALLET_ID) < amount_cents:
-        print(f"[Blockchain] WARNING: Treasury depleted, cannot pay repost credit {amount_cents / 100:.2f} GFC")
-        return None
     tx = {
         "id": str(uuid.uuid4()),
         "sender": TREASURY_WALLET_ID,
@@ -724,12 +724,7 @@ def process_repost_mint(db_path: str, wallet_id: str, reason: str) -> Optional[d
     }
     tx["tx_hash"] = compute_tx_hash(tx)
     _sign_mint(tx)
-    conn = sqlite3.connect(db_path)
-    _insert_tx(conn, tx)
-    conn.commit()
-    conn.close()
-    tx["block_index"] = create_block(db_path, [tx["id"]])["block_index"]
-    return tx
+    return _commit_mint(db_path, tx, "repost credit")
 
 
 def process_first_post_mint(db_path: str, wallet_id: str, amount_cents: int, reason: str) -> Optional[dict]:
@@ -740,9 +735,6 @@ def process_first_post_mint(db_path: str, wallet_id: str, amount_cents: int, rea
     """
     if not 0 < amount_cents <= FIRST_POST_BONUS_MAX_CENTS:
         raise ValueError("first post mints are 1..FIRST_POST_BONUS_MAX_CENTS")
-    if get_balance_cents(db_path, TREASURY_WALLET_ID) < amount_cents:
-        print(f"[Blockchain] WARNING: Treasury depleted, cannot pay first post bonus {amount_cents / 100:.2f} GFC")
-        return None
     tx = {
         "id": str(uuid.uuid4()),
         "sender": TREASURY_WALLET_ID,
@@ -755,12 +747,7 @@ def process_first_post_mint(db_path: str, wallet_id: str, amount_cents: int, rea
     }
     tx["tx_hash"] = compute_tx_hash(tx)
     _sign_mint(tx)
-    conn = sqlite3.connect(db_path)
-    _insert_tx(conn, tx)
-    conn.commit()
-    conn.close()
-    tx["block_index"] = create_block(db_path, [tx["id"]])["block_index"]
-    return tx
+    return _commit_mint(db_path, tx, "first post bonus")
 
 
 def process_operator_mint(db_path: str, wallet_id: str, amount_cents: int, reason: str) -> Optional[dict]:
@@ -773,9 +760,6 @@ def process_operator_mint(db_path: str, wallet_id: str, amount_cents: int, reaso
         raise ValueError("operator grants are 1..OPERATOR_GRANT_MAX_CENTS")
     if len(reason) > MAX_REASON_LEN or not OPERATOR_REASON_RE.match(reason):
         raise ValueError("operator grant reason must be 'Operator grant (<purpose>): <memo>'")
-    if get_balance_cents(db_path, TREASURY_WALLET_ID) < amount_cents:
-        print(f"[Blockchain] WARNING: Treasury depleted, cannot pay operator grant {amount_cents / 100:.2f} GFC")
-        return None
     tx = {
         "id": str(uuid.uuid4()),
         "sender": TREASURY_WALLET_ID,
@@ -788,12 +772,7 @@ def process_operator_mint(db_path: str, wallet_id: str, amount_cents: int, reaso
     }
     tx["tx_hash"] = compute_tx_hash(tx)
     _sign_mint(tx)
-    conn = sqlite3.connect(db_path)
-    _insert_tx(conn, tx)
-    conn.commit()
-    conn.close()
-    tx["block_index"] = create_block(db_path, [tx["id"]])["block_index"]
-    return tx
+    return _commit_mint(db_path, tx, "operator grant")
 
 
 def play_reward_block_reason(conn: sqlite3.Connection, viewer: str) -> Optional[str]:
@@ -868,6 +847,18 @@ def check_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
     Decide what to do with a transaction row from a peer, without writing it.
     Returns (status, reason) where status is ACCEPTED, DUPLICATE, PENDING or REJECTED.
     """
+    status, reason = _check_stateless(tx)
+    if status != ACCEPTED:
+        return status, reason
+    conn = sqlite3.connect(db_path)
+    try:
+        return _check_against_ledger(conn, tx)
+    finally:
+        conn.close()
+
+
+def _check_stateless(tx: dict) -> Tuple[str, str]:
+    """The checks that don't read the ledger: shape, rules, hash and signature (ACCEPTED = passed)."""
     tx_id = tx.get("id")
     sender = tx.get("sender")
     recipient = tx.get("recipient")
@@ -933,51 +924,56 @@ def check_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
                 return REJECTED, "wrong node host grant amount"
     if not signing.verify_tx_signature(signer, tx_hash, signature):
         return REJECTED, "bad signature"
+    return ACCEPTED, ""
 
-    conn = sqlite3.connect(db_path)
-    try:
-        if conn.execute("SELECT 1 FROM transactions WHERE id = ?", (tx_id,)).fetchone():
-            return DUPLICATE, "already have this id"
-        if conn.execute("SELECT 1 FROM transactions WHERE tx_hash = ?", (tx_hash,)).fetchone():
-            return REJECTED, "replayed tx_hash"
-        if tx_type == TX_TYPE_GRANT and conn.execute(
-                "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ?",
-                (TX_TYPE_GRANT, recipient)).fetchone():
-            return REJECTED, "wallet already received a grant"
-        if tx_type == TX_TYPE_FIRST_POST and conn.execute(
-                "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ?",
-                (TX_TYPE_FIRST_POST, recipient)).fetchone():
-            return REJECTED, "wallet already received a first post bonus"
-        if (tx_type == TX_TYPE_OPERATOR and reason.startswith("Operator grant (node-host)")
-                and conn.execute("SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ? "
-                                 "AND reason LIKE 'Operator grant (node-host)%'",
-                                 (TX_TYPE_OPERATOR, recipient)).fetchone()):
-            return REJECTED, "wallet already received a node host grant"
-    finally:
-        conn.close()
 
-    if get_balance_cents(db_path, sender) < amount_cents:
+def _check_against_ledger(conn: sqlite3.Connection, tx: dict) -> Tuple[str, str]:
+    """The checks that read the ledger: duplicates, once-only mints, the sender's balance."""
+    tx_id, tx_hash, tx_type = tx.get("id"), tx.get("tx_hash") or "", tx.get("tx_type")
+    recipient, reason, amount_cents = tx.get("recipient"), tx.get("reason") or "", tx.get("amount_cents")
+    if conn.execute("SELECT 1 FROM transactions WHERE id = ?", (tx_id,)).fetchone():
+        return DUPLICATE, "already have this id"
+    if conn.execute("SELECT 1 FROM transactions WHERE tx_hash = ?", (tx_hash,)).fetchone():
+        return REJECTED, "replayed tx_hash"
+    if tx_type == TX_TYPE_GRANT and conn.execute(
+            "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ?",
+            (TX_TYPE_GRANT, recipient)).fetchone():
+        return REJECTED, "wallet already received a grant"
+    if tx_type == TX_TYPE_FIRST_POST and conn.execute(
+            "SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ?",
+            (TX_TYPE_FIRST_POST, recipient)).fetchone():
+        return REJECTED, "wallet already received a first post bonus"
+    if (tx_type == TX_TYPE_OPERATOR and reason.startswith("Operator grant (node-host)")
+            and conn.execute("SELECT 1 FROM transactions WHERE tx_type = ? AND recipient = ? "
+                             "AND reason LIKE 'Operator grant (node-host)%'",
+                             (TX_TYPE_OPERATOR, recipient)).fetchone()):
+        return REJECTED, "wallet already received a node host grant"
+    if _balance_cents(conn, tx.get("sender")) < amount_cents:
         return PENDING, "insufficient sender balance"
     return ACCEPTED, ""
 
 
 def accept_synced_transaction(db_path: str, tx: dict) -> Tuple[str, str]:
-    """Validate a synced transaction and, if valid, add it to a new local block."""
-    status, reason = check_synced_transaction(db_path, tx)
+    """
+    Validate a synced transaction and, if valid, add it to a new local block. The ledger
+    checks (duplicates, once-only mints, the sender's balance), the insert and its block are
+    one write transaction (_write), so two rows can never both spend one balance.
+    """
+    status, reason = _check_stateless(tx)  # signature checks etc. before taking the write lock
     if status != ACCEPTED:
         return status, reason
     row = {c: tx.get(c, "") for c in TX_INSERT_COLUMNS}
     row["amount"] = tx["amount_cents"] / 100.0
     row["signer"] = tx.get("signer") or tx["sender"]
-    conn = sqlite3.connect(db_path)
     try:
-        _insert_tx(conn, row)
-        conn.commit()
+        with _write(db_path) as conn:
+            status, reason = _check_against_ledger(conn, tx)
+            if status != ACCEPTED:
+                return status, reason
+            _insert_tx(conn, row)
+            _append_block(conn, [tx["id"]])
     except sqlite3.IntegrityError:
         return DUPLICATE, "inserted concurrently"
-    finally:
-        conn.close()
-    create_block(db_path, [tx["id"]])
     return ACCEPTED, ""
 
 
