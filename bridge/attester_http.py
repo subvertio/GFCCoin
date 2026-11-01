@@ -92,11 +92,13 @@ def is_private_url(url: str) -> bool:
 # mints would be refused, so the relayer refuses the attester at startup instead.
 MUST_MATCH = ("relay_fee_cents",)
 SHOULD_MATCH = ("min_deposit_cents", "finality_seconds", "faucet_hold_days", "manual_review_cents",
-                "checkpoint_url")
+                "checkpoint_url", "deposits_from")
 
 
 def policy(cfg) -> dict:
-    return {k: getattr(cfg, k) for k in MUST_MATCH + SHOULD_MATCH + ("mint_ttl_seconds",)}
+    out = {k: getattr(cfg, k) for k in MUST_MATCH + SHOULD_MATCH + ("mint_ttl_seconds",)}
+    out["deposits_from"] = cfg.deposits_from.isoformat() if cfg.deposits_from else None
+    return out
 
 
 def policy_problems(ours: dict, theirs: dict) -> tuple:

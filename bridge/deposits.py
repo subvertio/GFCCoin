@@ -36,7 +36,7 @@ FAUCET_TX_TYPES = (blockchain.TX_TYPE_GRANT, blockchain.TX_TYPE_REFERRAL, blockc
 # validate_deposit results
 OK = "ok"                # mint it (subject to policy and limits)
 NOT_FINAL = "not_final"  # retry later
-OTHER_CHAIN = "other"    # a deposit for another chain's bridge: not ours
+OTHER_CHAIN = "other"    # a deposit for another chain's bridge, or for an earlier bridge contract: not ours
 REFUND = "refund"        # a real, signed deposit we will never mint: a person refunds it
 INVALID = "invalid"      # not a trustworthy row at all: ignore and alert
 
@@ -115,6 +115,11 @@ def validate_deposit(tx: dict, cfg, now: Optional[datetime] = None) -> Tuple[str
     m = REASON_RE.match(tx.get("reason") or "")
     if m and int(m.group(1)) != cfg.chain_id:
         return OTHER_CHAIN, f"for chain {m.group(1)}", None
+    # A deposit names its chain, not its bridge contract. One admitted before this contract's
+    # cutoff was for an earlier contract on the same chain, which may already have minted it:
+    # a redeployed bridge must never mint it again
+    if cfg.deposits_from is not None and admitted < cfg.deposits_from:
+        return OTHER_CHAIN, "deposited before this bridge contract's cutoff (GFC_BRIDGE_DEPOSITS_FROM)", None
     if not m:
         return REFUND, "reason is not bridge:v1:<chainId>:<0xaddress>", _deposit(tx, "", 0)
     evm_to = m.group(2)

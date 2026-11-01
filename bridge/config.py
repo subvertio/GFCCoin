@@ -13,6 +13,7 @@ machine enough to move funds: see mainnet_problems().
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -86,6 +87,11 @@ class BridgeConfig:
     checkpoint_db: str = ""
     checkpoint_network: str = "mainnet"
 
+    # Deposits admitted before this time belong to an earlier bridge contract on the same chain
+    # and are never minted by this one (a deposit's reason names the chain, not the contract).
+    # Set it to the deploy time of the contract this service runs; mainnet requires it.
+    deposits_from: Optional[datetime] = None
+
     @property
     def is_testnet(self) -> bool:
         return self.chain_id in TESTNET_CHAIN_IDS
@@ -103,6 +109,8 @@ class BridgeConfig:
         if not self.is_testnet and (not self.checkpoint_url or not self.checkpoint_pubkeys):
             problems.append("GFC_BRIDGE_CHECKPOINT_URL is empty or no checkpoint key is pinned: mainnet "
                             "attesters need signed ledger checkpoints")
+        if not self.is_testnet and self.deposits_from is None:
+            problems.append("GFC_BRIDGE_DEPOSITS_FROM is empty: set it to the bridge contract's deploy time")
         return problems
 
     def mainnet_problems(self) -> List[str]:
@@ -110,6 +118,9 @@ class BridgeConfig:
         if self.is_testnet:
             return []
         problems = []
+        if self.deposits_from is None:
+            problems.append("GFC_BRIDGE_DEPOSITS_FROM is empty: set it to this bridge contract's deploy time, so a "
+                            "deposit for an earlier contract is never minted twice")
         if self.chain_finality != "finalized":
             problems.append(f"GFC_BRIDGE_CHAIN_FINALITY is {self.chain_finality!r}: mainnet needs 'finalized'")
         if not self.verify_rpc_urls:
@@ -176,10 +187,21 @@ class BridgeConfig:
             checkpoint_pubkeys=list(config.CHECKPOINT_PUBKEYS),
             checkpoint_db=e.get("GFC_BRIDGE_CHECKPOINT_DB", str(Path(state_db).with_suffix("")) + "-checkpoints.db"),
             checkpoint_network=config.NETWORK,
+            deposits_from=_time(e.get("GFC_BRIDGE_DEPOSITS_FROM", "")),
             max_gas_per_mint=num("GFC_BRIDGE_MAX_GAS_PER_MINT", "max_gas_per_mint"),
             max_fee_per_gas_wei=int(float(e["GFC_BRIDGE_MAX_FEE_GWEI"]) * GWEI) if e.get("GFC_BRIDGE_MAX_FEE_GWEI")
             else defaults["max_fee_per_gas_wei"].default,
         )
+
+
+def _time(value: str) -> Optional[datetime]:
+    """An ISO time with a zone ("2026-11-01T02:00:00+00:00"), or None when empty."""
+    if not value.strip():
+        return None
+    t = datetime.fromisoformat(value.strip())
+    if t.tzinfo is None:
+        raise SystemExit("GFC_BRIDGE_DEPOSITS_FROM needs a time zone, e.g. 2026-11-01T02:00:00+00:00")
+    return t
 
 
 def _list(value: str) -> List[str]:
