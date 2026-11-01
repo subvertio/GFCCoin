@@ -18,6 +18,15 @@ other signed transfer. One burn is paid once:
   row has gone (a ledger restored from an older backup: audit F06).
 Only blocks at or behind the configured chain finality are read, so a reorg
 can't un-burn tokens that were already paid out.
+
+A burn is paid only once it's confirmed (audit F09: one dishonest RPC could invent a
+BridgedOut log and be paid for it). Every configured provider (the main RPC and each
+GFC_BRIDGE_VERIFY_RPC_URLS) must return the burn's receipt: successful, in the same block,
+with exactly that log at that index, in a block it treats as final. A provider that can't
+answer yet leaves the release waiting; one that contradicts the others stops all verification
+for that pass and is logged as an error. Nothing is lost: the release stays recorded and is
+checked again next pass. With a single provider this only catches inconsistent answers: a
+consistent liar has to be outvoted by independently run providers, which mainnet requires.
 """
 
 import json
@@ -25,7 +34,7 @@ import logging
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional, Sequence
 
 import blockchain
 import signing
@@ -33,7 +42,7 @@ from bridge.config import BridgeConfig
 from bridge.store import HELD, MINTED, PAID, REFUND, REFUNDED, WAITING, SEEN, Store
 
 if TYPE_CHECKING:  # payouts and refunds work without the EVM dependencies
-    from bridge.chain import BridgeContract
+    from bridge.chain import BridgeContract, Chain
 
 logger = logging.getLogger("gfc.bridge.releases")
 
@@ -49,15 +58,98 @@ def refund_reason(deposit_hash: str) -> str:
     return f"bridge-refund:v1:{deposit_hash}"
 
 
-def scan_bridged_out(cfg: BridgeConfig, store: Store, bridge: "BridgeContract") -> int:
-    """Record BridgedOut events up to the final block. Returns how many were new."""
+_SAME_EVENT = ("evm_tx", "ledger_wallet", "amount_cents")
+
+
+def scan_bridged_out(cfg: BridgeConfig, store: Store, bridge: "BridgeContract",
+                     verifiers: Sequence["Chain"] = ()) -> int:
+    """
+    Record BridgedOut events up to the final block, then confirm unverified ones with every
+    provider (verify_releases). Returns how many were new.
+    """
     final = bridge.chain.final_block(cfg.chain_finality)
     start = int(store.get_meta(CURSOR_KEY, str(cfg.start_block)))
-    if final < start:
-        return 0
-    new = sum(store.add_release(ev) for ev in bridge.bridged_out_logs(start, final, cfg.log_chunk_blocks))
-    store.set_meta(CURSOR_KEY, str(final + 1))
+    new = 0
+    if final >= start:
+        for ev in bridge.bridged_out_logs(start, final, cfg.log_chunk_blocks):
+            if store.add_release(ev):
+                new += 1
+                continue
+            known = store.release(ev["nonce"])
+            if any(str(known[f]).lower() != str(ev[f]).lower() for f in _SAME_EVENT):
+                logger.error(f"Two different BridgedOut events for nonce {ev['nonce']}: {known['evm_tx']} and "
+                             f"{ev['evm_tx']}. An RPC is lying or the bridge is broken")
+                if known["status"] != PAID:
+                    store.set_release(ev["nonce"], HELD, f"two different events for this nonce "
+                                                         f"({ev['evm_tx'][:12]}): a person must check")
+        store.set_meta(CURSOR_KEY, str(final + 1))
+    verify_releases(cfg, store, [bridge.chain, *verifiers])
     return new
+
+
+def _burn_problem(chain: "Chain", cfg: BridgeConfig, r) -> Optional[str]:
+    """Why this provider doesn't confirm the release's burn as final, or None if it does."""
+    from bridge.chain import decode_bridged_out
+    receipt = chain.receipt(r["evm_tx"])
+    if not receipt:
+        return "no receipt"
+    if int(receipt.get("status", "0x0"), 16) != 1:
+        return "the transaction reverted"
+    if int(receipt["blockNumber"], 16) != r["block"] or \
+            (r["block_hash"] and receipt.get("blockHash", "").lower() != r["block_hash"]):
+        return "the receipt is in a different block"
+    found = []
+    for log in receipt.get("logs") or []:
+        try:
+            ev = decode_bridged_out(log, cfg.bridge_address)
+        except Exception:
+            continue  # other events in the same transaction
+        if ev["nonce"] == r["nonce"] and (r["log_index"] < 0 or ev["log_index"] == r["log_index"]):
+            found.append(ev)
+    if len(found) != 1:
+        return f"{len(found)} matching BridgedOut logs in the receipt"
+    ev = found[0]
+    if ev["from"].lower() != r["evm_from"].lower() or ev["ledger_wallet"] != r["ledger_wallet"] or \
+            ev["amount_cents"] != r["amount_cents"] or ev["evm_tx"] != r["evm_tx"].lower():
+        return "the receipt's BridgedOut differs from the recorded one"
+    if r["block"] > chain.final_block(cfg.chain_finality):
+        return "not final yet"
+    if chain.block_hash(r["block"]) != receipt.get("blockHash", "").lower():
+        return "its block isn't on this provider's chain"
+    return None
+
+
+_NOT_YET = ("no receipt", "not final yet")  # a lagging provider, not a contradiction
+
+
+def verify_releases(cfg: BridgeConfig, store: Store, chains: Sequence["Chain"]) -> Dict[str, int]:
+    """Confirm each recorded, unverified, unpaid release with every provider. Returns counts."""
+    counts = {"verified": 0, "waiting": 0, "disputed": 0}
+    for r in store.releases(SEEN, WAITING):
+        if r["verified_at"] or r["intent"]:
+            continue
+        problems = []
+        for chain in chains:
+            try:
+                why = _burn_problem(chain, cfg, r)
+            except Exception as e:  # an RPC error or a malformed answer: not a confirmation
+                why = f"error: {e}"
+            if why:
+                problems.append((getattr(chain, "label", "rpc"), why))
+        if not problems:
+            store.mark_release_verified(r["nonce"])
+            counts["verified"] += 1
+            continue
+        detail = "; ".join(f"{label}: {why}" for label, why in problems)
+        store.set_release(r["nonce"], WAITING, f"burn not confirmed ({detail})")
+        if all(why in _NOT_YET for _, why in problems):
+            counts["waiting"] += 1
+            continue
+        counts["disputed"] += 1
+        logger.error(f"BridgedOut #{r['nonce']} ({r['evm_tx']}) isn't confirmed: {detail}. Stopping "
+                     "release verification for this pass")
+        break
+    return counts
 
 
 def _payouts_for(conn: sqlite3.Connection, cfg: BridgeConfig, nonce: int) -> list:
@@ -120,6 +212,8 @@ def pay_releases(cfg: BridgeConfig, store: Store, escrow_key: str,
     for r in store.releases(SEEN, WAITING):
         nonce, wallet, cents = r["nonce"], r["ledger_wallet"], r["amount_cents"]
         intent = json.loads(r["intent"]) if r["intent"] else None
+        if intent is None and not r["verified_at"]:
+            continue  # its burn isn't confirmed by every provider yet (verify_releases)
         if not signing.is_public_key(wallet) or wallet in (cfg.escrow_wallet, blockchain.TREASURY_WALLET_ID):
             mark(nonce, HELD, "not a ledger wallet key: the tokens are burned, a person must make this right")
             continue

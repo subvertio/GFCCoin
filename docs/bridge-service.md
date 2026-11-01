@@ -170,6 +170,84 @@ A deposit must never be both refunded and minted (audit F07):
 issued after that backup. After restoring the state, wait one mint TTL before running any
 refund.
 
+## Trusting the chain: which RPC answers count
+
+The service only knows the chain through RPC providers, and a provider can lie (audit F09).
+- **A burn is paid only once every configured provider confirms it.** The main RPC and each
+  `GFC_BRIDGE_VERIFY_RPC_URLS` provider must return the burn's receipt, successful, in the
+  recorded block, with exactly that `BridgedOut` log at that index, in a block it treats as
+  final. Until then the release waits, and nothing is signed for it.
+- **Disagreement stops releases, it doesn't lose them.** A provider that contradicts the
+  others is logged as an error and verification stops for that pass; the release stays
+  recorded and is checked again.
+- **Logs are checked field by field.** Wrong contract, wrong event, wrong sizes, a removed
+  (reorged) log or one outside the asked block range stops the scan without moving its cursor.
+  Two different events for one nonce hold that release for a person.
+- **Reconcile cross-checks too.** Each verifier must agree on the bridge's totals and the
+  token supply at a block both treat as final.
+- **What this still trusts.** One provider can only be checked for consistency: a consistent
+  liar has to be outvoted. Mainnet therefore needs at least one independently run provider
+  (not the same company behind another URL), and `CHAIN_FINALITY=finalized`. Verifying Base's
+  own finality proofs would remove the providers from the trust; it isn't built.
+
+## Keys: one machine must not be enough (audit F14)
+
+- **On mainnet the service refuses to move funds** when:
+  - it holds more than one attester key, since one compromised machine would then hold the
+    quorum (run each attester elsewhere);
+  - a key file is plain text (EVM keys must be encrypted keystores from
+    `python -m bridge new-evm-key`, and the escrow key a file from `new-escrow-key`);
+  - another account on the machine can read a key file (on Windows, any Everyone, Users or
+    Authenticated Users entry in its ACL; `new-evm-key` writes an owner-only ACL);
+  - two roles share one wallet.
+- **On testnets** the same problems are logged as warnings, so the single-operator test setup
+  keeps working.
+- **Passphrases are typed at startup.** Each encrypted EVM key asks once when the service starts
+  (or reads `GFC_BRIDGE_KEY_PASSPHRASE`); keys are read once and kept in memory, never written
+  back decrypted. Encryption protects files at rest, not a running service: a compromised
+  service account can still read keys out of memory.
+
+## Watching for abused keys (audit F13)
+
+`reconcile` checks two things about the wallets behind the bridge, and **latches** what it
+finds: an alarm stays a problem, and keeps the bridge paused, until a person rotates the key
+and runs `python -m bridge clear-incident ADDRESS`.
+- **Code on a plain wallet** (`WATCH_ADDRESSES`, plus the keys the service holds): an
+  EIP-7702 delegation or any other code.
+- **A new nonce on a quiet wallet** (the attesters and the pauser, plus `QUIET_ADDRESSES`):
+  these never send transactions. An EIP-7702 authorization raises its signer's nonce, so a
+  delegation set, used and cleared between two checks still shows. The service's own pause
+  transaction doesn't count.
+
+This only notices after the fact. It can't stop a key that's already abused, only stop the
+bridge acting on it. The defence is the wallet rules in the testnet checklist (A2b): these keys
+never sign authorizations, and Safe owners are hardware wallets.
+
+## Pausing: the bridge, not the token (audit F16)
+
+- **Automatic pauses stop the bridge only.** `reconcile` calls `GFCBridge.pause()`: mints and
+  bridge-outs stop, but GFC keeps moving on Base, so the Uniswap pool keeps trading and
+  liquidity providers can still withdraw.
+- **The token pause is a person's decision.** `GFCToken.pause()` stops every GFC transfer:
+  swaps, adding liquidity and collecting GFC from a position all fail (WETH-only actions may
+  still work). Use it only if the token itself is being abused (a stolen minter, say), and say
+  publicly why.
+- **Unpausing is the Safe's.** A pauser can pause again after the Safe unpauses, until the
+  Safe revokes its role: revoke a pauser whose key may be compromised before unpausing.
+
+## Running it unattended (audit F12)
+
+- `python -m bridge run` survives errors: a failed pass (a flaky RPC, a locked database) is
+  logged and retried with backoff up to 10 minutes. After 5 failures in a row it logs at
+  CRITICAL. `status` shows the last error. Error messages never include an RPC URL.
+- `reconcile` reads the chain at one pinned block, and the escrow balance and unpaid releases in
+  one snapshot, so a mint or payout landing mid-check doesn't cause a false pause.
+- Each mint is capped at `MAX_GAS_PER_MINT` gas (400,000) and `MAX_FEE_GWEI` per gas (1 gwei).
+  Over a cap, nothing is sent. A reverted mint's gas counts against the daily budget, and a mint
+  sent without a receipt yet is left alone while its attestations are valid, rather than resent.
+- Each mint must be exactly the amount recorded for its deposit (the deposit less the relay fee
+  at the time); `reconcile` flags any other amount.
+
 ## Configuration
 
 All configuration comes from `GFC_BRIDGE_*` environment variables (see `bridge/config.py`):
@@ -188,6 +266,9 @@ All configuration comes from `GFC_BRIDGE_*` environment variables (see `bridge/c
 - **Optional:** `DENYLIST_FILE`, `APPROVALS_FILE`, `PEER_LEDGER_DBS`,
   `FINALITY_SECONDS`, `CHAIN_FINALITY`, `START_BLOCK`, and `WATCH_ADDRESSES`
   (comma-separated plain wallets that must never get code; never the Safe itself).
+- **Trust and limits:** `VERIFY_RPC_URLS` (independent providers, comma-separated; mainnet
+  needs one), `QUIET_ADDRESSES` (wallets that never send transactions), `MAX_GAS_PER_MINT`
+  and `MAX_FEE_GWEI`.
 
 ## Commands
 
@@ -203,6 +284,8 @@ python -m bridge roles            # who holds every role (from the events), and 
 python -m bridge approve-release 12
 python -m bridge refund <deposit tx_hash>
 python -m bridge new-escrow-key D:\keys\escrow-84532.json
+python -m bridge new-evm-key D:\keys\relayer.json      # encrypted; prints only the address
+python -m bridge clear-incident 0x...                    # after rotating a flagged key
 python -m bridge run --interval 30
 ```
 
@@ -234,10 +317,20 @@ they're missing, it skips. It covers:
   - it pauses the bridge after a mint made with leaked attester keys that has no deposit
     behind it;
   - it pauses the bridge when an attester's account is delegated under EIP-7702, and flags
-    a watched Safe owner that has code.
+    a watched Safe owner that has code;
+  - a quiet key that sent anything, or a delegation that was cleared again, stays an alarm
+    until `clear-incident`;
+  - a mint for any amount other than its deposit's is flagged;
+  - the gas and fee caps stop a send.
+
+`tests/test_bridge_rpc_trust.py` needs no chain (fake RPC providers): a forged log with no
+receipt is never paid, a consistent liar is outvoted, a provider that's behind makes a release
+wait, malformed logs stop the scan, mainnet refuses a single provider or a quorum of keys in one
+process, and RPC errors never include the URL.
 
 ```powershell
 python -m unittest tests.test_bridge -v
+python -m unittest discover -s tests -p "test_bridge*.py"
 ```
 
 ## Known gaps (before any public deployment)
@@ -247,20 +340,23 @@ python -m unittest tests.test_bridge -v
   first, and fresh credit becomes bridgeable once it ages. Phone verification (one
   account per number) is still the main defence against fake accounts.
 - **Attesters run in-process.** The relayer calls `Attester` objects directly, so one
-  operator holds every key, which is only acceptable on a testnet. Production attesters
-  need a small signing endpoint each, on separate machines and operators.
+  operator holds every key, which is only acceptable on a testnet; mainnet refuses it. Before
+  mainnet, each attester needs a small signing endpoint of its own, on separate machines and
+  operators. Until that's built, a mainnet bridge can't reach its threshold of 2.
 - **Ledger finality is time-based.** It still relies on this node's ordering (see the
   double-spend note in `dex-plan.md`). Treasury-signed checkpoints should replace it.
 - **Refunds are run by hand.** `python -m bridge refund` handles deposits. A held release
   to a bad wallet still needs a person: those tokens are already burned.
 - **The escrow key is hot.** It signs releases on the bridge host. Keep the release limits
   low, and move the key to an HSM or KMS with Ed25519 support if one is available.
-- **The EVM keys are hot too.** The relayer, pauser and attester keys are plain files on
-  the bridge host. Whoever can make one sign can also sign an EIP-7702 authorization and
-  take that account over. Keep them on separate machines (attesters apart from the
-  relayer), give each only what its role needs, and keep `WATCH_ADDRESSES` complete so
-  `reconcile` catches a takeover. The takeover check runs every interval, so it notices
-  after the fact; it doesn't prevent anything.
+- **The EVM keys are hot too.** The relayer, pauser and attester keys are on the bridge host
+  (encrypted on mainnet, decrypted in memory while it runs). Whoever can make one sign can
+  also sign an EIP-7702 authorization and take that account over. Keep them on separate
+  machines (attesters apart from the relayer), give each only what its role needs, and keep
+  `WATCH_ADDRESSES` complete. The takeover checks notice after the fact; they don't prevent
+  anything.
+- **RPC providers are trusted, as a group.** Releases need every configured provider to agree,
+  so a lie needs all of them. Proof-based verification of Base finality isn't built.
 - **Safe owners must be hardware wallets.** A delegated owner's contract can approve any Safe
   transaction in that owner's name. The testnet checklist (A2b) has the wallet rules.
 - **The service writes to the live node's SQLite DB.** Payouts go into the same file the

@@ -68,6 +68,7 @@ class ExactlyOnceTest(EscrowTestCase):
     def burn(self, nonce=1, cents=100_00, wallet=None):
         self.store.add_release({"nonce": nonce, "evm_tx": EVM_TX, "block": 99, "from": EVM,
                                 "ledger_wallet": wallet or self.b, "amount_cents": cents})
+        self.store.mark_release_verified(nonce)  # as every RPC confirming it would (test_bridge_rpc_trust)
 
     def pay(self):
         return releases.pay_releases(self.cfg, self.store, self.escrow_priv)

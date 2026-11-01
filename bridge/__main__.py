@@ -8,13 +8,17 @@ python -m bridge <command>
   approve-release NONCE  let a held release past the per-release / daily limits
   refund TX_HASH         send a deposit marked refund/held back to its sender
   new-escrow-key FILE    create an encrypted escrow key file; prints only its public key
-  run [--interval S]     relay, release and reconcile in a loop
+  new-evm-key FILE       create an encrypted EVM keystore file; prints only its address
+  clear-incident ADDR    forget a latched watched-wallet alarm once its key is rotated
+  run [--interval S]     relay, release and reconcile in a loop; errors are logged and retried
   roles                  who holds every role on the token and bridge, and what's wrong (read-only)
 
 Configuration is GFC_BRIDGE_* environment variables (bridge/config.py). In this
 version the relayer calls attesters in-process: GFC_BRIDGE_ATTESTER_KEY_FILE,
 plus GFC_BRIDGE_EXTRA_ATTESTER_KEY_FILES (comma-separated) for a single-operator
-testnet. Production attesters run on separate machines; see docs/bridge-service.md.
+testnet. On mainnet the service refuses to hold more than one attester key (that
+would put the whole quorum on one machine, audit F14): the other attesters must run
+on separate machines; see docs/bridge-service.md.
 """
 
 import argparse
@@ -33,11 +37,47 @@ from bridge.config import BridgeConfig, read_escrow_key, read_evm_key  # noqa: E
 from bridge.store import Store  # noqa: E402
 
 
-def _attesters(cfg: BridgeConfig) -> list:
-    from bridge.attester import Attester
+logger = logging.getLogger("gfc.bridge")
+
+MAX_BACKOFF_SECONDS = 600
+
+
+def _attester_files(cfg: BridgeConfig) -> list:
     files = [cfg.attester_key_file] if cfg.attester_key_file else []
-    files += [f for f in os.environ.get("GFC_BRIDGE_EXTRA_ATTESTER_KEY_FILES", "").split(",") if f]
-    return [Attester(cfg, key=read_evm_key(f)) for f in files]
+    return files + [f for f in os.environ.get("GFC_BRIDGE_EXTRA_ATTESTER_KEY_FILES", "").split(",") if f]
+
+
+def key_problems(cfg: BridgeConfig, files: dict) -> list:
+    """
+    What's wrong with the key files ({role: path}), for mainnet: plain-text keys, files
+    other accounts can read, and a quorum of attester keys in this one process (audit F14).
+    """
+    from bridge import keyfiles
+    problems = []
+    attesters = [r for r in files if r.startswith("attester")]
+    if len(attesters) > 1:
+        problems.append(f"{len(attesters)} attester keys in one service: one compromised machine could mint. "
+                        "Run each attester on its own machine")
+    for role, path in files.items():
+        if not keyfiles.is_keystore(path):
+            problems.append(f"the {role} key file is plain text: use an encrypted one "
+                            f"(python -m bridge new-{'escrow' if role == 'escrow' else 'evm'}-key)")
+        why = keyfiles.access_problem(path)
+        if why:
+            problems.append(f"the {role} key file is {why}")
+    return problems
+
+
+def _distinct(keys: dict) -> list:
+    """Two roles on one EVM key defeat the point of separate roles."""
+    from eth_account import Account
+    seen, problems = {}, []
+    for role, key in keys.items():
+        addr = Account.from_key(key).address
+        if addr in seen:
+            problems.append(f"the {role} and {seen[addr]} keys are the same wallet {addr}")
+        seen.setdefault(addr, role)
+    return problems
 
 
 def main(argv=None) -> int:
@@ -51,6 +91,10 @@ def main(argv=None) -> int:
     fp.add_argument("tx_hash")
     kp = sub.add_parser("new-escrow-key")
     kp.add_argument("file")
+    ek = sub.add_parser("new-evm-key")
+    ek.add_argument("file")
+    ci = sub.add_parser("clear-incident")
+    ci.add_argument("address")
     rp = sub.add_parser("run")
     rp.add_argument("--interval", type=float, default=30.0)
     args = parser.parse_args(argv)
@@ -72,6 +116,19 @@ def main(argv=None) -> int:
         print(f"Encrypted escrow key written to {path}. Run the bridge with GFC_BRIDGE_ESCROW_PASSPHRASE set.")
         print(f"Pin this public key in config.PINNED_BRIDGE_ESCROWS for its chain:\n  {pub}")
         return 0
+    if args.cmd == "new-evm-key":
+        import getpass
+        from bridge import keyfiles
+        path = Path(args.file)
+        if path.exists():
+            print(f"{path} already exists; not overwriting it", file=sys.stderr)
+            return 1
+        passphrase = getpass.getpass("Passphrase for the new key file (12+ chars): ")
+        if len(passphrase) < 12 or passphrase != getpass.getpass("Again: "):
+            print("passphrases differ or are shorter than 12 characters", file=sys.stderr)
+            return 1
+        print(f"Encrypted key written to {path}. Its address:\n  {keyfiles.write_evm_keystore(str(path), passphrase)}")
+        return 0
     cfg = BridgeConfig.from_env()
     store = Store(cfg.state_db)
     store.pin_bridge(cfg.bridge_address)  # one state file per bridge contract
@@ -82,7 +139,16 @@ def main(argv=None) -> int:
             for r in rows:
                 counts[r["status"]] = counts.get(r["status"], 0) + 1
             print(f"{table}: {counts or 'none'}")
+        for addr, text in store.meta_like("incident:").items():
+            print(f"INCIDENT {addr}: {text}")
+        if store.get_meta("last_error"):
+            print(f"last error: {store.get_meta('last_error')}")
         return 0
+    if args.cmd == "clear-incident":
+        from bridge.reconcile import clear_incident
+        ok = clear_incident(store, args.address)
+        print("cleared; a new nonce baseline is taken on the next reconcile" if ok else "no incident for that address")
+        return 0 if ok else 1
     if args.cmd == "refund":
         if not cfg.escrow_key_file:
             raise SystemExit("GFC_BRIDGE_ESCROW_KEY_FILE is not set")
@@ -100,40 +166,17 @@ def main(argv=None) -> int:
         return 0 if ok else 1
 
     from bridge import relayer
+    from bridge.attester import Attester
     from bridge.chain import BridgeContract, Chain
     from bridge.reconcile import reconcile
 
-    chain = Chain(cfg.rpc_url)
-    if chain.chain_id() != cfg.chain_id:
-        print(f"RPC is chain {chain.chain_id()}, config says {cfg.chain_id}", file=sys.stderr)
-        return 2
+    chain = Chain(cfg.rpc_url, label="main rpc")
+    verifiers = [Chain(url, label=f"verify rpc #{i + 1}") for i, url in enumerate(cfg.verify_rpc_urls)]
+    for c in [chain, *verifiers]:
+        if c.chain_id() != cfg.chain_id:
+            print(f"{c.label} is chain {c.chain_id()}, config says {cfg.chain_id}", file=sys.stderr)
+            return 2
     bridge = BridgeContract(chain, cfg.bridge_address)
-    relayer_key = read_evm_key(cfg.relayer_key_file) if cfg.relayer_key_file else None
-    escrow_key = read_escrow_key(cfg.escrow_key_file) if cfg.escrow_key_file else None
-    pauser_key = read_evm_key(cfg.pauser_key_file) if cfg.pauser_key_file else None
-
-    def do_relay():
-        if not relayer_key:
-            raise SystemExit("GFC_BRIDGE_RELAYER_KEY_FILE is not set")
-        print("scan:", relayer.scan_deposits(cfg, store))
-        print("relay:", relayer.relay(cfg, store, bridge, _attesters(cfg), relayer_key))
-
-    def do_release():
-        if not escrow_key:
-            raise SystemExit("GFC_BRIDGE_ESCROW_KEY_FILE is not set")
-        print("new BridgedOut events:", releases.scan_bridged_out(cfg, store, bridge))
-        print("release:", releases.pay_releases(cfg, store, escrow_key))
-
-    def do_reconcile() -> bool:
-        report = reconcile(cfg, store, bridge, pauser_key,
-                           own_keys=[relayer_key] + [a._key for a in _attesters(cfg)])
-        print(f"reconcile: {'ok' if report.ok else 'PROBLEMS'} outstanding={report.outstanding_cents} "
-              f"escrow={report.escrow_cents} unpaid={report.unpaid_release_cents}"
-              + (" (bridge paused)" if report.paused else ""))
-        for p in report.problems:
-            print("  -", p)
-        return report.ok
-
     if args.cmd == "roles":
         from bridge.roles import inventory
         inv = inventory(chain, bridge, bridge.token(), cfg.start_block, cfg.log_chunk_blocks)
@@ -145,6 +188,56 @@ def main(argv=None) -> int:
         for p in inv["problems"]:
             print("  -", p)
         return 0 if not inv["problems"] else 1
+
+    files = {role: path for role, path in (("relayer", cfg.relayer_key_file), ("pauser", cfg.pauser_key_file),
+                                           ("escrow", cfg.escrow_key_file)) if path}
+    files.update({f"attester {i + 1}": f for i, f in enumerate(_attester_files(cfg))})
+    problems = cfg.mainnet_problems() + key_problems(cfg, files)
+    if problems and cfg.is_testnet:
+        for p in problems:
+            logger.warning(f"Testnet only: {p}")
+    elif problems and args.cmd in ("relay", "release", "run"):
+        print("Refusing to move funds on mainnet:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 2
+
+    # Every key is read once, here: an encrypted one asks for its passphrase once
+    relayer_key = read_evm_key(cfg.relayer_key_file) if cfg.relayer_key_file else None
+    escrow_key = read_escrow_key(cfg.escrow_key_file) if cfg.escrow_key_file else None
+    pauser_key = read_evm_key(cfg.pauser_key_file) if cfg.pauser_key_file else None
+    attester_keys = [read_evm_key(f) for f in _attester_files(cfg)]
+    attesters = [Attester(cfg, key=k) for k in attester_keys]
+    shared = _distinct({**({"relayer": relayer_key} if relayer_key else {}),
+                        **({"pauser": pauser_key} if pauser_key else {}),
+                        **{f"attester {i + 1}": k for i, k in enumerate(attester_keys)}})
+    if shared:
+        for p in shared:
+            print(p, file=sys.stderr)
+        return 2
+
+    def do_relay():
+        if not relayer_key:
+            raise SystemExit("GFC_BRIDGE_RELAYER_KEY_FILE is not set")
+        print("scan:", relayer.scan_deposits(cfg, store))
+        print("relay:", relayer.relay(cfg, store, bridge, attesters, relayer_key))
+
+    def do_release():
+        if not escrow_key:
+            raise SystemExit("GFC_BRIDGE_ESCROW_KEY_FILE is not set")
+        print("new BridgedOut events:", releases.scan_bridged_out(cfg, store, bridge, verifiers))
+        print("release:", releases.pay_releases(cfg, store, escrow_key))
+
+    def do_reconcile() -> bool:
+        report = reconcile(cfg, store, bridge, pauser_key, own_keys=[relayer_key, *attester_keys],
+                           quiet_keys=attester_keys, verifiers=verifiers)
+        print(f"reconcile: {'ok' if report.ok else 'PROBLEMS'} outstanding={report.outstanding_cents} "
+              f"escrow={report.escrow_cents} unpaid={report.unpaid_release_cents}"
+              + (" (bridge paused)" if report.paused else ""))
+        for p in report.problems:
+            print("  -", p)
+        return report.ok
+
     if args.cmd == "relay":
         do_relay()
     elif args.cmd == "release":
@@ -152,13 +245,23 @@ def main(argv=None) -> int:
     elif args.cmd == "reconcile":
         return 0 if do_reconcile() else 1
     elif args.cmd == "run":
+        failures = 0
         while True:
-            if do_reconcile():  # never move funds while the books don't balance
-                if relayer_key:
-                    do_relay()
-                if escrow_key:
-                    do_release()
-            time.sleep(args.interval)
+            try:
+                if do_reconcile():  # never move funds while the books don't balance
+                    if relayer_key:
+                        do_relay()
+                    if escrow_key:
+                        do_release()
+                failures = 0
+            except Exception as e:  # a flaky RPC, a locked DB: log it, wait longer, try again (audit F12)
+                failures += 1
+                detail = f"{type(e).__name__}: {e}"
+                for url in [cfg.rpc_url, *cfg.verify_rpc_urls]:
+                    detail = detail.replace(url, "<rpc>")  # never log an RPC URL: it may hold an API key
+                store.set_meta("last_error", f"{time.strftime('%Y-%m-%d %H:%M:%S')} ({failures} in a row) {detail}")
+                (logger.critical if failures >= 5 else logger.error)(f"Pass failed ({failures} in a row): {detail}")
+            time.sleep(min(args.interval * 2 ** min(failures, 10), max(args.interval, MAX_BACKOFF_SECONDS)))
     return 0
 
 

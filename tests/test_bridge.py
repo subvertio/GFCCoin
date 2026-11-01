@@ -61,9 +61,9 @@ if HAVE_ETH:
 
     from bridge import deposits, eip712, relayer, releases  # noqa: E402
     from bridge.attester import Attester  # noqa: E402
-    from bridge.chain import BridgeContract, Chain, calldata, token_total_supply  # noqa: E402
+    from bridge.chain import BridgeContract, Chain, RPCError, calldata, token_total_supply  # noqa: E402
     from bridge.config import BridgeConfig  # noqa: E402
-    from bridge.reconcile import reconcile  # noqa: E402
+    from bridge.reconcile import clear_incident, reconcile  # noqa: E402
     from bridge.store import HELD, MINTED, PAID, REFUND, SUBMITTED, WAITING, Store  # noqa: E402
 
 CHAIN_ID = 31337
@@ -448,6 +448,65 @@ class BridgeServiceTest(unittest.TestCase):
         self.chain.rpc("anvil_setCode", [owner.address, "0x6000"])
         report = reconcile(cfg, self.store, self.bridge)
         self.assertTrue(any(owner.address in p and "contract code" in p for p in report.problems))
+
+    def test_a_takeover_stays_an_alarm_after_the_evidence_is_gone(self):
+        """F13: a delegation set and cleared between two checks, and a quiet key that sent anything."""
+        self.deposit(500_00)
+        self.relay()
+        attester = self.attester_accts[0]
+        keys = dict(own_keys=[attester.key.hex()], quiet_keys=[attester.key.hex()])
+        self.assertTrue(reconcile(self.cfg, self.store, self.bridge, self.pauser.key.hex(), **keys).ok)
+
+        # The attester's key authorizes a delegation, uses it, and clears it before the next check:
+        # its code is empty again, but its nonce moved
+        self.chain.rpc("anvil_setBalance", [attester.address, hex(10 ** 18)])
+        self.chain.send(attester.key.hex(), attester.address, "0x", gas=21_000)
+        report = reconcile(self.cfg, self.store, self.bridge, self.pauser.key.hex(), **keys)
+        self.assertFalse(report.ok)
+        self.assertTrue(report.paused)
+        self.assertTrue(any(attester.address in p and "quiet wallet" in p for p in report.problems), report.problems)
+
+        # Still a problem on the next pass (our own pause transaction doesn't count against the pauser)
+        report = reconcile(self.cfg, self.store, self.bridge, self.pauser.key.hex(), **keys)
+        self.assertEqual(len(report.problems), 1, report.problems)
+        self.assertIn("quiet wallet", report.problems[0])
+
+        # A delegation that's gone by the next check stays latched too
+        owner = self._account()
+        cfg = replace(self.cfg, watch_addresses=[owner.address])
+        self.chain.rpc("anvil_setCode", [owner.address, "0xef0100" + "5e" * 20])
+        self.assertFalse(reconcile(cfg, self.store, self.bridge, **keys).ok)
+        self.chain.rpc("anvil_setCode", [owner.address, "0x"])
+        self.assertTrue(any(owner.address in p and "latched" in p
+                            for p in reconcile(cfg, self.store, self.bridge, **keys).problems))
+
+        # A person rotates the keys and clears both
+        self.assertTrue(clear_incident(self.store, attester.address))
+        self.assertTrue(clear_incident(self.store, owner.address))
+        self.assertTrue(reconcile(cfg, self.store, self.bridge, self.pauser.key.hex(), **keys).ok)
+
+    def test_reconcile_checks_the_exact_mint_amount(self):
+        """F12: a mint for less than its deposit (a skipped fee, an under-mint) is a problem too."""
+        dep = self.deposit(500_00)
+        relayer.scan_deposits(self.cfg, self.store)
+        self.assertEqual(self.store.deposit(dep["tx_hash"])["mint_cents"], 499_00)
+        req = eip712.mint_request(dep["tx_hash"], self.user_evm.address, 400_00, int(time.time()) + 600)
+        sigs = sorted((eip712.sign_mint(a.key.hex(), CHAIN_ID, self.bridge_addr, req)
+                       for a in self.attester_accts[:2]), key=lambda s: int(s[0], 16))
+        self.bridge.mint_from_ledger(self.relayer_acct.key.hex(), req, [s for _, s in sigs])
+        report = reconcile(self.cfg, self.store, self.bridge)
+        self.assertTrue(any("should mint 49900" in p for p in report.problems), report.problems)
+
+    def test_gas_caps_stop_a_send(self):
+        """F12: the RPC's gas estimate and fees can't spend more than the caps."""
+        key = self.user_evm.key.hex()
+        with self.assertRaises(RPCError) as caught:
+            self.chain.send(key, self.user_evm.address, "0x", max_gas=20_000)
+        self.assertIn("not sent", str(caught.exception))
+        with self.assertRaises(RPCError) as caught:
+            self.chain.send(key, self.user_evm.address, "0x", max_fee_per_gas=1)
+        self.assertIn("not sent", str(caught.exception))
+        self.chain.send(key, self.user_evm.address, "0x", max_gas=100_000, max_fee_per_gas=10 ** 11)
 
     def test_reconcile_pauses_on_unbacked_mint(self):
         self.deposit(500_00)
