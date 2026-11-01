@@ -132,12 +132,24 @@ class EscrowRuleTests(EscrowTestCase):
     def test_escrow_funds_leave_only_as_payouts_or_refunds(self):
         (status, _), dep = send(self.db, self.priv, self.pub, self.escrow_pub, 500_00, f"bridge:v1:{CHAIN}:{EVM}")
         self.assertEqual(status, blockchain.ACCEPTED)
+        (status, _), small = send(self.db, self.priv, self.pub, self.escrow_pub, 50_00, f"bridge:v1:{CHAIN}:{EVM}")
+        self.assertEqual(status, blockchain.ACCEPTED)
         out = lambda reason, to=self.pub, cents=10_00: send(self.db, self.escrow_priv, self.escrow_pub, to,
                                                             cents, reason)[0][0]
+        bridge = "0x" + "12" * 20
         self.assertEqual(out("thanks"), blockchain.REJECTED)
         self.assertEqual(out(f"bridge-out:v1:8453:1:0x{'aa' * 32}"), blockchain.REJECTED)  # wrong chain
+        self.assertEqual(out(f"bridge-out:v2:8453:{bridge}:1:0x{'aa' * 32}"), blockchain.REJECTED)
         self.assertEqual(out(f"bridge-out:v1:{CHAIN}:1:0x{'aa' * 32}"), blockchain.ACCEPTED)
-        self.assertEqual(out(f"bridge-refund:v1:{dep['tx_hash']}"), blockchain.ACCEPTED)
+        self.assertEqual(out(f"bridge-out:v2:{CHAIN}:{bridge}:1:0x{'aa' * 32}"), blockchain.ACCEPTED)
+        # A refund returns its deposit in full, to the wallet that made it, once
+        _, stranger = signing.generate_keypair()
+        refund = f"bridge-refund:v1:{small['tx_hash']}"
+        self.assertEqual(out(refund, cents=10_00), blockchain.REJECTED)
+        self.assertEqual(out(refund, to=stranger, cents=50_00), blockchain.REJECTED)
+        self.assertEqual(out(refund, cents=50_00), blockchain.ACCEPTED)
+        self.assertEqual(out(refund, cents=50_00), blockchain.REJECTED)
+        self.assertEqual(out(f"bridge-refund:v1:{'cd' * 32}"), blockchain.PENDING)  # no such deposit (yet)
 
         _, other_escrow = signing.generate_keypair()
         config.BRIDGE_ESCROWS[8453] = other_escrow
@@ -228,6 +240,7 @@ class RefundTests(EscrowTestCase):
         conn.close()
         self.assertEqual(result, deposits.REFUND)  # under the 100 GFC minimum
         store.add_deposit(d, REFUND)
+        store.set_meta("created_at", (NOW - timedelta(hours=3)).isoformat())  # a state older than the deposit
 
         releases.refund_deposit(cfg, store, self.escrow_priv, dep["tx_hash"])
         self.assertEqual(store.deposit(dep["tx_hash"])["status"], REFUNDED)

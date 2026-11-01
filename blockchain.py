@@ -69,12 +69,33 @@ OPERATOR_REASON_RE = re.compile(r"^Operator grant \((hackathon|node-host|other)\
 # Every node enforces these rules, so a typo can't strand GFC in escrow and escrow funds
 # can only leave as bridge payouts or refunds:
 # - a deposit is a TRANSFER to an escrow with reason bridge:v1:<that escrow's chain>:<0xaddress>
-# - escrow outflows are TRANSFERs with reason bridge-out:v1:<chain>:<nonce>:<evm tx> or
+# - escrow outflows are TRANSFERs with reason
+#   bridge-out:v2:<chain>:<bridge address, lowercase>:<nonce>:<evm tx> (v1: no bridge address) or
 #   bridge-refund:v1:<deposit tx_hash>
+# - each bridge-out is paid once and each deposit refunded once, whatever the row ids say
+#   (the reason is in the signed hash; ids aren't): a second payout for the same
+#   (chain, bridge, nonce) is rejected, so a retry or a replayed old signature can't pay twice
+# - a refund returns its deposit, in full, to the wallet that made it
 # - no mints to an escrow, and no escrow-to-escrow transfers
 BRIDGE_DEPOSIT_RE = re.compile(r"^bridge:v1:(\d{1,12}):(0x[0-9a-fA-F]{40})$")
-BRIDGE_PAYOUT_RE = re.compile(r"^bridge-out:v1:(\d{1,12}):\d{1,20}:0x[0-9a-fA-F]{64}$")
-BRIDGE_REFUND_RE = re.compile(r"^bridge-refund:v1:[0-9a-f]{64}$")
+BRIDGE_PAYOUT_RE = re.compile(r"^bridge-out:v1:(\d{1,12}):(\d{1,20}):0x[0-9a-fA-F]{64}$")
+BRIDGE_PAYOUT_V2_RE = re.compile(r"^bridge-out:v2:(\d{1,12}):(0x[0-9a-f]{40}):(\d{1,20}):0x[0-9a-fA-F]{64}$")
+BRIDGE_REFUND_RE = re.compile(r"^bridge-refund:v1:([0-9a-f]{64})$")
+
+
+def bridge_payout_key(reason: str) -> Optional[str]:
+    """
+    The identity of the bridge-out a payout reason pays, as the reason prefix every payout for
+    it shares: bridge-out:v2:<chain>:<bridge>:<nonce>: (or v1:<chain>:<nonce>:). None if it
+    isn't a payout reason.
+    """
+    m = BRIDGE_PAYOUT_V2_RE.match(reason or "")
+    if m:
+        return f"bridge-out:v2:{m.group(1)}:{m.group(2)}:{m.group(3)}:"
+    m = BRIDGE_PAYOUT_RE.match(reason or "")
+    if m:
+        return f"bridge-out:v1:{m.group(1)}:{m.group(2)}:"
+    return None
 
 # Limits applied to transactions received from peers
 MAX_REASON_LEN = 500
@@ -264,10 +285,38 @@ def bridge_rule_violation(sender: str, recipient: str, reason: str,
         if not m or int(m.group(1)) != to_chain or int(m.group(2), 16) == 0:
             return f"a bridge deposit needs the reason bridge:v1:{to_chain}:<0x EVM address>"
         return None
-    m = BRIDGE_PAYOUT_RE.match(reason or "")
+    m = BRIDGE_PAYOUT_V2_RE.match(reason or "") or BRIDGE_PAYOUT_RE.match(reason or "")
     if (m and int(m.group(1)) == from_chain) or BRIDGE_REFUND_RE.match(reason or ""):
         return None
     return "bridge escrow funds only leave as bridge payouts or refunds"
+
+
+def _escrow_outflow_problem(conn: sqlite3.Connection, tx: dict) -> Optional[Tuple[str, str]]:
+    """
+    The ledger-state rules for money leaving an escrow (status, reason), or None if it may:
+    one payout per bridge-out, one refund per deposit, and a refund returns its deposit in
+    full to the wallet that made it (PENDING until that deposit is here).
+    """
+    escrow, reason = tx.get("sender"), tx.get("reason") or ""
+    if bridge_escrow_chain(escrow) is None:
+        return None
+    key = bridge_payout_key(reason)
+    if key:
+        if conn.execute("SELECT 1 FROM transactions WHERE sender = ? AND substr(reason, 1, ?) = ?",
+                        (escrow, len(key), key)).fetchone():
+            return REJECTED, "this bridge-out has already been paid"
+        return None
+    m = BRIDGE_REFUND_RE.match(reason)
+    if m:
+        if conn.execute("SELECT 1 FROM transactions WHERE sender = ? AND reason = ?", (escrow, reason)).fetchone():
+            return REJECTED, "this deposit has already been refunded"
+        dep = conn.execute("SELECT sender, recipient, amount_cents, block_index FROM transactions WHERE tx_hash = ?",
+                           (m.group(1),)).fetchone()
+        if not dep or dep[3] is None:
+            return PENDING, "the deposit this refunds isn't on this node yet"
+        if dep[1] != escrow or dep[0] != tx.get("recipient") or dep[2] != tx.get("amount_cents"):
+            return REJECTED, "a refund returns its deposit, in full, to the wallet that made it"
+    return None
 
 
 # ============================================================================
@@ -597,6 +646,9 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
 
     with _write(db_path) as conn:
         _require_balance(_balance_cents(conn, sender_wallet), amount_cents)
+        problem = _escrow_outflow_problem(conn, tx)
+        if problem:
+            raise ValueError(problem[1])
         _insert_tx(conn, tx)
         tx["block_index"] = _append_block(conn, [tx_id])["block_index"]
     return tx
@@ -948,6 +1000,9 @@ def _check_against_ledger(conn: sqlite3.Connection, tx: dict) -> Tuple[str, str]
                              "AND reason LIKE 'Operator grant (node-host)%'",
                              (TX_TYPE_OPERATOR, recipient)).fetchone()):
         return REJECTED, "wallet already received a node host grant"
+    problem = _escrow_outflow_problem(conn, tx)
+    if problem:
+        return problem
     if _balance_cents(conn, tx.get("sender")) < amount_cents:
         return PENDING, "insufficient sender balance"
     return ACCEPTED, ""

@@ -74,6 +74,7 @@ def main(argv=None) -> int:
         return 0
     cfg = BridgeConfig.from_env()
     store = Store(cfg.state_db)
+    store.pin_bridge(cfg.bridge_address)  # one state file per bridge contract
 
     if args.cmd == "status":
         for table, rows in (("deposits", store.deposits()), ("releases", store.releases())):
@@ -85,7 +86,12 @@ def main(argv=None) -> int:
     if args.cmd == "refund":
         if not cfg.escrow_key_file:
             raise SystemExit("GFC_BRIDGE_ESCROW_KEY_FILE is not set")
-        ledger_tx = releases.refund_deposit(cfg, store, read_escrow_key(cfg.escrow_key_file), args.tx_hash)
+        bridge_for_refund = None
+        if cfg.rpc_url:  # a refund checks the chain first: a minted deposit is never refunded
+            from bridge.chain import BridgeContract, Chain
+            bridge_for_refund = BridgeContract(Chain(cfg.rpc_url), cfg.bridge_address)
+        ledger_tx = releases.refund_deposit(cfg, store, read_escrow_key(cfg.escrow_key_file), args.tx_hash,
+                                            bridge=bridge_for_refund)
         print(f"refunded: ledger tx {ledger_tx}")
         return 0
     if args.cmd == "approve-release":

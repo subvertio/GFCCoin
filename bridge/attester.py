@@ -6,6 +6,9 @@ Each production attester runs on its own machine with its own ledger node and
 key; the relayer only collects their signatures. A relayer can't make an
 attester sign anything the attester's own ledger doesn't show.
 
+A deposit that was refunded on the ledger is never signed, whatever the relayer's state says
+(audit F07: a lost or restored bridge state would otherwise mint it again).
+
 Policy (on top of validity):
 - the destination address and the sender wallet aren't on the denylist;
 - the deposit is covered by GFC that isn't fresh free credit: grants, referrals,
@@ -56,6 +59,8 @@ class Attester:
             # The relayer's request must be exactly what the ledger says
             if dep["evm_to"].lower() != evm_to.lower() or dep["mint_cents"] != mint_cents:
                 return Attestation(self.address, None, "request does not match the ledger deposit")
+            if deposits.refunded(conn, self.cfg.escrow_wallet, tx_hash):
+                return Attestation(self.address, None, "this deposit was refunded on the ledger")
 
             denied = read_lines(self.cfg.denylist_file)
             if evm_to.lower() in denied or dep["sender"].lower() in denied:

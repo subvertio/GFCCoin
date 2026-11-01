@@ -90,8 +90,9 @@ class Chain:
         return self.block_number(chain_finality)
 
     def call(self, to: str, signature: str, types: Sequence[str] = (), args: Sequence[Any] = (),
-             returns: Sequence[str] = ("uint256",)) -> Any:
-        out = self.rpc("eth_call", [{"to": to, "data": calldata(signature, types, args)}, "latest"])
+             returns: Sequence[str] = ("uint256",), block: Any = "latest") -> Any:
+        tag = hex(block) if isinstance(block, int) else block
+        out = self.rpc("eth_call", [{"to": to, "data": calldata(signature, types, args)}, tag])
         values = decode(list(returns), bytes.fromhex(out[2:]))
         return values[0] if len(values) == 1 else values
 
@@ -176,8 +177,8 @@ class BridgeContract:
     def paused(self) -> bool:
         return self.chain.call(self.address, "paused()", returns=("bool",))
 
-    def processed(self, ledger_tx_hash: bytes) -> bool:
-        return self.chain.call(self.address, "processed(bytes32)", ["bytes32"], [ledger_tx_hash], ("bool",))
+    def processed(self, ledger_tx_hash: bytes, block: Any = "latest") -> bool:
+        return self.chain.call(self.address, "processed(bytes32)", ["bytes32"], [ledger_tx_hash], ("bool",), block)
 
     def is_attester(self, address: str) -> bool:
         role = keccak(text="ATTESTER_ROLE")

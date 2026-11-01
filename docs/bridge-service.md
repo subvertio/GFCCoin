@@ -34,11 +34,22 @@ run against a throwaway ledger and a local `anvil` chain.
 2. `pay_releases()` signs an escrow TRANSFER and adds it through
    `blockchain.accept_synced_transaction()`, the same checks a peer row gets. The
    node's sync then shares it like any other signed transfer.
-3. Each nonce is paid at most once:
-   - the ledger tx id is derived from (chain id, nonce), so a second insert is a
-     duplicate;
-   - before signing, the service looks on the ledger for an existing
-     `bridge-out:v1:<chainId>:<nonce>:` row.
+3. Each burn is paid exactly once (audit F04–F06):
+   - the payout's reason, `bridge-out:v2:<chain>:<bridge address>:<nonce>:<evm tx>`, is in
+     the signed hash, and **every node accepts only one payout per (chain, bridge, nonce)**.
+     A retry, a replayed old signature or a payout under another id is rejected;
+   - the payout is signed once and saved in the state (`releases.intent`) before it's
+     submitted. Every retry resends exactly those bytes;
+   - a release is `paid` only when the ledger holds a confirmed row with that payout's
+     tx_hash, recipient and amount. A matching id proves nothing, since ids aren't signed;
+   - every pass re-checks paid releases. If a payout's row is gone (a ledger restored from an
+     older backup), the same saved payout is sent again. Without a saved payout, the release
+     is held for a person.
+4. Mints (F10) go `seen → submitted → minted`. A mint counts only once `processed` is set in
+   a finalized block. One that disappears (a reorg or a revert) goes back to `seen` and is
+   tried again, and the contract's `processed` still prevents a double mint.
+5. The state file is pinned to one bridge contract (`meta.bridge_address`), because a
+   replacement contract restarts its nonces. Use a new `GFC_BRIDGE_STATE_DB` for a new bridge.
 
 **Reconcile**
 
@@ -85,7 +96,8 @@ For any pinned escrow, `blockchain.bridge_rule_violation()` applies to REST tran
 | Rule | Why |
 |---|---|
 | A transfer *to* an escrow needs the reason `bridge:v1:<that escrow's chain>:<0x address>`, and the address can't be zero | A typo or a wrong chain can't strand GFC in escrow waiting for a manual refund |
-| A transfer *from* an escrow needs the reason `bridge-out:v1:<chain>:<nonce>:<evm tx>` or `bridge-refund:v1:<deposit tx_hash>` | Every escrow outflow can be traced to a burn on chain or to a refund |
+| A transfer *from* an escrow needs the reason `bridge-out:v2:<chain>:<bridge address>:<nonce>:<evm tx>` (`v1` without the address, still accepted) or `bridge-refund:v1:<deposit tx_hash>` | Every escrow outflow can be traced to a burn on chain or to a refund |
+| One payout per (chain, bridge, nonce), and one refund per deposit, returning the whole deposit to the wallet that made it | A retry, a replayed signature or a restored database can't pay one burn twice, or refund a deposit twice (audit F04–F07) |
 | No mints to an escrow, and no escrow-to-escrow transfers | Escrow only changes through deposits, payouts and refunds |
 
 **This is a consensus change.** Nodes on an older release still accept rows that newer
@@ -133,8 +145,21 @@ service's.
 
 A deposit marked `refund` (under the minimum) or `held` (above the contract's per-mint
 cap) goes back to its sender with `python -m bridge refund TX_HASH`. That sends a
-`bridge-refund:v1:<tx_hash>` transfer, which happens at most once per deposit. Refunds
-work without the EVM dependencies.
+`bridge-refund:v1:<tx_hash>` transfer. Every node accepts one refund per deposit, and only
+the whole deposit back to the wallet that made it.
+
+A deposit must never be both refunded and minted (audit F07):
+- attesters refuse a deposit the ledger shows as refunded, and a rebuilt state marks it
+  `refunded`;
+- `refund` checks the chain first, when `GFC_BRIDGE_RPC_URL` is set: a deposit that's
+  `processed` is never refunded;
+- while an attestation issued for the deposit is still usable (its deadline), it waits;
+- if the state file is newer than the deposit, it waits one mint TTL, because a lost or
+  restored state can't remember attestations from before it.
+
+**Remaining gap:** a state restored from an *old backup* may not remember an attestation
+issued after that backup. After restoring the state, wait one mint TTL before running any
+refund.
 
 ## Configuration
 

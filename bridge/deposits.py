@@ -20,7 +20,6 @@ import blockchain
 import signing
 
 REASON_RE = blockchain.BRIDGE_DEPOSIT_RE
-RELEASE_REASON_PREFIX = "bridge-out:v1:"
 
 # Mints a farmer can collect with a fresh account: these can't be bridged until they age
 FAUCET_TX_TYPES = (blockchain.TX_TYPE_GRANT, blockchain.TX_TYPE_REFERRAL, blockchain.TX_TYPE_FIRST_POST,
@@ -47,6 +46,12 @@ def deposit_rows(conn: sqlite3.Connection, escrow: str) -> Iterator[dict]:
         "AND block_index IS NOT NULL ORDER BY timestamp", (escrow, blockchain.TX_TYPE_TRANSFER))
     for row in cur:
         yield dict(zip(TX_FIELDS, row))
+
+
+def refunded(conn: sqlite3.Connection, escrow: str, tx_hash: str) -> bool:
+    """The ledger has a refund of this deposit (every node accepts at most one)."""
+    return conn.execute("SELECT 1 FROM transactions WHERE sender = ? AND reason = ?",
+                        (escrow, f"bridge-refund:v1:{tx_hash}")).fetchone() is not None
 
 
 def deposit_by_hash(conn: sqlite3.Connection, tx_hash: str) -> Optional[dict]:
