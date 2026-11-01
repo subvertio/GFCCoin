@@ -8,6 +8,8 @@ Pages (Firebase's web SDK sends the SMS code or the email sign-in link; it only 
 - POST /reset/prove           form: f, id_token -> the new-password step
 - POST /reset/complete        form: f, password, password2, recovery_code, accept_locked -> done,
                               with the new recovery code
+- GET  /reset/set?f=          an operator's reset link (account_recovery.py reset-link): straight
+                              to the new-password step
 - GET  /account/phone         changed your number: username + the account's verified email,
                               then the new number (/account/phone/email, /start, /prove, /new, /prove-new)
 - GET  /account/email?f=      verify an email (link from POST /email/link), then /account/email/done
@@ -288,6 +290,14 @@ reset anyway</label>
 <button type="submit">Set new password</button>
 </form>"""
     return _page("Choose a new password", body)
+
+
+@router.get("/reset/set", response_class=HTMLResponse)
+def reset_set(f: str = ""):
+    if not recovery.reset_ready(f, DB_PATH):
+        return _expired("Reset your password", "This link has expired or was already used. Ask for a new one.",
+                        "/reset")
+    return _password_step(f)
 
 
 @router.post("/reset/prove", response_class=HTMLResponse)

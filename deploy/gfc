@@ -33,6 +33,9 @@ usage: gfc <command>
                         other (up to 10,000). Public, permanent: listed at
                         /treasury/grants. Asks to confirm unless --yes.
   grants                list every operator grant
+  reset-link USER       a one-time password reset link (24 hours) for an account
+                        with no verified phone or email. Only after confirming
+                        it's really them; send it to them privately
   publish-app FILE VERSION
                         make FILE the public Android download at /app (refuses
                         anything not signed with the release key in
@@ -328,6 +331,8 @@ case "${1:-}" in
     rotate-treasury)  shift; cmd_rotate_treasury "$@" ;;
     grant)            shift; cmd_grant "$@" ;;
     grants)           need_root; as_gfc "$VENV/bin/python" treasury_grants.py list ;;
+    reset-link)       need_root; [[ $# -eq 2 ]] || die "usage: gfc reset-link USERNAME"
+                      as_gfc "$VENV/bin/python" account_recovery.py reset-link "$2" ;;
     publish-app)      need_root; [[ $# -eq 3 ]] || die "usage: gfc publish-app FILE VERSION  (e.g. gfc publish-app /tmp/gfc.apk 0.1.0)"
                       [[ -r "$2" ]] || die "can't read $2"
                       as_gfc "$VENV/bin/python" app_release.py publish "$(readlink -f "$2")" "$3" ;;
