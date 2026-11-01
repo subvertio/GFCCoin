@@ -90,6 +90,21 @@ class BridgeConfig:
     def is_testnet(self) -> bool:
         return self.chain_id in TESTNET_CHAIN_IDS
 
+    def attester_problems(self) -> List[str]:
+        """What attest-serve refuses: settings it can't sign correctly without (testnets included)."""
+        import re
+        problems = []
+        if not re.fullmatch(r"0x[0-9a-fA-F]{40}", self.bridge_address or ""):
+            problems.append("GFC_BRIDGE_ADDRESS isn't a contract address")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.escrow_wallet or ""):
+            problems.append("GFC_BRIDGE_ESCROW_WALLET isn't a ledger public key")
+        if not Path(self.ledger_db).exists():
+            problems.append(f"GFC_BRIDGE_LEDGER_DB {self.ledger_db} doesn't exist")
+        if not self.is_testnet and (not self.checkpoint_url or not self.checkpoint_pubkeys):
+            problems.append("GFC_BRIDGE_CHECKPOINT_URL is empty or no checkpoint key is pinned: mainnet "
+                            "attesters need signed ledger checkpoints")
+        return problems
+
     def mainnet_problems(self) -> List[str]:
         """Settings mainnet refuses (key checks are in bridge/__main__.py)."""
         if self.is_testnet:

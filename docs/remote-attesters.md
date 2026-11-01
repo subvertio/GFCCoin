@@ -46,7 +46,9 @@ On the attester machine, with the GFC node code checked out and
    python -m bridge roles
    ```
 5. **Start it** with the same policy settings as the relayer: hold days, minimum deposit,
-   relay fee, mint TTL. The passphrase is typed when it starts.
+   relay fee, mint TTL. The passphrase is typed when it starts. It refuses to start without a
+   valid bridge address, escrow wallet and ledger database, and, on mainnet, without signed
+   ledger checkpoints.
    ```powershell
    $env:GFC_BRIDGE_CHAIN_ID = '8453'
    $env:GFC_BRIDGE_ADDRESS = '0x...'               # the bridge contract
@@ -59,12 +61,15 @@ On the attester machine, with the GFC node code checked out and
    ```
 6. **Make it reachable from the relayer, privately.** It listens on 127.0.0.1 only. Pick
    one way in:
-   - a private network, such as Tailscale or WireGuard, with `--host` set to that address;
+   - Tailscale (simplest): `--host` set to the machine's Tailscale address (100.x.y.z), and
+     the relayer uses `http://100.x.y.z:8300`. Use the address, not the machine's name: a
+     name could resolve anywhere;
    - an SSH tunnel from the relayer: `ssh -N -L 8301:127.0.0.1:8300 attester1`;
    - TLS through a reverse proxy, such as Caddy with `reverse_proxy 127.0.0.1:8300`.
 
    On mainnet the relayer refuses a plain `http://` URL unless it's on its own machine (a
-   tunnel's local end).
+   tunnel's local end) or a Tailscale address (100.64.0.0/10), which WireGuard already
+   encrypts and authenticates.
 
 ## On the relayer machine
 
@@ -77,6 +82,9 @@ python -m bridge run --interval 30
 
 At startup the relayer:
 - asks each attester for `/info`, and refuses one that signs for another chain or bridge;
+- refuses one whose relay fee differs, or whose mint TTL is shorter than the relayer's. Either
+  would make it refuse every mint. Other policy differences (minimum deposit, finality, hold,
+  manual review, checkpoint URL) are logged as warnings;
 - refuses two attesters that share one wallet.
 
 From then on it watches the remote attesters' wallets like its own: no code, and no new
