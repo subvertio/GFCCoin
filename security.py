@@ -46,6 +46,19 @@ def is_password_hash(stored: str) -> bool:
     return bool(stored) and stored.startswith(HASH_PREFIX)
 
 
+def find_username(conn: sqlite3.Connection, typed: str) -> str:
+    """
+    The account a typed username means, or "". Case doesn't matter, and leading "@"s are ignored
+    when no account has that exact name: the apps show names as "@Name", so people type them so.
+    """
+    typed = (typed or "").strip()
+    for name in (typed, typed.lstrip("@").strip()) if typed.startswith("@") else (typed,):
+        row = conn.execute("SELECT username FROM users WHERE LOWER(username) = LOWER(?)", (name,)).fetchone()             if name else None
+        if row:
+            return row[0]
+    return ""
+
+
 def verify_password(password: str, stored: str) -> bool:
     if not password or not is_password_hash(stored):
         return False
