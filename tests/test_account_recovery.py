@@ -221,5 +221,67 @@ class AccountRecoveryTests(unittest.TestCase):
         self.assertIn("expired", self.client.get("/account/email?f=nope").text)
 
 
+    # ---------- operator reset links (accounts with no verified phone or email) ----------
+
+    def operator_complete(self, f, password, recovery_code="", accept_locked=False):
+        return self.client.post("/reset/complete", data={
+            "f": f, "password": password, "password2": password, "recovery_code": recovery_code,
+            "accept_locked": "1" if accept_locked else ""})
+
+    def test_operator_link_resets_an_unverified_account(self):
+        name, token, code = self.register()
+        before = keystore.unlock_user_keys(name, "first-password", main.DB_PATH)
+        user, f = account_recovery.operator_reset_link(name.upper())  # usernames ignore case
+        self.assertEqual(user, name)
+        self.assertIn("Choose a new password", self.client.get(f"/reset/set?f={f}").text)
+        # The user's recovery code still decides the wallets
+        page = self.operator_complete(f, "second-password", code)
+        self.assertIn("Password changed", page.text)
+        self.assertEqual(keystore.unlock_user_keys(name, "second-password", main.DB_PATH), before)
+        self.assertEqual(self.client.get("/account/security", headers=self.auth(token)).status_code, 401)
+        self.assertEqual(self.login(name, "first-password").status_code, 401)
+        self.assertEqual(self.login(name, "second-password").status_code, 200)
+        # Once only
+        self.assertIn("expired", self.client.get(f"/reset/set?f={f}").text)
+        self.assertIn("expired", self.operator_complete(f, "third-password", accept_locked=True).text)
+
+    def test_operator_link_without_recovery_code_needs_consent(self):
+        name, _, _ = self.register()
+        _, f = account_recovery.operator_reset_link(name)
+        self.assertIn("Tick the box", self.operator_complete(f, "second-password").text)
+        page = self.operator_complete(f, "second-password", accept_locked=True)
+        self.assertIn("previous wallets are locked", page.text)
+        self.assertEqual(self.login(name, "second-password").status_code, 200)
+
+    def test_operator_link_expiry_replacement_and_proof_bypass(self):
+        name, _, _ = self.register()
+        _, old = account_recovery.operator_reset_link(name)
+        _, f = account_recovery.operator_reset_link(name)
+        self.assertIn("expired", self.client.get(f"/reset/set?f={old}").text)  # replaced by the new link
+        # Valid for a day, not just the 15 minutes a proven phone/email reset gets
+        conn = sqlite3.connect(main.DB_PATH)
+        conn.execute("UPDATE recovery_flows SET created_at = ?, proven_at = ? WHERE code_hash = ?",
+                     ("2000-01-01T00:00:00+00:00",) * 2 + (account_recovery._hash(f),))
+        conn.commit()
+        self.assertIn("expired", self.client.get(f"/reset/set?f={f}").text)
+        _, f = account_recovery.operator_reset_link(name)
+        hours_ago = (account_recovery._now() - account_recovery.datetime.timedelta(hours=20)).isoformat()
+        conn.execute("UPDATE recovery_flows SET created_at = ?, proven_at = ? WHERE code_hash = ?",
+                     (hours_ago, hours_ago, account_recovery._hash(f)))
+        conn.commit()
+        conn.close()
+        self.assertIn("Choose a new password", self.client.get(f"/reset/set?f={f}").text)
+        # A phone/email reset that was never proven can't skip to the password step
+        vname, _, _, number = self.verified_user()
+        with fb.enabled():
+            started = self.client.post("/reset/start", data={"username": vname, "method": "phone", "phone": number})
+        self.assertIn("expired", self.client.get(f"/reset/set?f={started.json()['flow']}").text)
+        self.assertIn("expired", self.client.get("/reset/set?f=nope").text)
+
+    def test_operator_link_unknown_user(self):
+        with self.assertRaises(account_recovery.RecoveryError) as ctx:
+            account_recovery.operator_reset_link("nobody-" + uuid.uuid4().hex[:6])
+        self.assertEqual(ctx.exception.status, 404)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

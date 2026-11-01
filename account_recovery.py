@@ -13,6 +13,10 @@ The node checks the Firebase ID token (phone_verify.py) and that it names the ac
 - Verify an email (signed in, from the app): proves an address so it can reset the password or
   change the phone later. One account per email.
 - Change the phone (lost or new number): prove the verified email, then the new number.
+- Operator reset (`python account_recovery.py reset-link USER`, or `gfc reset-link USER` on the
+  server): for an account with no verified phone or email, after the operator has confirmed who's
+  asking some other way. It makes a reset link that skips the proof; the user still chooses the
+  new password themselves, and their recovery code still decides whether the wallets come back.
 
 Flows are random codes (stored as hashes) bound to one account and one purpose, valid for
 FLOW_TTL; a proven reset must finish within PROVEN_TTL. At most STARTS_PER_DAY recovery starts
@@ -34,6 +38,7 @@ from security import hash_password
 
 FLOW_TTL = datetime.timedelta(minutes=30)     # long enough to fetch an email
 PROVEN_TTL = datetime.timedelta(minutes=15)   # from proof to the new password
+OPERATOR_TTL = datetime.timedelta(hours=24)   # an operator's reset link, sent to the user privately
 STARTS_PER_DAY = 5
 MIN_PASSWORD = 8
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$")
@@ -133,9 +138,10 @@ def _flow(conn: sqlite3.Connection, code: str, purpose: str) -> dict:
     if not row or row[4] == "done":
         raise expired
     flow = dict(zip(("username", "method", "contact", "new_contact", "stage", "created_at", "proven_at"), row))
-    if _now() - datetime.datetime.fromisoformat(flow["created_at"]) > FLOW_TTL:
+    operator = flow["method"] == "operator"
+    if _now() - datetime.datetime.fromisoformat(flow["created_at"]) > (OPERATOR_TTL if operator else FLOW_TTL):
         raise expired
-    if flow["stage"] == "proven" and _now() - datetime.datetime.fromisoformat(flow["proven_at"]) > PROVEN_TTL:
+    if flow["stage"] == "proven" and             _now() - datetime.datetime.fromisoformat(flow["proven_at"]) > (OPERATOR_TTL if operator else PROVEN_TTL):
         raise expired
     return flow
 
@@ -210,6 +216,40 @@ def prove(code: str, id_token: str, purpose: str = "reset", db_path: str = DB_PA
         _set(conn, code, stage="proven", proven_at=_now().isoformat())
         conn.commit()
         return flow["username"]
+    finally:
+        conn.close()
+
+
+def operator_reset_link(username: str, db_path: str = DB_PATH) -> tuple:
+    """
+    (username, flow code) for a reset that skips the phone/email proof: the operator has confirmed
+    who's asking some other way. Valid for OPERATOR_TTL and once; replaces the account's earlier
+    operator links. The code is a secret for that user only.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        init_tables(conn)
+        user = _canonical_user(conn, username)
+        if not user:
+            raise RecoveryError(404, f"No account named {username!r}.")
+        conn.execute("UPDATE recovery_flows SET stage = 'done' WHERE username = ? AND method = 'operator' "
+                     "AND stage != 'done'", (user,))
+        code = _new_flow(conn, user, "reset", "operator")
+        _set(conn, code, stage="proven", proven_at=_now().isoformat())
+        conn.commit()
+        return user, code
+    finally:
+        conn.close()
+
+
+def reset_ready(code: str, db_path: str = DB_PATH) -> Optional[str]:
+    """The username if this reset link can set a new password now, else None."""
+    conn = sqlite3.connect(db_path)
+    try:
+        flow = _flow(conn, code, "reset")
+        return flow["username"] if flow["stage"] == "proven" else None
+    except RecoveryError:
+        return None
     finally:
         conn.close()
 
@@ -371,3 +411,35 @@ def status(username: str, db_path: str = DB_PATH) -> dict:
         conn.close()
     return {"recovery_code": keystore.has_recovery_code(username, db_path),
             "email": mask_email(email), "email_verified": bool(email), "phone_verified": phone}
+
+
+def _cli(argv: list) -> int:
+    import sys
+    if len(argv) != 2 or argv[0] != "reset-link":
+        print("usage: python account_recovery.py reset-link USERNAME", file=sys.stderr)
+        return 2
+    from app_share import public_base_url
+    try:
+        user, code = operator_reset_link(argv[1])
+    except RecoveryError as ex:
+        print(ex.detail, file=sys.stderr)
+        return 1
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        email, phone = verified_email(conn, user), bool(_phone_hash_of(conn, user))
+    finally:
+        conn.close()
+    if email or phone:
+        print(f"Note: @{user} can reset it themselves at /reset with their verified "
+              f"{'phone' if phone else 'email'}.")
+    hours = int(OPERATOR_TTL.total_seconds() // 3600)
+    print(f"Reset link for @{user} (works once, for {hours} hours; earlier operator links no longer work):")
+    print(f"{public_base_url()}/reset/set?f={code}")
+    print("Send it to them privately, only after confirming it's really them: anyone with the link can set "
+          "the password. Their recovery code still decides whether their wallets come back.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    raise SystemExit(_cli(sys.argv[1:]))
