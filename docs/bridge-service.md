@@ -15,7 +15,11 @@ run against a throwaway ledger and a local `anvil` chain.
    row:
    - the hash is recomputed and must match;
    - the Ed25519 signature must verify;
-   - the row must be in a block and older than `finality_seconds`.
+   - the row must really be in its block (the block exists, holds only that deposit, and its
+     Merkle root is the deposit's hash), and **admitted** to this ledger more than
+     `finality_seconds` ago. The timestamp the depositor signed doesn't count: anyone can
+     backdate it (audit F08). See [ledger-checkpoints.md](ledger-checkpoints.md) for what's
+     still trusted.
 
    It doesn't matter how a row got into the DB. A row written straight into SQLite, or
    a forged peer row, fails the same checks.
@@ -112,10 +116,15 @@ key file and prints only the public key, which is what you pin. The passphrase c
 
 The hold on fresh free credit follows funds backwards (`deposits.fresh_faucet_cents`):
 
+- Ages are **admission times**: when the ledger accepted the row (its block's timestamp),
+  never the timestamp its signer chose. A transfer backdated to look older than the hold
+  is still inside it (audit F02).
 - Any GRANT, REFERRAL, FIRST_POST or REPOST credit a wallet received within the hold
   period is fresh.
 - Each incoming transfer within the hold period is fresh up to the amount of fresh
-  credit its sender held when it was sent. This is followed up to 3 hops back.
+  credit its sender held when it was sent. This is followed up to 3 hops back, and every
+  incoming transfer inside the hold is looked at: a pile of small transfers can't push a
+  fresh one out of view (F02).
 - Past 3 hops, or once a 500-lookup budget runs out, incoming transfers count as fresh.
   That way a long chain of wallets, or a huge history, can't be used to get around the
   check.

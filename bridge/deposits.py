@@ -9,6 +9,14 @@ The checks here don't rely on how the row got into the DB: the hash and the
 signature are re-verified, so a row written straight into SQLite (a tampered
 node, a bad sync) is rejected like a forged peer row would be. Funding was
 checked by the node when it accepted the row into a block (block_index set).
+
+Times are admission times: when the row entered this ledger, its block's timestamp. The
+timestamp inside a transaction is chosen by whoever signs it, so a sender could backdate a
+deposit past the finality wait, or a transfer past the free-credit hold (audit F02, F08).
+A deposit must also really be in its block: the block exists, holds exactly that deposit,
+and its Merkle root is that deposit's hash (F08: a row pointed at a made-up block number).
+That still trusts this node's database as a whole; signed checkpoints are what would let
+attesters on other nodes check it (docs/bridge-service.md).
 """
 
 import re
@@ -34,6 +42,11 @@ INVALID = "invalid"      # not a trustworthy row at all: ignore and alert
 
 TX_FIELDS = ("id", "sender", "recipient", "amount_cents", "reason", "timestamp", "tx_hash", "tx_type",
              "signature", "signer", "block_index")
+# Read with every deposit: its block's timestamp (admission time), Merkle root and size
+BLOCK_FIELDS = ("admitted_at", "block_merkle_root", "block_tx_count", "block_rows")
+_ROW_SQL = (f"SELECT {', '.join('t.' + f for f in TX_FIELDS)}, b.timestamp, b.merkle_root, b.tx_count, "
+            "(SELECT COUNT(*) FROM transactions x WHERE x.block_index = t.block_index) "
+            "FROM transactions t LEFT JOIN blocks b ON b.block_index = t.block_index")
 
 
 def parse_ts(value: str) -> Optional[datetime]:
@@ -41,11 +54,10 @@ def parse_ts(value: str) -> Optional[datetime]:
 
 
 def deposit_rows(conn: sqlite3.Connection, escrow: str) -> Iterator[dict]:
-    cur = conn.execute(
-        f"SELECT {', '.join(TX_FIELDS)} FROM transactions WHERE recipient = ? AND tx_type = ? "
-        "AND block_index IS NOT NULL ORDER BY timestamp", (escrow, blockchain.TX_TYPE_TRANSFER))
+    cur = conn.execute(f"{_ROW_SQL} WHERE t.recipient = ? AND t.tx_type = ? AND t.block_index IS NOT NULL "
+                       "ORDER BY t.block_index", (escrow, blockchain.TX_TYPE_TRANSFER))
     for row in cur:
-        yield dict(zip(TX_FIELDS, row))
+        yield dict(zip(TX_FIELDS + BLOCK_FIELDS, row))
 
 
 def refunded(conn: sqlite3.Connection, escrow: str, tx_hash: str) -> bool:
@@ -55,9 +67,20 @@ def refunded(conn: sqlite3.Connection, escrow: str, tx_hash: str) -> bool:
 
 
 def deposit_by_hash(conn: sqlite3.Connection, tx_hash: str) -> Optional[dict]:
-    row = conn.execute(f"SELECT {', '.join(TX_FIELDS)} FROM transactions WHERE tx_hash = ?",
-                       (tx_hash,)).fetchone()
-    return dict(zip(TX_FIELDS, row)) if row else None
+    row = conn.execute(f"{_ROW_SQL} WHERE t.tx_hash = ?", (tx_hash,)).fetchone()
+    return dict(zip(TX_FIELDS + BLOCK_FIELDS, row)) if row else None
+
+
+def _block_problem(tx: dict) -> Optional[str]:
+    """Why the deposit isn't really in the block its row names, or None."""
+    if "admitted_at" not in tx:
+        return "read without its block (use deposit_rows / deposit_by_hash)"
+    if tx["admitted_at"] is None:
+        return f"its block {tx['block_index']} isn't in this ledger"
+    if tx["block_rows"] != 1 or tx["block_tx_count"] != 1 or \
+            tx["block_merkle_root"] != blockchain.compute_merkle_root([tx["tx_hash"]]):
+        return f"block {tx['block_index']} doesn't hold exactly this deposit"
+    return None
 
 
 def validate_deposit(tx: dict, cfg, now: Optional[datetime] = None) -> Tuple[str, str, Optional[dict]]:
@@ -82,6 +105,12 @@ def validate_deposit(tx: dict, cfg, now: Optional[datetime] = None) -> Tuple[str
     ts = parse_ts(tx.get("timestamp"))
     if ts is None:
         return INVALID, "bad timestamp", None
+    problem = _block_problem(tx)
+    if problem:
+        return INVALID, problem, None
+    admitted = parse_ts(tx["admitted_at"])
+    if admitted is None:
+        return INVALID, "its block has a bad timestamp", None
 
     m = REASON_RE.match(tx.get("reason") or "")
     if m and int(m.group(1)) != cfg.chain_id:
@@ -93,7 +122,7 @@ def validate_deposit(tx: dict, cfg, now: Optional[datetime] = None) -> Tuple[str
         return REFUND, "zero destination address", _deposit(tx, evm_to, 0)
     if amount < cfg.min_deposit_cents or amount <= cfg.relay_fee_cents:
         return REFUND, f"below the {cfg.min_deposit_cents / 100:.2f} GFC minimum", _deposit(tx, evm_to, 0)
-    if now - ts < timedelta(seconds=cfg.finality_seconds):
+    if now - admitted < timedelta(seconds=cfg.finality_seconds):  # the signed timestamp doesn't count
         return NOT_FINAL, "inside the finality window", None
     return OK, "", _deposit(tx, evm_to, amount - cfg.relay_fee_cents)
 
@@ -107,9 +136,11 @@ def _deposit(tx: dict, evm_to: str, mint_cents: int) -> dict:
 # transfer is counted as fresh up to the fresh credit its sender held when it was sent,
 # followed this many hops back, with a lookup budget so a wallet with a huge history can't
 # make the check expensive (past the budget, incoming transfers count as fresh).
+# Ages are admission times, so a backdated transfer can't make fresh credit look old, and
+# every incoming transfer inside the hold is looked at: nothing is dropped unseen (audit F02:
+# 200 one-cent transfers used to push a fresh 100 GFC out of view).
 FRESH_TRACE_DEPTH = 3
 FRESH_TRACE_BUDGET = 500
-FRESH_TRACE_FAN_IN = 200
 
 
 def fresh_faucet_cents(conn: sqlite3.Connection, wallet: str, now: datetime, hold_days: float,
@@ -126,25 +157,29 @@ def fresh_faucet_cents(conn: sqlite3.Connection, wallet: str, now: datetime, hol
     return _fresh(conn, wallet, since, before_block, FRESH_TRACE_DEPTH, exclude, frozenset([wallet]), budget)
 
 
+def _admitted_after(ts: Optional[str], since: datetime) -> bool:
+    """Admitted inside the hold. An unreadable time counts as inside: fail closed."""
+    t = parse_ts(ts)
+    return t is None or t > since
+
+
 def _fresh(conn, wallet, since, before_block, depth, exclude, path, budget) -> int:
     budget[0] -= 1
-    block_sql = " AND block_index < ?" if before_block is not None else ""
+    block_sql = " AND t.block_index < ?" if before_block is not None else ""
     block_arg = (before_block,) if before_block is not None else ()
     fresh = 0
-    for amount, ts in conn.execute(
-            f"SELECT amount_cents, timestamp FROM transactions WHERE recipient = ? AND block_index IS NOT NULL "
-            f"AND tx_type IN ({','.join('?' * len(FAUCET_TX_TYPES))}){block_sql}",
+    for amount, admitted in conn.execute(
+            f"SELECT t.amount_cents, b.timestamp FROM transactions t JOIN blocks b ON b.block_index = t.block_index "
+            f"WHERE t.recipient = ? AND t.tx_type IN ({','.join('?' * len(FAUCET_TX_TYPES))}){block_sql}",
             (wallet, *FAUCET_TX_TYPES, *block_arg)):
-        t = parse_ts(ts)
-        if t and t > since:
+        if _admitted_after(admitted, since):
             fresh += amount
     incoming = conn.execute(
-        f"SELECT sender, amount_cents, timestamp, block_index FROM transactions WHERE recipient = ? "
-        f"AND tx_type = ? AND block_index IS NOT NULL{block_sql} ORDER BY block_index DESC LIMIT ?",
-        (wallet, blockchain.TX_TYPE_TRANSFER, *block_arg, FRESH_TRACE_FAN_IN)).fetchall()
-    for sender, amount, ts, block in incoming:
-        t = parse_ts(ts)
-        if not t or t <= since or sender in exclude or sender in path:
+        f"SELECT t.sender, t.amount_cents, b.timestamp, t.block_index FROM transactions t "
+        f"JOIN blocks b ON b.block_index = t.block_index WHERE t.recipient = ? AND t.tx_type = ?{block_sql} "
+        f"ORDER BY t.block_index DESC", (wallet, blockchain.TX_TYPE_TRANSFER, *block_arg))
+    for sender, amount, admitted, block in incoming:
+        if not _admitted_after(admitted, since) or sender in exclude or sender in path:
             continue
         if depth <= 0 or budget[0] <= 0:
             fresh += amount  # can't look further back: assume the worst
