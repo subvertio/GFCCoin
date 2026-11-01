@@ -79,6 +79,12 @@ class BridgeConfig:
     # the secret it shares with this relayer
     remote_attester_urls: List[str] = field(default_factory=list)
     remote_attester_secret_files: List[str] = field(default_factory=list)
+    # Signed ledger checkpoints (bridge/checkpoints.py): the canonical node's URL, the pinned
+    # checkpoint keys, and this machine's copy of the log. Mainnet needs them.
+    checkpoint_url: str = ""
+    checkpoint_pubkeys: List[str] = field(default_factory=list)
+    checkpoint_db: str = ""
+    checkpoint_network: str = "mainnet"
 
     @property
     def is_testnet(self) -> bool:
@@ -96,6 +102,9 @@ class BridgeConfig:
                             "to confirm burns")
         if self.rpc_url in self.verify_rpc_urls:
             problems.append("a verifying RPC is the main RPC itself")
+        if not self.checkpoint_url or not self.checkpoint_pubkeys:
+            problems.append("GFC_BRIDGE_CHECKPOINT_URL is empty or no checkpoint key is pinned: mainnet attesters "
+                            "need signed ledger checkpoints")
         from bridge.attester_http import is_private_url
         for url in self.remote_attester_urls:
             if not is_private_url(url):
@@ -113,14 +122,16 @@ class BridgeConfig:
         def num(name: str, attr: str, kind=int):
             return kind(e[name]) if e.get(name) else defaults[attr].default
 
+        import config
         from config import DB_PATH, DATA_DIR
+        state_db = e.get("GFC_BRIDGE_STATE_DB", str(Path(DATA_DIR) / "bridge_state.db"))
         return cls(
             rpc_url=e.get("GFC_BRIDGE_RPC_URL", ""),  # an attester server doesn't need one
             chain_id=int(e["GFC_BRIDGE_CHAIN_ID"]),
             bridge_address=e["GFC_BRIDGE_ADDRESS"],
             escrow_wallet=e["GFC_BRIDGE_ESCROW_WALLET"].lower(),
             ledger_db=e.get("GFC_BRIDGE_LEDGER_DB", DB_PATH),
-            state_db=e.get("GFC_BRIDGE_STATE_DB", str(Path(DATA_DIR) / "bridge_state.db")),
+            state_db=state_db,
             finality_seconds=num("GFC_BRIDGE_FINALITY_SECONDS", "finality_seconds"),
             chain_finality=e.get("GFC_BRIDGE_CHAIN_FINALITY", "finalized"),
             start_block=num("GFC_BRIDGE_START_BLOCK", "start_block"),
@@ -146,6 +157,10 @@ class BridgeConfig:
             verify_rpc_urls=_list(e.get("GFC_BRIDGE_VERIFY_RPC_URLS", "")),
             remote_attester_urls=_list(e.get("GFC_BRIDGE_REMOTE_ATTESTER_URLS", "")),
             remote_attester_secret_files=_list(e.get("GFC_BRIDGE_REMOTE_ATTESTER_SECRET_FILES", "")),
+            checkpoint_url=e.get("GFC_BRIDGE_CHECKPOINT_URL", ""),
+            checkpoint_pubkeys=list(config.CHECKPOINT_PUBKEYS),
+            checkpoint_db=e.get("GFC_BRIDGE_CHECKPOINT_DB", str(Path(state_db).with_suffix("")) + "-checkpoints.db"),
+            checkpoint_network=config.NETWORK,
             max_gas_per_mint=num("GFC_BRIDGE_MAX_GAS_PER_MINT", "max_gas_per_mint"),
             max_fee_per_gas_wei=int(float(e["GFC_BRIDGE_MAX_FEE_GWEI"]) * GWEI) if e.get("GFC_BRIDGE_MAX_FEE_GWEI")
             else defaults["max_fee_per_gas_wei"].default,

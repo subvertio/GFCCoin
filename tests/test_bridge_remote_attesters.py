@@ -138,7 +138,7 @@ class RemoteAttesterTests(EscrowTestCase):
 
     def test_mainnet_refuses_a_plain_http_attester_elsewhere(self):
         main = replace(self.cfg, chain_id=8453, chain_finality="finalized", rpc_url="https://a",
-                       verify_rpc_urls=["https://b"])
+                       verify_rpc_urls=["https://b"], checkpoint_url="https://node", checkpoint_pubkeys=["ab" * 32])
         self.assertEqual(replace(main, remote_attester_urls=["https://att.example", "http://127.0.0.1:8300"]
                                  ).mainnet_problems(), [])
         self.assertTrue(replace(main, remote_attester_urls=["http://10.0.0.5:8300"]).mainnet_problems())

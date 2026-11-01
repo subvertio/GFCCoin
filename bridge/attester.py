@@ -15,6 +15,9 @@ Policy (on top of validity):
   first-post and repost bonuses younger than faucet_hold_days don't count, also
   when they were passed through other wallets (deposits.fresh_faucet_cents);
 - deposits above manual_review_cents need their tx_hash in the approvals file;
+- with checkpoints configured (bridge/checkpoints.py), the deposit is in the canonical node's
+  signed log under a checkpoint at least finality_seconds old, and the log has never been
+  rolled back: every attester judges against the same history (audit F08);
 - the deadline is in the future and no further out than the mint TTL (plus a minute of
   clock skew): a far-off deadline would keep a signature usable long after the relayer
   thinks it expired, and a refund could then race it.
@@ -45,6 +48,8 @@ class Attester:
         self.ledger_db = ledger_db or cfg.ledger_db
         self._key = key or read_evm_key(cfg.attester_key_file)
         self.address = Account.from_key(self._key).address
+        from bridge import checkpoints
+        self.checkpoints = checkpoints.from_config(cfg)
 
     def attest(self, tx_hash: str, evm_to: str, mint_cents: int, deadline: int,
                now: Optional[datetime] = None) -> Attestation:
@@ -82,6 +87,10 @@ class Attester:
                 return Attestation(self.address, None, "needs manual approval", retry=True)
         finally:
             conn.close()
+        if self.checkpoints is not None:
+            ok, why, retry = self.checkpoints.covered(tx_hash, now, self.cfg.finality_seconds)
+            if not ok:
+                return Attestation(self.address, None, why, retry=retry)
 
         req = eip712.mint_request(tx_hash, evm_to, mint_cents, deadline)
         signer, sig = eip712.sign_mint(self._key, self.cfg.chain_id, self.cfg.bridge_address, req)

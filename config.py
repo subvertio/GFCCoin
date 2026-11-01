@@ -48,6 +48,16 @@ IS_TESTNET = bool(_env_treasury.strip())
 NETWORK = "testnet" if IS_TESTNET else "mainnet"
 REQUIRE_PHONE_TO_POST = not IS_TESTNET
 
+# Ledger checkpoint keys (Ed25519, hex): the canonical node signs checkpoints of the ledger
+# with one of these (ledger_checkpoints.py), and bridge attesters trust only these. Empty
+# until a checkpoint key exists (`python ledger_checkpoints.py new-key FILE`).
+# GFC_CHECKPOINT_PUBKEYS (comma-separated) replaces this, for test networks.
+PINNED_CHECKPOINT_PUBKEYS = ()
+_env_checkpoint = os.environ.get("GFC_CHECKPOINT_PUBKEYS", "")
+CHECKPOINT_PUBKEYS = tuple(
+    k.strip().lower() for k in _env_checkpoint.split(",") if k.strip()
+) if _env_checkpoint.strip() else PINNED_CHECKPOINT_PUBKEYS
+
 # Bridge escrow wallets (Ed25519 public keys), one per EVM chain ID: {chain_id: wallet}.
 # Every node enforces the escrow rules in blockchain.bridge_rule_violation() for these
 # wallets, so this is consensus config: change it in a release all nodes take.

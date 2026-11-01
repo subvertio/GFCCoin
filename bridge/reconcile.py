@@ -18,6 +18,8 @@ Checks:
      and cleared between two checks still shows here (audit F13)
   g. every independent RPC provider (GFC_BRIDGE_VERIFY_RPC_URLS) agrees on the bridge's
      totals and the token supply at a block both treat as final (audit F09)
+  h. with signed ledger checkpoints, the checkpoint copy hasn't halted (the canonical ledger
+     was never rolled back) and the latest checkpoint's escrow covers the wrapped supply
 Escrow may hold more than that (relay fees, deposits awaiting mint or refund).
 
 Chain reads are pinned to one block, and the escrow balance and unpaid releases are read in
@@ -181,7 +183,7 @@ def verifier_problems(cfg: BridgeConfig, bridge: BridgeContract, verifiers) -> L
 
 def reconcile(cfg: BridgeConfig, store: Store, bridge: BridgeContract,
               pauser_key: Optional[str] = None, own_keys: Iterable[Optional[str]] = (),
-              quiet_keys: Iterable[Optional[str]] = (), verifiers=()) -> Report:
+              quiet_keys: Iterable[Optional[str]] = (), verifiers=(), checkpoints=None) -> Report:
     """
     own_keys: the other EVM keys this service holds (relayer, in-process attesters), to watch too.
     quiet_keys: those of them that never send transactions (the attesters); the pauser is quiet too.
@@ -201,6 +203,7 @@ def reconcile(cfg: BridgeConfig, store: Store, bridge: BridgeContract,
         report.problems.append(f"token supply {supply} != bridge books {report.outstanding_cents} cents")
     report.problems += verifier_problems(cfg, bridge, verifiers)
 
+    report.problems += checkpoint_problems(cfg, checkpoints, report.outstanding_cents)
     report.escrow_cents, report.unpaid_release_cents = _ledger_and_state(cfg, store)
     owed = report.outstanding_cents + report.unpaid_release_cents
     if report.escrow_cents < owed:
@@ -243,6 +246,28 @@ def reconcile(cfg: BridgeConfig, store: Store, bridge: BridgeContract,
             except RPCError as e:
                 logger.error(f"Reconcile: pause failed: {e}")
     return report
+
+
+def checkpoint_problems(cfg: BridgeConfig, mirror, outstanding_cents: int) -> List[str]:
+    """Check h: the checkpoint copy is healthy and its latest escrow balance covers the supply."""
+    if mirror is None:
+        return []
+    from bridge.checkpoints import CheckpointError
+    try:
+        mirror.sync(force=True)
+    except CheckpointError as e:
+        logger.warning(f"Reconcile: checkpoint sync failed: {e}")
+    why = mirror.halted()
+    if why:
+        return [f"ledger checkpoints halted: {why}"]
+    latest = mirror.latest()
+    if latest is None:
+        return ["no signed ledger checkpoint yet"]
+    escrow = latest.get("escrows", {}).get(str(cfg.chain_id))
+    if escrow is None or escrow < outstanding_cents:
+        return [f"the latest checkpoint's escrow ({escrow} cents) doesn't cover the wrapped supply "
+                f"({outstanding_cents} cents)"]
+    return []
 
 
 def _expected_mint(store: Store, dep: dict) -> int:

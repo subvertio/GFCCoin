@@ -24,6 +24,10 @@ usage: gfc <command>
                         (default F: /var/lib/gfc/treasury.backup; needs ssh -t)
   encrypt-treasury      encrypt the treasury key file with the passphrase saved
                         in the settings (set GFC_TREASURY_PASSPHRASE via gfc config first)
+  new-checkpoint-key    create the ledger checkpoint key (encrypted with the saved
+                        GFC_CHECKPOINT_PASSPHRASE) and print its public key to pin in
+                        config.py PINNED_CHECKPOINT_PUBKEYS; the node signs checkpoints
+                        once that's pinned and it restarts (docs/ledger-checkpoints.md)
   rotate-treasury       step 1 of replacing the treasury key: create the new key
                         (encrypted with the saved passphrase) and print its public
                         key to pin in config.py
@@ -223,6 +227,16 @@ next_is_pinned() {
     as_gfc "$VENV/bin/python" -c 'import signing, sys; sys.exit(0 if sys.argv[1] in signing.treasury_pubkeys() else 1)' "$1"
 }
 
+cmd_new_checkpoint_key() {
+    need_root
+    local keyfile; keyfile="$(env_value GFC_CHECKPOINT_KEY_FILE)"; keyfile="${keyfile:-$DATA_DIR/checkpoint_key.hex}"
+    [[ -f "$keyfile" ]] && die "$keyfile already exists; not replacing it"
+    as_gfc bash -c '[[ ${#GFC_CHECKPOINT_PASSPHRASE} -ge 12 ]]' \
+        || die "set GFC_CHECKPOINT_PASSPHRASE (12+ characters) first: ssh -t gfc-node gfc config"
+    as_gfc "$VENV/bin/python" ledger_checkpoints.py new-key "$keyfile" || die "could not create the checkpoint key"
+    echo "Next: pin that public key in config.py PINNED_CHECKPOINT_PUBKEYS, merge, then 'gfc update'."
+}
+
 cmd_rotate_treasury() {
     need_root
     local keyfile; keyfile="$(env_value GFC_TREASURY_KEY_FILE)"; keyfile="${keyfile:-$DATA_DIR/treasury_key.hex}"
@@ -331,6 +345,7 @@ case "${1:-}" in
     restore-treasury) shift; cmd_restore_treasury "$@" ;;
     encrypt-treasury) cmd_encrypt_treasury ;;
     rotate-treasury)  shift; cmd_rotate_treasury "$@" ;;
+    new-checkpoint-key) cmd_new_checkpoint_key ;;
     grant)            shift; cmd_grant "$@" ;;
     grants)           need_root; as_gfc "$VENV/bin/python" treasury_grants.py list ;;
     reset-link)       need_root; [[ $# -eq 2 ]] || die "usage: gfc reset-link USERNAME"
