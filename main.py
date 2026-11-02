@@ -41,6 +41,8 @@ from app_follows import router as follows_router
 from app_ads import router as ads_router
 from app_connect import router as connect_router
 import app_connect
+from app_discord import router as discord_router
+import app_discord
 import ads
 import app_follows
 import audio_stream
@@ -112,6 +114,7 @@ app.include_router(bridge_router)
 app.include_router(follows_router)
 app.include_router(ads_router)
 app.include_router(connect_router)
+app.include_router(discord_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
@@ -206,6 +209,7 @@ def init_db():
     app_follows.init_tables(conn)
     ads.init_tables(conn)
     app_connect.init_tables(conn)
+    app_discord.init_tables(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS bookmarks (
         id TEXT PRIMARY KEY,
         seed_id TEXT NOT NULL,
@@ -731,6 +735,11 @@ async def startup_event():
     # notarises them, oldest first). In the background: images and models take a while.
     import threading
     threading.Thread(target=_backfill_fingerprints, daemon=True).start()
+    # Discord: retry role changes that failed and drop links whose account lost its phone verification
+    try:
+        app_discord.start_reconciler()
+    except Exception as e:
+        print(f"[Discord] reconciler not started: {e}")
     # Canonical node: signed ledger checkpoints for the bridge attesters (only with a pinned key)
     try:
         import ledger_checkpoints
