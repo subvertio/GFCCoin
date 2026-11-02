@@ -1,8 +1,8 @@
 """
 GFC Bridge API - move GFC from the ledger to its ERC-20 on Base ("Bridge to Base").
 
-- GET  /bridge/info                        chains with a pinned escrow, the token address once
-                                           deployed, and the deposit policy (min, fee, hold)
+- GET  /bridge/info                        chains with a pinned escrow, the token and bridge contract
+                                           addresses once deployed, and the deposit policy (min, fee, hold)
 - GET  /bridge/quote?wallet_id=W           W's balance and how much of it can be bridged now
 - POST /bridge/deposit (Bearer, spend)     {wallet_id, chain_id, evm_address, amount}: a signed
                                            TRANSFER to that chain's escrow with the exact reason
@@ -61,6 +61,7 @@ def bridge_info():
         "name": config.CHAIN_NAMES.get(chain_id, f"Chain {chain_id}"),
         "escrow_wallet": escrow,
         "token_address": config.BRIDGE_TOKENS.get(chain_id),  # None until the token is deployed
+        "bridge_address": config.BRIDGE_CONTRACTS.get(chain_id),  # where bridging back starts
     } for chain_id, escrow in sorted(config.BRIDGE_ESCROWS.items())]
     return {
         "enabled": bool(chains),
