@@ -149,6 +149,16 @@ class ReferralTests(unittest.TestCase):
         self.assertNotIn("<script>", bad.text)
         self.assertIn("Join GFC", bad.text)
 
+    def test_join_page_sends_iphones_to_the_web_app_with_the_invite(self):
+        inviter, _, _, _ = self.register()
+        iphone = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 "
+                                "(KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"}
+        r = self.client.get("/join", params={"ref": inviter}, headers=iphone)
+        self.assertIn(f'href="/app/web/?ref={inviter}"', r.text)
+        self.assertIn("Add to Home Screen", r.text)
+        self.assertNotIn("gfc://join", r.text)  # no app to open on an iPhone
+        self.assertIn("User-Agent", r.headers["vary"])
+
     def test_share_page_passes_ref_to_app(self):
         _, token, _, _ = self.register()
         files = {"file": ("pic.png", os.urandom(5000), "image/png")}

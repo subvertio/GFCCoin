@@ -322,7 +322,16 @@ def join_page(request: Request):
     title = f"{inviter} invited you to GFC" if inviter else "Join GFC"
     description = ("Discover 3D art, music and video from independent creators, and earn GFC for the "
                    "creators you watch. Join with this invite for a 100 GFC welcome bonus.")
-    app_link = _app_link(_with_ref("join", inviter), url, request.headers.get("user-agent", ""))
+    ua = request.headers.get("user-agent", "")
+    app_link = _app_link(_with_ref("join", inviter), url, ua)
+    if app_release.visitor_platform(ua) == "ios":
+        # iPhone: the web app, which fills in "Invited by" from ?ref= at sign-up
+        web = "/app/web/" + (f"?ref={quote(inviter, safe='')}" if inviter else "")
+        actions = (f'<a href="{e(web)}">Join GFC on iPhone</a></p>'
+                   '<p class="note">Create your account on the page that opens (your invite is already filled in), '
+                   'then tap <b>Share</b> &rarr; <b>Add to Home Screen</b> to keep GFC on your iPhone.')
+    else:
+        actions = f'<a href="{e(app_link)}">Open in GFC</a>{GET_APP_LINK if app_release.info() else ""}'
     nonce = secrets.token_urlsafe(16)
     page = f"""<!doctype html>
 <html lang="en">
@@ -346,13 +355,15 @@ main{{max-width:560px;margin:0 auto;padding:48px 16px;text-align:center}}
 h1{{font-size:1.6rem}}
 p{{line-height:1.5;color:#b8bccc}}
 .actions a{{display:inline-block;margin-top:16px;padding:12px 20px;border-radius:8px;background:#3b4cca;color:#fff;text-decoration:none}}
+.note{{font-size:.9rem}}
+.note b{{color:#e8e9f0}}
 </style>
 </head>
 <body>
 <main>
 <h1>{e(title)}</h1>
 <p>{e(description)}</p>
-<p class="actions"><a href="{e(app_link)}">Open in GFC</a>{GET_APP_LINK if app_release.info() else ""}</p>
+<p class="actions">{actions}</p>
 </main>
 </body>
 </html>
