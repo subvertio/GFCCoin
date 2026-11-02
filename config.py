@@ -65,7 +65,9 @@ CHECKPOINT_PUBKEYS = tuple(
 # wallets, so this is consensus config: change it in a release all nodes take.
 # Empty until an escrow key exists (`python -m bridge new-escrow-key FILE`).
 # GFC_BRIDGE_ESCROWS ("84532:<pubkey>,8453:<pubkey>") replaces this, for test networks.
-PINNED_BRIDGE_ESCROWS = {}
+PINNED_BRIDGE_ESCROWS = {
+    8453: "4465d7bcd8ad00a4ac6f09816cff3a46d5ef25f4f28c49e462d558b92532dcc2",  # Base mainnet, created 2026-11-01
+}
 _env_escrows = os.environ.get("GFC_BRIDGE_ESCROWS", "")
 BRIDGE_ESCROWS = {
     int(pair.split(":", 1)[0]): pair.split(":", 1)[1].strip().lower()
