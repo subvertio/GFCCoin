@@ -144,7 +144,7 @@ def settle_mints(cfg: BridgeConfig, store: Store, bridge: BridgeContract, counts
             store.set_deposit(d["tx_hash"], MINTED, "")
             status = MINTED
         elif d["evm_tx"] and d["attested_until"] > now.timestamp() and not bridge.processed(h) and \
-                bridge.chain.receipt(d["evm_tx"]) is None:
+                _no_receipt(bridge, d["evm_tx"]):
             continue  # still in flight
         elif not bridge.processed(h):
             store.set_deposit(d["tx_hash"], SEEN, "the mint isn't on chain any more (reorg or revert): retrying")
@@ -154,6 +154,16 @@ def settle_mints(cfg: BridgeConfig, store: Store, bridge: BridgeContract, counts
             continue  # on chain, not final yet
         if counts is not None:
             counts[status] += 1
+
+
+def _no_receipt(bridge: BridgeContract, evm_tx: str) -> bool:
+    """True while the tx has no receipt; a provider refusing to answer counts as no receipt yet,
+    so one mint's lookup can't fail the whole pass (its attestations expire, then it's retried)."""
+    try:
+        return bridge.chain.receipt(evm_tx) is None
+    except RPCError as e:
+        logger.warning(f"Receipt check for mint tx {evm_tx[:12]} failed: {e}")
+        return True
 
 
 def run_forever(cfg: BridgeConfig, store: Store, bridge: BridgeContract, attesters: List, relayer_key: str,

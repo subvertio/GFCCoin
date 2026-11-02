@@ -254,5 +254,61 @@ class StuckNonceTests(unittest.TestCase):
         self.assertEqual(len(chain.sent), 1)
 
 
+class SwallowingRPC(StuckNonceRPC):
+    """publicnode on 2026-11-02: takes a tx and returns its hash, never forwards it, and refuses
+    receipt checks for it with HTTP 403."""
+    def __init__(self, refuse_sends=False):
+        super().__init__(holding_fee=0, refuse_receipts=0)
+        self.refuse_sends, self.raw = refuse_sends, []
+
+    def rpc(self, method, params):
+        if method == "eth_sendRawTransaction":
+            self.raw.append(params[0])
+            if self.refuse_sends:
+                raise RPCError("main rpc eth_sendRawTransaction: HTTP 403")
+            return "0x" + "ab" * 32
+        if method == "eth_getTransactionReceipt":
+            raise RPCError("main rpc eth_getTransactionReceipt: HTTP 403")
+        return super().rpc(method, params)
+
+
+class HonestRPC(StuckNonceRPC):
+    def __init__(self):
+        super().__init__(holding_fee=0, refuse_receipts=0)
+        self.label, self.raw = "verify rpc #1", []
+
+    def rpc(self, method, params):
+        if method == "eth_sendRawTransaction":
+            self.raw.append(params[0])
+            return "0x" + "ab" * 32
+        return super().rpc(method, params)
+
+
+class BroadcastTests(unittest.TestCase):
+    KEY = "0x" + "11" * 32
+
+    def test_every_tx_also_goes_out_through_the_broadcast_providers(self):
+        main, other = SwallowingRPC(), HonestRPC()
+        main.broadcast = [other]
+        r = main.send(self.KEY, BRIDGE, "0x", gas=100_000)
+        self.assertEqual(r["status"], "0x1")  # the receipt came from the honest provider
+        self.assertEqual(main.raw, other.raw)  # the same signed tx went to both
+
+    def test_a_refused_send_still_goes_out_through_another_provider(self):
+        main, other = SwallowingRPC(refuse_sends=True), HonestRPC()
+        main.broadcast = [other]
+        self.assertEqual(main.send(self.KEY, BRIDGE, "0x", gas=100_000)["status"], "0x1")
+        main.broadcast = []
+        with self.assertRaises(RPCError):
+            main.send(self.KEY, BRIDGE, "0x", gas=100_000)
+
+    def test_a_refused_receipt_check_does_not_fail_the_relay_pass(self):
+        from bridge import relayer
+
+        class Bridge:
+            chain = SwallowingRPC()
+        self.assertTrue(relayer._no_receipt(Bridge(), "0x" + "cd" * 32))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

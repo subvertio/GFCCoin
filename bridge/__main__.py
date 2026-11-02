@@ -262,6 +262,7 @@ def main(argv=None) -> int:
         if c.chain_id() != cfg.chain_id:
             print(f"{c.label} is chain {c.chain_id()}, config says {cfg.chain_id}", file=sys.stderr)
             return 2
+    chain.broadcast = verifiers  # every tx also goes out through them (see Chain.broadcast)
     bridge = BridgeContract(chain, cfg.bridge_address)
     if args.cmd == "roles":
         from bridge.roles import inventory
