@@ -198,7 +198,11 @@ def _time(value: str) -> Optional[datetime]:
     """An ISO time with a zone ("2026-11-01T02:00:00+00:00"), or None when empty."""
     if not value.strip():
         return None
-    t = datetime.fromisoformat(value.strip())
+    try:
+        t = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise SystemExit(f"GFC_BRIDGE_DEPOSITS_FROM {value.strip()!r} isn't an ISO time "
+                         "(e.g. 2026-11-01T02:00:00+00:00)") from None
     if t.tzinfo is None:
         raise SystemExit("GFC_BRIDGE_DEPOSITS_FROM needs a time zone, e.g. 2026-11-01T02:00:00+00:00")
     return t
