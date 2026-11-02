@@ -78,6 +78,8 @@ def _serve_attester(cfg: BridgeConfig, host: str, port: int) -> int:
     if problems and not cfg.is_testnet:
         return 2
     attester = Attester(cfg, key=read_evm_key(cfg.attester_key_file))
+    if attester.checkpoints is not None:
+        attester.checkpoints.start_background_sync()  # judge finality from when checkpoints appear
     server = attester_http.make_server(attester, attester_http.read_secret(secret_file), host, port)
     logger.info(f"Attester {attester.address} signing for chain {cfg.chain_id} bridge {cfg.bridge_address} "
                 f"from ledger {cfg.ledger_db}, on {host}:{port}")
