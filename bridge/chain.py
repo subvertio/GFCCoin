@@ -71,6 +71,10 @@ class Chain:
         self._url = rpc_url
         self._id = 0
         self.label = label  # how logs and errors name this provider: never its URL
+        # Other providers that also get every tx this one sends, and answer receipt checks when it
+        # won't. Seen on mainnet 2026-11-02: publicnode accepted the relayer's mints without ever
+        # forwarding them, then answered HTTP 403 to receipt checks for them.
+        self.broadcast: List["Chain"] = []
 
     def close(self):
         self._http.close()
@@ -135,7 +139,27 @@ class Chain:
         return block["hash"].lower() if block else None
 
     def receipt(self, tx_hash: str) -> Optional[dict]:
-        return self.rpc("eth_getTransactionReceipt", [tx_hash])
+        """The receipt, None while there isn't one. Asks the broadcast providers if this one refuses."""
+        error = None
+        for c in [self, *getattr(self, "broadcast", [])]:
+            try:
+                return c.rpc("eth_getTransactionReceipt", [tx_hash])
+            except RPCError as e:
+                error = error or e
+        raise error
+
+    def send_raw(self, raw: str) -> str:
+        """Send to this provider and every broadcast one; the hash if any of them took it."""
+        hashes, errors = [], []
+        for c in [self, *getattr(self, "broadcast", [])]:
+            try:
+                hashes.append(c.rpc("eth_sendRawTransaction", [raw]))
+            except RPCError as e:
+                errors.append(e)
+        if hashes:
+            return hashes[0]
+        stuck = [e for e in errors if any(s in str(e) for s in STUCK_NONCE)]
+        raise (stuck or errors)[0]
 
     def logs(self, address: str, topic0: str, from_block: int, to_block: int, chunk: int = 5_000) -> List[dict]:
         out = []
@@ -187,7 +211,7 @@ class Chain:
                 unsigned["to"] = tx["to"]
             signed = acct.sign_transaction(unsigned)
             try:
-                tx_hash = self.rpc("eth_sendRawTransaction", ["0x" + signed.raw_transaction.hex().removeprefix("0x")])
+                tx_hash = self.send_raw("0x" + signed.raw_transaction.hex().removeprefix("0x"))
                 break
             except RPCError as e:
                 capped = max_fee_per_gas is not None and max_fee >= max_fee_per_gas
@@ -197,7 +221,7 @@ class Chain:
         deadline = time.monotonic() + wait
         while True:
             try:
-                receipt = self.rpc("eth_getTransactionReceipt", [tx_hash])
+                receipt = self.receipt(tx_hash)
             except RPCError as e:  # the tx is out: a refused poll (rate limit) isn't a failed send
                 logger.warning(f"Receipt check for {tx_hash} failed, retrying: {e}")
                 receipt = None
