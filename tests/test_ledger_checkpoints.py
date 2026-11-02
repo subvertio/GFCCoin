@@ -8,6 +8,7 @@ Run from the repository root:
 
 import shutil
 import sqlite3
+import threading
 import time
 import unittest
 import uuid
@@ -167,6 +168,55 @@ class CheckpointTests(EscrowTestCase):
         with self.assertRaises(CheckpointError):
             other.sync(force=True)
         self.assertFalse(other.halted())
+
+    def test_a_copy_kept_current_in_the_background_judges_from_the_first_checkpoint(self):
+        """Mainnet, 2026-11-02: remote attesters synced only when asked, so minting waited ~60 min."""
+        dep = self.deposit()
+        start = datetime.now(timezone.utc)
+        self.sign(at=start)  # the first checkpoint covering the deposit
+
+        current = CheckpointMirror(str(Path(_TMP) / f"mirror-{uuid.uuid4().hex[:8]}.db"),
+                                   fetcher(self.source), [self.cp_pub], "testnet")
+        current.start_background_sync(every=0.05)
+        deadline = time.monotonic() + 5
+        while current.latest() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertIsNotNone(current.latest(), "the background sync never copied the checkpoint")
+
+        later = start + timedelta(minutes=20)
+        self.sign(at=later)  # what an attester that only syncs when asked would see first
+        asked_late = CheckpointMirror(str(Path(_TMP) / f"mirror-{uuid.uuid4().hex[:8]}.db"),
+                                      fetcher(self.source), [self.cp_pub], "testnet")
+        asked_late.sync(later, force=True)
+
+        when = start + timedelta(seconds=FINALITY + 1)
+        self.assertTrue(current.covered(dep["tx_hash"], when, FINALITY)[0])
+        self.assertFalse(asked_late.covered(dep["tx_hash"], when, FINALITY)[0])
+
+    def test_concurrent_syncs_dont_corrupt_the_copy(self):
+        for _ in range(5):
+            self.deposit()
+        self.sign()
+        errors = []
+
+        def go():
+            try:
+                self.mirror.sync(force=True)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=go) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertFalse(self.mirror.halted())
+        conn = sqlite3.connect(self.mirror.path)
+        rows = conn.execute("SELECT COUNT(*), COUNT(DISTINCT position) FROM mirror_log").fetchone()
+        conn.close()
+        self.assertEqual(rows[0], rows[1])
+        self.assertEqual(rows[0], self.mirror.latest()["count"])
 
     def test_an_attester_signs_only_checkpointed_deposits(self):
         dep = self.deposit()

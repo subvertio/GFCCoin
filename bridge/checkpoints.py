@@ -22,6 +22,7 @@ a rollback becomes an alarm instead of a silent loss.
 import json
 import logging
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Optional, Tuple
@@ -42,6 +43,11 @@ CREATE TABLE IF NOT EXISTS mirror_meta (key TEXT PRIMARY KEY, value TEXT NOT NUL
 
 PAGE = 2000
 SYNC_EVERY_SECONDS = 30
+# How often an attester server refreshes its copy on its own. A deposit counts as final
+# finality_seconds after the first checkpoint *this copy saw* covering it, so a copy that only
+# synced when asked to sign judged from a later checkpoint than its peers, and minting waited
+# for the slowest (seen on mainnet, 2026-11-02: about 60 minutes instead of 35).
+BACKGROUND_SYNC_SECONDS = 60
 MAX_CLOCK_SKEW = timedelta(minutes=5)
 
 
@@ -69,6 +75,7 @@ class CheckpointMirror:
     def __init__(self, path: str, fetch: Callable[[str], dict], pubkeys: Iterable[str], network: str):
         self.path, self.fetch, self.pubkeys, self.network = path, fetch, frozenset(pubkeys), network
         self._last_sync = 0.0
+        self._lock = threading.Lock()  # one sync at a time: the server thread and the background one
         conn = self._conn()
         conn.executescript(SCHEMA)
         conn.close()
@@ -116,6 +123,24 @@ class CheckpointMirror:
 
     def sync(self, now: Optional[datetime] = None, force: bool = False):
         """Take the node's latest checkpoint if it extends this copy; halt if it doesn't."""
+        with self._lock:
+            self._sync(now, force)
+
+    def start_background_sync(self, every: float = BACKGROUND_SYNC_SECONDS) -> threading.Thread:
+        """Keep the copy current without waiting to be asked to sign (see BACKGROUND_SYNC_SECONDS)."""
+        def loop():
+            while True:
+                try:
+                    self.sync(force=True)
+                except Exception as e:  # unreachable node, bad answer: try again next round
+                    logger.warning(f"Background checkpoint sync failed: {e}")
+                time.sleep(every)
+
+        t = threading.Thread(target=loop, daemon=True, name="checkpoint-sync")
+        t.start()
+        return t
+
+    def _sync(self, now: Optional[datetime], force: bool):
         if self.halted():
             return
         if not force and time.monotonic() - self._last_sync < SYNC_EVERY_SECONDS:
