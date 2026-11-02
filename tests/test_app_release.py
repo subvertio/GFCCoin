@@ -313,5 +313,59 @@ def make_windows(name: str, zipped: bool = False) -> str:
     return str(path)
 
 
+
+IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+ANDROID = "Mozilla/5.0 (Linux; Android 14; moto g power) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"
+WINDOWS = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+
+
+class DeviceLinkTests(unittest.TestCase):
+    """Every download link follows the visitor's device (links on Wix and X can't know it)."""
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(main.app)
+
+    def get(self, path, ua):
+        return self.client.get(path, headers={"User-Agent": ua}, follow_redirects=False)
+
+    def test_platforms(self):
+        self.assertEqual(app_release.visitor_platform(IPHONE), "ios")
+        self.assertEqual(app_release.visitor_platform(ANDROID), "android")
+        self.assertEqual(app_release.visitor_platform(WINDOWS), "windows")
+        self.assertEqual(app_release.visitor_platform("curl/8.0"), "other")
+
+    def test_an_iphone_never_lands_on_an_apk_or_exe(self):
+        for path in ("/app/android", "/app/windows", "/app/get"):
+            r = self.get(path, IPHONE)
+            self.assertEqual((r.status_code, r.headers["location"]), (302, "/app/iphone"), path)
+            self.assertIn("User-Agent", r.headers["vary"])
+        page = self.get("/app/iphone", IPHONE)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('href="/app/web/"', page.text)
+        self.assertIn("Add to Home Screen", page.text)
+
+    def test_android_gets_the_android_page(self):
+        for path in ("/app/windows", "/app/get"):
+            r = self.get(path, ANDROID)
+            self.assertEqual((r.status_code, r.headers["location"]), (302, "/app/android"), path)
+        self.assertEqual(self.get("/app/android", ANDROID).status_code, 200)
+
+    def test_windows_and_scripts_keep_the_direct_links(self):
+        self.assertEqual(self.get("/app/get", WINDOWS).headers["location"], "/app")
+        self.assertNotEqual(self.get("/app/windows", WINDOWS).status_code, 302)   # the download (or 404 unpublished)
+        self.assertNotEqual(self.get("/app/windows", "curl/8.0").status_code, 302)
+        self.assertEqual(self.get("/app/android", WINDOWS).status_code, 200)
+
+    def test_the_download_page_shows_the_visitors_device_first(self):
+        def first(ua):
+            t = self.get("/app", ua).text
+            return min(("iphone", t.index('id="iphone"')), ("android", t.index('id="android"')),
+                       ("windows", t.index('id="windows"')), key=lambda x: x[1])[0]
+        self.assertEqual(first(IPHONE), "iphone")
+        self.assertEqual(first(ANDROID), "android")
+        self.assertEqual(first(WINDOWS), "windows")
+        self.assertIn("User-Agent", self.get("/app", IPHONE).headers["vary"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

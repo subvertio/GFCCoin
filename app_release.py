@@ -10,6 +10,14 @@ GFC app downloads - the Android APK and the Windows installer, straight from the
 - GET /app/windows/update.json  the app's own update check (Tauri updater format): version, the
                          installer's URL and its updater signature; 204 when nothing is signed
 - GET /app/windows/update.exe   the signed installer the app downloads to update itself
+- GET /app/iphone        GFC for iPhone and iPad: the web app (app_webapp.py) and how to add it to
+                         the Home Screen (Apple doesn't list the app)
+- GET /app/get           one link for every device: iPhone/iPad to /app/iphone, Android to
+                         /app/android, anything else to /app
+
+Every download link follows the visitor's device, so the buttons on other sites (Wix, X posts)
+never strand anyone: an iPhone that opens /app/android or /app/windows lands on /app/iphone, and
+Android opening /app/windows lands on /app/android. /app shows the visitor's own device first.
 
 Publishing (on the node, as root, normally through `gfc publish-app FILE VERSION` and
 `gfc publish-windows FILE VERSION`):
@@ -55,7 +63,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import pkcs7
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from config import DATA_DIR
 
@@ -425,8 +433,42 @@ def windows_update_exe():
                         headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
 
 
+def visitor_platform(user_agent: str) -> str:
+    """
+    "ios", "android", "windows" or "other", from the browser's User-Agent. Only decides which
+    download a visitor sees first (and where a link for another device sends them), never access.
+    iPadOS Safari says "Macintosh" by default: it gets "other", whose pages offer the web app too.
+    """
+    ua = user_agent or ""
+    if "iPhone" in ua or "iPad" in ua or "iPod" in ua:
+        return "ios"
+    if "Android" in ua:
+        return "android"
+    if "Windows" in ua:
+        return "windows"
+    return "other"
+
+
+def _redirect(to: str) -> RedirectResponse:
+    # 302 + Vary: the same URL answers differently per device, so caches mustn't share it
+    return RedirectResponse(to, status_code=302, headers={"Vary": "User-Agent", "Cache-Control": "no-cache"})
+
+
+@router.get("/app/get")
+def get_app(request: Request):
+    """One link for every device (for buttons on other sites)."""
+    to = {"ios": "/app/iphone", "android": "/app/android"}.get(
+        visitor_platform(request.headers.get("user-agent", "")), "/app")
+    return _redirect(to)
+
+
 @router.get("/app/windows")
-def download_windows():
+def download_windows(request: Request):
+    platform = visitor_platform(request.headers.get("user-agent", ""))
+    if platform == "ios":
+        return _redirect("/app/iphone")   # an .exe is no use on an iPhone
+    if platform == "android":
+        return _redirect("/app/android")
     rel = windows_info()
     if not rel:
         raise HTTPException(status_code=404, detail="the Windows app isn't published yet")
@@ -466,24 +508,55 @@ tap <b>More details</b>, then <b>Install anyway</b>. The checksums below match w
 <p class="hash">Signing certificate SHA-256<br><code>{e(rel['cert_sha256'])}</code></p>"""
 
 
+def _iphone_section() -> str:
+    """GFC for iPhone and iPad: the web app, added to the Home Screen from the browser."""
+    return """<h2 id="iphone">iPhone and iPad</h2>
+<a class="button" href="/app/web/">Open GFC for iPhone</a>
+<p class="meta">No App Store needed &middot; the same app, always up to date</p>
+<p class="tip"><b>Opened this from X, Instagram or another app?</b> Open it in Safari first: tap the
+<b>&middot;&middot;&middot;</b> or <b>Share</b> button and choose <b>Open in Safari</b> (or <b>Open in browser</b>).</p>
+<h2>Add it to your Home Screen</h2>
+<ol class="steps">
+<li><b>Tap Open GFC for iPhone</b> above, in Safari.</li>
+<li><b>Tap the Share button</b> (the square with an arrow, at the bottom of the screen, or behind
+<b>&middot;&middot;&middot;</b> next to the address bar).</li>
+<li><b>Scroll down and tap Add to Home Screen</b>, keep <b>Open as Web App</b> on if it's shown, then tap <b>Add</b>.</li>
+<li><b>Open GFC from your Home Screen</b> and create your account. It opens full screen like any app,
+and you stay logged in.</li>
+</ol>
+<p>It works on iPhone and iPad with iOS 16.4 or newer, in Safari, Chrome or Edge. Photos and videos
+you post come from your photo library or the Files app; downloads are saved to Files.</p>"""
+
+
+@router.get("/app/iphone")
+def iphone_page():
+    """Where every iPhone and iPad visitor ends up: the web app and how to add it to the Home Screen."""
+    body = _iphone_section() + """
+<p class="site">Using something else? <a href="/app#android">Android</a> &middot; <a href="/app#windows">Windows</a></p>"""
+    return _page("Get GFC for iPhone", "Add the GFC app to your iPhone or iPad Home Screen: post, play and earn GFC.", body)
+
+
 @router.get("/app/android")
-def android_page():
+def android_page(request: Request):
     """Where every "Get GFC for Android" button goes: the download plus how to install it."""
+    if visitor_platform(request.headers.get("user-agent", "")) == "ios":
+        return _redirect("/app/iphone")   # an APK is no use on an iPhone
     body = _android_section(info()) + """
-<p class="site">Using Windows? <a href="/app#windows">Get GFC for Windows</a></p>"""
+<p class="site">Using Windows? <a href="/app#windows">Get GFC for Windows</a> &middot;
+iPhone? <a href="/app/iphone">Get GFC for iPhone</a></p>"""
     return _page("Get GFC for Android", "Download and install the GFC app on your Android phone.", body)
 
 
 @router.get("/app")
-def download_page():
+def download_page(request: Request):
     win = windows_info()
     e = lambda s: html.escape(str(s), quote=True)  # noqa: E731
-    body = _android_section(info())
+    windows = ""
     if win:
         zipped = win["ext"] == ".zip"
         first_step = ("<li>Open the downloaded .zip and run the GFC-Setup file inside it.</li>" if zipped
                       else "<li>Run the downloaded GFC-Setup file.</li>")
-        body += f"""
+        windows = f"""
 <h2 id="windows">Windows</h2>
 <a class="button" href="/app/windows" download>Download GFC for Windows</a>
 <p class="meta">Version {e(win['version'])} &middot; {win['size'] / 1048576:.0f} MB &middot; {e(win['published_at'][:10])}</p>
@@ -495,10 +568,17 @@ def download_page():
 <p>Windows 10 or 11, 64-bit.</p>
 <p class="hash">{"Zip" if zipped else "Installer"} SHA-256<br><code>{e(win['sha256'])}</code></p>"""
     else:
-        body += """
+        windows = """
 <h2 id="windows">Windows</h2>
 <p>The Windows app is coming soon.</p>"""
-    return _page("Get the GFC app", "Download the GFC app for Android and Windows: post, play and earn GFC.", body)
+    sections = {"ios": _iphone_section(), "android": _android_section(info()), "windows": windows}
+    first = visitor_platform(request.headers.get("user-agent", ""))
+    order = [first] + [p for p in ("android", "windows", "ios") if p != first] if first in sections \
+        else ["android", "windows", "ios"]
+    body = "".join(sections[p] for p in order)
+    page = _page("Get the GFC app", "Get the GFC app for iPhone, Android and Windows: post, play and earn GFC.", body)
+    page.headers["Vary"] = "User-Agent"  # the visitor's own device comes first
+    return page
 
 
 def _page(title: str, description: str, body: str) -> HTMLResponse:
