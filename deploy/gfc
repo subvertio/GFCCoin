@@ -37,6 +37,10 @@ usage: gfc <command>
                         other (up to 10,000). Public, permanent: listed at
                         /treasury/grants. Asks to confirm unless --yes.
   grants                list every operator grant
+  discord ids|register|links|reconcile|unlink USER
+                        Discord verification (docs/discord.md): list the server's
+                        role/channel ids, register /verify, list live links, run a
+                        role pass now, or end an account's link and remove its role
   reset-link USER       a one-time password reset link (24 hours) for an account
                         with no verified phone or email. Only after confirming
                         it's really them; send it to them privately
@@ -140,6 +144,9 @@ cmd_check() {
     else line FAIL "ClamAV not installed: downloads (zips) can't be offered (gfc update installs it)"; fi
     if [[ -n "$(env_value GFC_CLARITY_PROJECT_ID)" ]]; then line ok "Clarity analytics on the web feed (project $(env_value GFC_CLARITY_PROJECT_ID))"
     else line -- "Clarity analytics off (GFC_CLARITY_PROJECT_ID, gfc config)"; fi
+    if [[ -n "$(env_value GFC_DISCORD_BOT_TOKEN)" && -n "$(env_value GFC_DISCORD_ROLE_ID)" && -n "$(env_value GFC_DISCORD_PUBLIC_KEY)" ]]; then
+        line ok "Discord verification on (server $(env_value GFC_DISCORD_GUILD_ID), role $(env_value GFC_DISCORD_ROLE_ID))"
+    else line -- "Discord verification off (docs/discord.md)"; fi
     local unused=""
     for var in TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN TWILIO_API_KEY_SID TWILIO_API_KEY_SECRET \
                TWILIO_VERIFY_SERVICE_SID TWILIO_LOOKUP_LINE_TYPE GFC_TURNSTILE_SECRET GFC_TURNSTILE_SITEKEY; do
@@ -348,6 +355,7 @@ case "${1:-}" in
     new-checkpoint-key) cmd_new_checkpoint_key ;;
     grant)            shift; cmd_grant "$@" ;;
     grants)           need_root; as_gfc "$VENV/bin/python" treasury_grants.py list ;;
+    discord)          need_root; shift; as_gfc "$VENV/bin/python" -m app_discord "$@" ;;
     reset-link)       need_root; [[ $# -eq 2 ]] || die "usage: gfc reset-link USERNAME"
                       as_gfc "$VENV/bin/python" account_recovery.py reset-link "$2" ;;
     publish-app)      need_root; [[ $# -eq 3 ]] || die "usage: gfc publish-app FILE VERSION  (e.g. gfc publish-app /tmp/gfc.apk 0.1.0)"
