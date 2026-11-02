@@ -88,11 +88,14 @@ def is_private_url(url: str) -> bool:
 
 
 # Policy both sides must share. A different relay fee means every request's amount differs from
-# what the attester computes; a shorter mint TTL means it refuses every deadline. Either way all
-# mints would be refused, so the relayer refuses the attester at startup instead.
-MUST_MATCH = ("relay_fee_cents",)
+# what the attester computes; a shorter mint TTL means it refuses every deadline; a different
+# deposit cutoff means the two judge different deposits mintable. The relayer refuses such an
+# attester at startup instead.
+# The deposit cutoff too: attesters with different cutoffs disagree on which deposits are this
+# bridge's to mint (found on attester #2)
+MUST_MATCH = ("relay_fee_cents", "deposits_from")
 SHOULD_MATCH = ("min_deposit_cents", "finality_seconds", "faucet_hold_days", "manual_review_cents",
-                "checkpoint_url", "deposits_from")
+                "checkpoint_url")
 
 
 def policy(cfg) -> dict:

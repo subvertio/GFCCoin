@@ -161,6 +161,10 @@ class RemoteAttesterTests(EscrowTestCase):
         with self.assertRaises(SystemExit) as caught:
             self.client(cfg=replace(self.cfg, mint_ttl_seconds=self.cfg.mint_ttl_seconds * 2))
         self.assertIn("TTL", str(caught.exception))
+        # A different deposit cutoff: the two would judge different deposits mintable
+        with self.assertRaises(SystemExit) as caught:
+            self.client(cfg=replace(self.cfg, deposits_from=datetime.now(timezone.utc)))
+        self.assertIn("deposits_from", str(caught.exception))
         # A softer difference only warns
         with self.assertLogs("gfc.bridge.attester_http", "WARNING"):
             self.client(cfg=replace(self.cfg, faucet_hold_days=7))

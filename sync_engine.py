@@ -16,6 +16,7 @@ signatures and be funded before they are accepted; see sync_ingest.py.
 """
 
 import asyncio
+import socket
 import json
 import os
 import uuid
@@ -44,6 +45,31 @@ SYNC_PORT = 6881
 FRAME_HEADER_SIZE = 4  # 4-byte big-endian length prefix
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max message size
 FILE_CHUNK_SIZE = 256 * 1024  # 256 KB chunks for file transfer
+# A live connection exchanges sync messages every 30 s (_sync_loop). One silent this long is
+# a peer that vanished without closing (a laptop asleep, a dropped link): a new connection
+# from that peer replaces it instead of being refused as a duplicate.
+STALE_PEER_SECONDS = 120
+# TCP keepalive, so the OS itself notices a vanished peer: first probe after 60 s idle,
+# then every 15 s, dropped after 4 unanswered (about 2 minutes)
+KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, KEEPALIVE_COUNT = 60, 15, 4
+
+
+def _enable_keepalive(writer: asyncio.StreamWriter):
+    """Turn on TCP keepalive for a sync socket (best effort: some platforms lack the knobs)."""
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, KEEPALIVE_IDLE)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, KEEPALIVE_INTERVAL)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, KEEPALIVE_COUNT)
+        elif hasattr(socket, "SIO_KEEPALIVE_VALS"):  # older Windows
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, KEEPALIVE_IDLE * 1000, KEEPALIVE_INTERVAL * 1000))
+    except OSError as e:
+        logger.debug(f"Could not set keepalive: {e}")
 
 # Tables, columns and accept rules for synced rows live in sync_ingest.py
 # (shared with the tracker relay in peer_discovery.py).
@@ -72,6 +98,13 @@ class SyncPeer:
         self.peer_address = ""
         self.peer_version = ""
         self.is_connected = True
+        self.outgoing = False  # we dialed them (they're reachable at ip:SYNC_PORT)
+        self.last_received = time.monotonic()
+        _enable_keepalive(writer)
+
+    def stale(self) -> bool:
+        """Nothing received for STALE_PEER_SECONDS: probably a half-open socket."""
+        return time.monotonic() - self.last_received > STALE_PEER_SECONDS
 
     async def send_message(self, msg: dict):
         """Send a framed JSON message."""
@@ -100,6 +133,7 @@ class SyncPeer:
 
             # Read message body
             data = await self.reader.readexactly(msg_len)
+            self.last_received = time.monotonic()
             return json.loads(data.decode("utf-8"))
         except (asyncio.IncompleteReadError, ConnectionResetError, ConnectionAbortedError):
             self.is_connected = False
@@ -203,17 +237,25 @@ class SyncEngine:
         peer_key = f"{peer_ip}:{SYNC_PORT}"
         logger.info(f"Incoming sync connection from {peer_ip} (canonical key: {peer_key})")
 
-        # If we already have an outgoing connection to this peer, don't duplicate
-        if peer_key in self.connections:
-            existing = self.connections[peer_key]
-            if existing.is_connected:
+        existing = self.connections.get(peer_key)
+        if existing is not None:
+            if not existing.is_connected or existing.stale():
+                # A peer that vanished without closing (asleep, link dropped) left a half-open
+                # socket here: its reconnect replaces it instead of being refused forever
+                logger.info(f"Replacing {'stale' if existing.is_connected else 'dead'} connection to "
+                            f"{peer_key} with new incoming")
+                del self.connections[peer_key]
+                await existing.close()
+            elif existing.outgoing:
+                # We already dialed this peer and it's alive: don't duplicate
                 logger.info(f"Already connected to {peer_key} (outgoing), closing incoming duplicate")
                 writer.close()
                 return
             else:
-                # Old connection is dead, replace it
-                logger.info(f"Replacing dead connection to {peer_key} with new incoming")
-                del self.connections[peer_key]
+                # A live incoming connection from the same public IP: another machine behind the
+                # same router. Give it its own slot instead of refusing it
+                peer_key = f"{peer_ip}:{SYNC_PORT}#{peername[1]}"
+                logger.info(f"Second machine behind {peer_ip}: tracking it as {peer_key}")
 
         peer = SyncPeer(reader, writer, self)
         peer.peer_address = peer_key
@@ -286,6 +328,7 @@ class SyncEngine:
                     )
                     peer = SyncPeer(reader, writer, self)
                     peer.peer_address = key
+                    peer.outgoing = True
                     self.connections[key] = peer
                     self.discovery.connected_peers.add(key)
 
@@ -331,12 +374,12 @@ class SyncEngine:
         except Exception as e:
             logger.debug(f"Message loop error for {peer.peer_address}: {e}")
         finally:
-            # Clean up
+            # Clean up, unless a newer connection has taken this peer's slot meanwhile
             await peer.close()
             key = peer.peer_address
-            if key in self.connections:
+            if self.connections.get(key) is peer:
                 del self.connections[key]
-            self.discovery.connected_peers.discard(key)
+                self.discovery.connected_peers.discard(key)
             logger.info(f"Disconnected from peer {key}")
 
     # ---------- Message handling ----------
