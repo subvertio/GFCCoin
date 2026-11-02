@@ -43,6 +43,7 @@ from app_connect import router as connect_router
 import app_connect
 from app_discord import router as discord_router
 import app_discord
+from app_webapp import router as webapp_router
 import ads
 import app_follows
 import audio_stream
@@ -115,6 +116,7 @@ app.include_router(follows_router)
 app.include_router(ads_router)
 app.include_router(connect_router)
 app.include_router(discord_router)
+app.include_router(webapp_router)
 
 # Static file serving (using absolute paths from config)
 # follow_symlink=True is required on Windows because files created by different
