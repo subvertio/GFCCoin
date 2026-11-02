@@ -37,6 +37,9 @@ usage: gfc <command>
                         other (up to 10,000). Public, permanent: listed at
                         /treasury/grants. Asks to confirm unless --yes.
   grants                list every operator grant
+  publish-web FILE.zip VERSION
+                        make FILE (a zip of GFC-Tauri dist-web/) the web app for
+                        iPhone at /app/web/ (Safari: Share > Add to Home Screen)
   discord ids|register|links|reconcile|unlink USER
                         Discord verification (docs/discord.md): list the server's
                         role/channel ids, register /verify, list live links, run a
@@ -356,6 +359,9 @@ case "${1:-}" in
     grant)            shift; cmd_grant "$@" ;;
     grants)           need_root; as_gfc "$VENV/bin/python" treasury_grants.py list ;;
     discord)          need_root; shift; as_gfc "$VENV/bin/python" -m app_discord "$@" ;;
+    publish-web)      need_root; [[ $# -eq 3 ]] || die "usage: gfc publish-web FILE.zip VERSION  (the contents of GFC-Tauri dist-web/, from npm run build:web)"
+                      [[ -r "$2" ]] || die "can't read $2"
+                      as_gfc "$VENV/bin/python" app_webapp.py publish "$(readlink -f "$2")" "$3" ;;
     reset-link)       need_root; [[ $# -eq 2 ]] || die "usage: gfc reset-link USERNAME"
                       as_gfc "$VENV/bin/python" account_recovery.py reset-link "$2" ;;
     publish-app)      need_root; [[ $# -eq 3 ]] || die "usage: gfc publish-app FILE VERSION  (e.g. gfc publish-app /tmp/gfc.apk 0.1.0)"
