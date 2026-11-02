@@ -15,6 +15,14 @@ from eth_utils import keccak, to_checksum_address
 
 # httpx logs every request URL at INFO; RPC URLs often carry an API key
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
+
+# A node that already holds a tx with this nonce refuses an equal-fee one ("replacement transaction
+# underpriced"). Seen on mainnet 2026-11-02: publicnode kept a mint it never forwarded and refused
+# every retry, so retries raise the fee; nodes want at least +10%.
+FEE_BUMPS = (1.0, 1.5, 2.25, 3.4)
+STUCK_NONCE = ("replacement transaction underpriced", "already known")
+
 
 MINT_REQUEST_TUPLE = "(bytes32,address,uint256,uint256)"
 TOPIC_BRIDGED_OUT = "0x" + keccak(text="BridgedOut(uint256,address,bytes32,uint256)").hex()
@@ -159,26 +167,40 @@ class Chain:
         if max_gas is not None and gas > max_gas:
             raise RPCError(f"needs {gas} gas, above the {max_gas} cap: not sent")
         base_fee = int(self.rpc("eth_getBlockByNumber", ["latest", False])["baseFeePerGas"], 16)
-        tip = int(self.rpc("eth_maxPriorityFeePerGas", []), 16)
-        max_fee = 2 * base_fee + tip
-        if max_fee_per_gas is not None:
-            if base_fee >= max_fee_per_gas:
-                raise RPCError(f"base fee {base_fee} wei is at or above the {max_fee_per_gas} wei cap: not sent")
-            max_fee = min(max_fee, max_fee_per_gas)
-            tip = min(tip, max_fee - base_fee)
-        unsigned = {
-            "chainId": self.chain_id(),
-            "nonce": int(self.rpc("eth_getTransactionCount", [acct.address, "pending"]), 16),
-            "data": data, "value": value, "gas": gas,
-            "maxFeePerGas": max_fee, "maxPriorityFeePerGas": tip, "type": 2,
-        }
-        if to:
-            unsigned["to"] = tx["to"]
-        signed = acct.sign_transaction(unsigned)
-        tx_hash = self.rpc("eth_sendRawTransaction", ["0x" + signed.raw_transaction.hex().removeprefix("0x")])
+        tip0 = int(self.rpc("eth_maxPriorityFeePerGas", []), 16)
+        if max_fee_per_gas is not None and base_fee >= max_fee_per_gas:
+            raise RPCError(f"base fee {base_fee} wei is at or above the {max_fee_per_gas} wei cap: not sent")
+        nonce = int(self.rpc("eth_getTransactionCount", [acct.address, "pending"]), 16)
+        chain_id = self.chain_id()
+        for i, bump in enumerate(FEE_BUMPS):
+            tip = max(int(tip0 * bump), tip0 + i)  # a zero tip still has to rise
+            max_fee = int((2 * base_fee + tip0) * bump) + i
+            if max_fee_per_gas is not None:
+                max_fee = min(max_fee, max_fee_per_gas)
+                tip = min(tip, max_fee - base_fee)
+            unsigned = {
+                "chainId": chain_id, "nonce": nonce,
+                "data": data, "value": value, "gas": gas,
+                "maxFeePerGas": max_fee, "maxPriorityFeePerGas": tip, "type": 2,
+            }
+            if to:
+                unsigned["to"] = tx["to"]
+            signed = acct.sign_transaction(unsigned)
+            try:
+                tx_hash = self.rpc("eth_sendRawTransaction", ["0x" + signed.raw_transaction.hex().removeprefix("0x")])
+                break
+            except RPCError as e:
+                capped = max_fee_per_gas is not None and max_fee >= max_fee_per_gas
+                if not any(s in str(e) for s in STUCK_NONCE) or i == len(FEE_BUMPS) - 1 or capped:
+                    raise
+                logger.warning(f"Nonce {nonce} is taken by a pending tx: resending with a higher fee")
         deadline = time.monotonic() + wait
         while True:
-            receipt = self.rpc("eth_getTransactionReceipt", [tx_hash])
+            try:
+                receipt = self.rpc("eth_getTransactionReceipt", [tx_hash])
+            except RPCError as e:  # the tx is out: a refused poll (rate limit) isn't a failed send
+                logger.warning(f"Receipt check for {tx_hash} failed, retrying: {e}")
+                receipt = None
             if receipt:
                 break
             if time.monotonic() > deadline:

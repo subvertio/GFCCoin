@@ -193,5 +193,66 @@ class RPCTrustTests(EscrowTestCase):
         self.assertIn("main rpc", str(caught.exception))
 
 
+class StuckNonceRPC(Chain):
+    """A node that already holds a tx at the next nonce and refuses equal-fee replacements, and that
+    rate-limits the first receipt poll (both seen on mainnet, 2026-11-02)."""
+    def __init__(self, holding_fee: int, refuse_receipts: int = 1):
+        self.label, self.holding_fee, self.refuse_receipts, self.sent = "main rpc", holding_fee, refuse_receipts, []
+
+    def chain_id(self):
+        return 8453
+
+    def rpc(self, method, params):
+        if method == "eth_getBlockByNumber":
+            return {"baseFeePerGas": hex(5_000_000)}
+        if method == "eth_maxPriorityFeePerGas":
+            return hex(1_000_000)
+        if method == "eth_getTransactionCount":
+            return hex(3)
+        if method == "eth_sendRawTransaction":
+            import rlp  # type 2: 0x02 || rlp([chainId, nonce, tip, maxFee, ...])
+            fee = int.from_bytes(rlp.decode(bytes.fromhex(params[0][2:])[1:])[3], "big")
+            self.sent.append(fee)
+            if fee < self.holding_fee * 1.1:
+                raise RPCError("eth_sendRawTransaction: replacement transaction underpriced")
+            return "0x" + "ab" * 32
+        if method == "eth_getTransactionReceipt":
+            if self.refuse_receipts:
+                self.refuse_receipts -= 1
+                raise RPCError("main rpc eth_getTransactionReceipt: HTTP 403")
+            return {"status": "0x1", "transactionHash": params[0]}
+        raise AssertionError(method)
+
+
+class StuckNonceTests(unittest.TestCase):
+    KEY = "0x" + "11" * 32
+
+    def test_resends_with_a_higher_fee_and_survives_a_refused_receipt_poll(self):
+        normal = 2 * 5_000_000 + 1_000_000
+        chain = StuckNonceRPC(holding_fee=normal)
+        r = chain.send(self.KEY, BRIDGE, "0x", gas=100_000, max_fee_per_gas=10**9)
+        self.assertEqual(r["status"], "0x1")
+        self.assertEqual(chain.sent[0], normal)
+        self.assertGreaterEqual(chain.sent[-1], normal * 1.1)
+
+    def test_the_fee_cap_still_holds(self):
+        chain = StuckNonceRPC(holding_fee=10**9)
+        with self.assertRaises(RPCError):
+            chain.send(self.KEY, BRIDGE, "0x", gas=100_000, max_fee_per_gas=20_000_000)
+        self.assertTrue(all(f <= 20_000_000 for f in chain.sent))
+
+    def test_other_send_errors_are_not_retried(self):
+        class Broke(StuckNonceRPC):
+            def rpc(self, method, params):
+                if method == "eth_sendRawTransaction":
+                    self.sent.append(1)
+                    raise RPCError("eth_sendRawTransaction: insufficient funds")
+                return super().rpc(method, params)
+        chain = Broke(holding_fee=0)
+        with self.assertRaises(RPCError):
+            chain.send(self.KEY, BRIDGE, "0x", gas=100_000)
+        self.assertEqual(len(chain.sent), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
