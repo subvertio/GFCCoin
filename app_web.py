@@ -415,14 +415,7 @@ def bonus_text() -> str:
     return f"{grant:,} GFC for signing up!"
 
 
-def visitor_platform(user_agent: str) -> str:
-    """"android", "windows" or "other", from the browser's User-Agent (only picks the main download button)."""
-    ua = user_agent or ""
-    if "Android" in ua:
-        return "android"
-    if "Windows" in ua:
-        return "windows"
-    return "other"
+visitor_platform = app_release.visitor_platform  # "ios", "android", "windows" or "other"
 
 
 def get_app_popup(platform: str) -> str:
@@ -434,16 +427,23 @@ def get_app_popup(platform: str) -> str:
     # Android goes to its install page (an APK from outside Google Play takes a few taps to install)
     android = ("/app/android", False)
     windows = ("/app/windows", True) if app_release.windows_info() else ("/app#windows", False)
+    iphone = ("/app/iphone", False)  # the web app and how to add it to the Home Screen
 
     def button(target, label, cls):
         href, direct = target
         return f'<a class="{cls}" href="{e(href)}"{" download" if direct else ""}>{label}</a>'
-    if platform == "android":
-        buttons = button(android, "Get GFC for Android", "primary") + button(windows, "Windows version", "secondary")
+    if platform == "ios":
+        buttons = (button(iphone, "Get GFC for iPhone", "primary") + button(android, "Android version", "secondary")
+                   + button(windows, "Windows version", "secondary"))
+    elif platform == "android":
+        buttons = (button(android, "Get GFC for Android", "primary") + button(iphone, "iPhone version", "secondary")
+                   + button(windows, "Windows version", "secondary"))
     elif platform == "windows":
-        buttons = button(windows, "Get GFC for Windows", "primary") + button(android, "Android version", "secondary")
+        buttons = (button(windows, "Get GFC for Windows", "primary") + button(android, "Android version", "secondary")
+                   + button(iphone, "iPhone version", "secondary"))
     else:
-        buttons = button(android, "Get GFC for Android", "primary") + button(windows, "Get GFC for Windows", "primary")
+        buttons = (button(iphone, "Get GFC for iPhone", "primary") + button(android, "Get GFC for Android", "primary")
+                   + button(windows, "Get GFC for Windows", "primary"))
     return ('<div id="getapp" class="getapp" hidden role="dialog" aria-modal="true" aria-labelledby="getapp-title">'
             '<div class="getapp-box">'
             '<button type="button" class="getapp-close" aria-label="Close">&#10005;</button>'
@@ -465,7 +465,9 @@ def site_header() -> str:
     e = lambda s: html.escape(s, quote=True)  # noqa: E731
     android = '<a href="/app/android">'  # the download plus how to install it
     windows = '<a href="/app/windows" download>' if app_release.windows_info() else '<a href="/app#windows">'
+    iphone = '<a href="/app/iphone">'  # the web app plus how to add it to the Home Screen
     return (f'<header class="top">\n<nav aria-label="Get GFC">'
+            f'{iphone}Get GFC for iPhone</a>'
             f'{android}Get GFC for Android</a>'
             f'{windows}Get GFC for Windows</a>'
             f'<a class="learn" href="{e(app_release.SITE_URL)}" rel="noopener">Learn more about GFC</a>'
