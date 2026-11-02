@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -298,6 +299,9 @@ class BridgeApiTests(EscrowTestCase):
         self.assertEqual(info["chains"][0]["name"], "Base Sepolia")
         self.assertEqual(info["chains"][0]["escrow_wallet"], self.escrow_pub)
         self.assertIsNone(info["chains"][0]["token_address"])
+        self.assertIsNone(info["chains"][0]["bridge_address"])
+        with mock.patch.dict(config.BRIDGE_CONTRACTS, {CHAIN: "0x" + "12" * 20}):
+            self.assertEqual(self.client.get("/bridge/info").json()["chains"][0]["bridge_address"], "0x" + "12" * 20)
         config.BRIDGE_ESCROWS.clear()
         self.assertFalse(self.client.get("/bridge/info").json()["enabled"])
 

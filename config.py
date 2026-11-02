@@ -80,6 +80,12 @@ BRIDGE_TOKENS = {
     int(pair.split(":", 1)[0]): pair.split(":", 1)[1].strip()
     for pair in _env_tokens.split(",") if ":" in pair
 }
+# The bridge contract on each chain: where the app sends users to bring GFC back
+_env_bridges = os.environ.get("GFC_BRIDGE_CONTRACTS", "")  # "84532:0x...,8453:0x..."
+BRIDGE_CONTRACTS = {
+    int(pair.split(":", 1)[0]): pair.split(":", 1)[1].strip()
+    for pair in _env_bridges.split(",") if ":" in pair
+}
 BRIDGE_MIN_DEPOSIT_CENTS = int(os.environ.get("GFC_BRIDGE_MIN_DEPOSIT_CENTS", "10000"))
 BRIDGE_RELAY_FEE_CENTS = int(os.environ.get("GFC_BRIDGE_RELAY_FEE_CENTS", "0"))
 BRIDGE_FAUCET_HOLD_DAYS = float(os.environ.get("GFC_BRIDGE_FAUCET_HOLD_DAYS", "14"))
