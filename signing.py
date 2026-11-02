@@ -20,7 +20,7 @@ import json
 import os
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -178,6 +178,39 @@ def local_wallet_for(conn: sqlite3.Connection, owner: str, wallet_id: str = "") 
         params.append(wallet_id)
     row = conn.execute(query + " ORDER BY wallet_keys.created_at LIMIT 1", params).fetchone()
     return row[0] if row else None
+
+
+# A wallet key encrypted under an earlier data key: the password was reset without the recovery
+# code (account_recovery.py), so only a wallet backup brings it back. Logging in again doesn't
+# help, so this is never answered as an expired session (401): apps log the user out on that.
+LOCKED_WALLET_MESSAGE = ("This wallet's key is locked: your password was reset without your recovery code. "
+                         "Import a wallet backup to unlock it, or create a new wallet in Wallet and use that.")
+
+
+def unlocked_wallet_for(db_path: str, owner: str, data_key: Optional[bytes],
+                        wallet_id: str = "") -> Tuple[Optional[str], Optional[str], bool]:
+    """
+    (wallet_id, private_key, locked) for signing as `owner`: `wallet_id` if given, else the oldest of
+    the owner's wallets whose key this session can unlock. (None, None, False) when the owner has no
+    wallet key on this node; (None, None, True) when there are keys but none unlocks (locked).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        init_wallet_keys_table(conn)
+        query = ("SELECT wallets.id FROM wallets JOIN wallet_keys ON wallet_keys.wallet_id = wallets.id "
+                 "WHERE LOWER(wallets.owner) = LOWER(?)")
+        params = [owner]
+        if wallet_id:
+            query += " AND wallets.id = ?"
+            params.append(wallet_id)
+        candidates = [r[0] for r in conn.execute(query + " ORDER BY wallet_keys.created_at", params)]
+    finally:
+        conn.close()
+    for wid in candidates:
+        key = get_wallet_private_key(db_path, wid, data_key)
+        if key:
+            return wid, key, False
+    return None, None, bool(candidates)
 
 
 def has_wallet_key(db_path: str, wallet_id: str) -> bool:

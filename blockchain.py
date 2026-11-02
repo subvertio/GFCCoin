@@ -639,7 +639,8 @@ def process_transfer(db_path: str, sender_wallet: str, recipient_wallet: str,
     # data_key unlocks the key if it is encrypted at rest (see keystore.py)
     private_key = signing.get_wallet_private_key(db_path, sender_wallet, data_key)
     if not private_key and signing.has_wallet_key(db_path, sender_wallet):
-        raise ValueError("Wallet key is locked: log in again to sign transfers")
+        raise ValueError(signing.LOCKED_WALLET_MESSAGE if data_key
+                         else "Wallet key is locked: log in again to sign transfers")
     if private_key:
         tx["signer"] = sender_wallet
         tx["signature"] = signing.sign_tx_hash(private_key, tx["tx_hash"])

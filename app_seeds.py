@@ -277,22 +277,23 @@ async def seeds_upload(
     if teaser_seconds not in exclusive.TEASER_LENGTHS:
         raise HTTPException(status_code=400, detail="The preview can be 5, 10 or 30 seconds long.")
 
-    # Pick the signing wallet: must be the owner's, with its key on this node
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        signer_wallet = signing.local_wallet_for(conn, owner, reward_wallet.strip())             if owner != "anonymous" else None
-    finally:
-        conn.close()
-    if reward_wallet.strip() and not signer_wallet:
+    # Pick the signing wallet: the owner's, with its key on this node, unlocked by this session
+    # (the requested one, else the oldest that unlocks: a key locked by a password reset
+    # without the recovery code must not block posting from the account's newer wallets)
+    signer_wallet, private_key, locked = (None, None, False)
+    data_key = caller.data_key() if owner != "anonymous" else None
+    if owner != "anonymous":
+        signer_wallet, private_key, locked = signing.unlocked_wallet_for(
+            DB_PATH, owner, data_key, reward_wallet.strip())
+    if reward_wallet.strip() and not signer_wallet and not locked:
         raise HTTPException(status_code=400, detail="reward_wallet must be one of your wallets on this node")
+    if locked and not data_key:  # this session carries no key (e.g. an api token): a real login helps
+        raise HTTPException(status_code=401, detail="log in again to unlock your wallet key")
+    if locked:  # 409, not 401: logging in again wouldn't help
+        raise HTTPException(status_code=409, detail=signing.LOCKED_WALLET_MESSAGE)
     reward_wallet = signer_wallet or ""
     if reward_wallet and config.REQUIRE_PHONE_TO_POST:
         verified_wallets.attest(DB_PATH, owner)  # treasury node: so peers accept this post
-    private_key = None
-    if reward_wallet:
-        private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet, caller.data_key())
-        if not private_key:
-            raise HTTPException(status_code=401, detail="log in again to unlock your wallet key")
 
     # Generate id and safe filename. Signed seeds get an ID bound to their reward wallet.
     nonce = uuid.uuid4().hex[:12]
@@ -571,9 +572,12 @@ async def edit_seed(
         if seed_signature:
             if not signing.local_wallet_for(conn, owner, reward_wallet):
                 raise HTTPException(status_code=403, detail="edit this post from the node you posted it on")
-            private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet, caller.data_key())
-            if not private_key:
+            data_key = caller.data_key()
+            private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet, data_key)
+            if not private_key and not data_key:
                 raise HTTPException(status_code=401, detail="log in again to unlock your wallet key")
+            if not private_key:
+                raise HTTPException(status_code=409, detail=signing.LOCKED_WALLET_MESSAGE)
 
         try:
             edit = seed_edits.create_edit(conn, sid, private_key, title, description, tags)

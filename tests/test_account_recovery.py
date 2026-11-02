@@ -112,6 +112,30 @@ class AccountRecoveryTests(unittest.TestCase):
         self.assertNotEqual(keystore.unlock_user_keys(name, "second-password", main.DB_PATH), before)
         self.assertEqual(self.login(name, "second-password").status_code, 200)
 
+    def test_locked_wallet_after_reset_doesnt_look_like_an_expired_session(self):
+        # BubbaStartz, 2026-11-02: reset without the recovery code, then every upload got a 401
+        # ("log in again to unlock your wallet key") and the app logged him out each time
+        name, token, _, number = self.verified_user()
+        old = self.client.post("/wallets/create", data={"name": "old"}, headers=self.auth(token)).json()["id"]
+        self.reset(name, "phone", number, fb.make_token(number), "second-password", accept_locked=True)
+        token = self.login(name, "second-password").json()["token"]
+
+        def upload():
+            return self.client.post("/seeds/upload", data={"title": "after reset"}, headers=self.auth(token),
+                                    files={"file": ("note.txt", b"hello after a reset", "text/plain")})
+        r = upload()
+        self.assertEqual(r.status_code, 409, r.text)  # not 401: logging in again wouldn't help
+        self.assertIn("recovery code", r.json()["detail"])
+        self.assertEqual(self.client.get("/users/me/blocks", headers=self.auth(token)).status_code, 200)  # still signed in
+        new = self.client.post("/wallets/create", data={"name": "new"}, headers=self.auth(token)).json()["id"]
+        r = upload()
+        self.assertEqual(r.status_code, 200, r.text)  # the newer wallet, which unlocks, signs it
+        conn = sqlite3.connect(main.DB_PATH)
+        signer = conn.execute("SELECT reward_wallet FROM seeds WHERE id = ?", (r.json()["id"],)).fetchone()[0]
+        conn.close()
+        self.assertEqual(signer, new)
+        self.assertNotEqual(signer, old)
+
     def test_wrong_code_and_short_password(self):
         name, _, _, number = self.verified_user()
         page = self.reset(name, "phone", number, fb.make_token(number), "second-password", "AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-AAAAA")
