@@ -62,6 +62,9 @@ usage: gfc <command>
                         switch the node to the new key (rolls back on failure)
   reports               posts people reported, most reported first (hidden = auto-hidden,
                         waiting for you)
+  node-key              this node's public key, for an official-node certificate
+                        (docs/node-directory.md)
+  install-cert CERT     check and install an official-node certificate, then restart
   moderate SEED remove|restore|hide
                         remove: keep it hidden for good; restore: show it again and
                         forget its reports; hide: hide it now without reports
@@ -374,6 +377,10 @@ case "${1:-}" in
     wallets)          shift; cmd_wallets "$@" ;;
     reports)          need_root; as_gfc "$VENV/bin/python" moderation.py list ;;
     moderate)         need_root; [[ $# -eq 3 ]] || { usage; exit 2; }; as_gfc "$VENV/bin/python" moderation.py "$2" "$3" ;;
+    node-key)         need_root; as_gfc "$VENV/bin/python" node_certs.py node-key ;;
+    install-cert)     need_root; [[ $# -eq 2 && -r "$2" ]] || die "usage: gfc install-cert CERT.json  (from: python node_certs.py certify ...)"
+                      tmp="$(mktemp)"; cp "$2" "$tmp"; chown gfc "$tmp"
+                      as_gfc "$VENV/bin/python" node_certs.py install-cert "$tmp"; rm -f "$tmp"; restart_node ;;
     ""|-h|--help|help) usage ;;
     *) usage; exit 2 ;;
 esac
