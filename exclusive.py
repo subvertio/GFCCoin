@@ -40,6 +40,7 @@ from urllib.parse import quote, unquote
 
 import audio_stream
 import config
+import media_store
 import phone_verify
 from config import DATA_DIR, DB_PATH, SEEDS_ORIG_DIR
 
@@ -108,7 +109,7 @@ def teaser_url(seed_id: str) -> Optional[str]:
         path = teaser_path(seed_id)
     except ValueError:
         return None
-    return f"/teasers/{path.name}" if path.exists() else None
+    return f"/teasers/{path.name}" if media_store.exists("teasers", path.name) else None
 
 
 def run_teaser_ffmpeg(src: Path, dest: Path, seconds: int = TEASER_SECONDS) -> None:
@@ -133,7 +134,7 @@ def make_teaser(seed_id: str, filename: str, runner: Runner = None, seconds: Opt
         finally:
             conn.close()
     dest = teaser_path(seed_id)
-    if dest.exists():
+    if media_store.exists("teasers", dest.name):
         return True
     src = SEEDS_ORIG_DIR / filename
     if not src.is_file():

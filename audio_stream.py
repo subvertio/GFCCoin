@@ -38,6 +38,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
+import media_store
 from config import DATA_DIR, DB_PATH, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR
 
 STREAMS_DIR = DATA_DIR / "seeds" / "streams"
@@ -89,7 +90,7 @@ def stream_url(seed_id: str, content_type: str = "audio") -> Optional[str]:
         path = stream_path(seed_id, content_type)
     except ValueError:
         return None
-    return f"/streams/{path.name}" if path.exists() else None
+    return f"/streams/{path.name}" if media_store.exists("streams", path.name) else None
 
 
 def needs_stream(filename: str, size_bytes: int, content_type: str = "audio") -> bool:
@@ -345,7 +346,7 @@ def run_ffmpeg(src: Path, dest: Path) -> None:
 def make_stream(seed_id: str, filename: str, runner: Runner = None, content_type: str = "audio") -> bool:
     """Create the streaming copy now (synchronously). True if it exists afterwards."""
     dest = stream_path(seed_id, content_type)
-    if dest.exists():
+    if media_store.exists("streams", dest.name):
         return True
     src = SEEDS_ORIG_DIR / filename
     if not src.is_file():
@@ -386,6 +387,7 @@ def _work():
             make_stream(seed_id, filename, runner=run_ffmpeg, content_type=content_type)
             if content_type == "video":
                 make_video_thumbnail(seed_id, runner=run_thumbnail_ffmpeg)
+            media_store.offload_seed_later(seed_id)  # R2 nodes: done here, so to the bucket
         finally:
             _queue.task_done()
 
@@ -396,7 +398,7 @@ def enqueue(seed_id: str, filename: str, content_type: str, size_bytes: int) -> 
     if not enabled() or content_type not in STREAM_KINDS or not needs_stream(filename, size_bytes, content_type):
         return False
     try:
-        if stream_path(seed_id, content_type).exists():
+        if media_store.exists("streams", stream_path(seed_id, content_type).name):
             return False
     except ValueError:
         return False

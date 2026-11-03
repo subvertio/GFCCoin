@@ -68,6 +68,10 @@ usage: gfc <command>
   moderate SEED remove|restore|hide
                         remove: keep it hidden for good; restore: show it again and
                         forget its reports; hide: hide it now without reports
+  media status          where media is stored (this disk or Cloudflare R2), and how much
+  media migrate [--keep-local] [--dry-run]
+                        move existing media to R2: upload, verify, then delete the
+                        local copy (docs/r2.md). Hours for big libraries: run it in tmux
 EOF
 }
 
@@ -377,6 +381,7 @@ case "${1:-}" in
     wallets)          shift; cmd_wallets "$@" ;;
     reports)          need_root; as_gfc "$VENV/bin/python" moderation.py list ;;
     moderate)         need_root; [[ $# -eq 3 ]] || { usage; exit 2; }; as_gfc "$VENV/bin/python" moderation.py "$2" "$3" ;;
+    media)            need_root; shift; as_gfc "$VENV/bin/python" media_store.py "$@" ;;
     node-key)         need_root; as_gfc "$VENV/bin/python" node_certs.py node-key ;;
     install-cert)     need_root; [[ $# -eq 2 && -r "$2" ]] || die "usage: gfc install-cert CERT.json  (from: python node_certs.py certify ...)"
                       tmp="$(mktemp)"; cp "$2" "$tmp"; chown gfc "$tmp"

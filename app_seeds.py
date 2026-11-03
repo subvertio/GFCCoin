@@ -10,6 +10,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from starlette.concurrency import run_in_threadpool
 
 import first_post
+import media_store
 import moderation
 import reposts
 import audio_stream
@@ -121,7 +122,7 @@ def seed_row(sid: str, orig_file: str) -> Dict[str, Any]:
     title = orig_file
     full  = f"/originals/{orig_file}"
     thumb_name = f"{sid}_thumb.jpg"
-    thumb = f"/thumbs/{thumb_name}" if (THUMB_DIR / thumb_name).exists() else None
+    thumb = f"/thumbs/{thumb_name}" if media_store.exists("thumbs", thumb_name) else None
     return {
         "id":           sid,
         "title":        title,
@@ -271,6 +272,8 @@ async def seeds_upload(
         raise HTTPException(status_code=400, detail="file missing")
 
     owner = caller.owner("post")
+    if media_store.read_only():  # a community node: posts go through an official node
+        raise HTTPException(status_code=403, detail=media_store.READ_ONLY_DETAIL)
     require_phone_to_post(owner)
     if exclusive_to_gfc and not exclusive.can_be_exclusive(file.filename or "", detect_content_type(file.filename or "")):
         raise HTTPException(status_code=400, detail="Only videos, text posts and downloads (.zip) can be exclusive to the GFC Network.")
@@ -430,6 +433,10 @@ async def seeds_upload(
         result["first_post_bonus"] = bonus["amount"]
         if bonus["pending"]:
             result["first_post_bonus_pending"] = True
+    if stored and not stream_pending:
+        # R2 nodes: nothing more to make from the file, so it goes to the bucket now
+        # (with a streaming copy coming, audio_stream does this once it's made)
+        media_store.offload_seed_later(sid)
     return result
 
 @router.get("/seeds/mine")

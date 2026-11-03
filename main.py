@@ -7,7 +7,7 @@ Features: wallets, transactions, seeds, feed, search, profiles, engagement,
 """
 
 from fastapi import FastAPI, HTTPException, Form, File, UploadFile, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import json
@@ -50,6 +50,7 @@ import app_follows
 import audio_stream
 import blockchain
 import logredact
+import media_store
 import moderation
 import keystore
 import first_post
@@ -93,6 +94,11 @@ async def exclusive_media_gate(request, call_next):
         reason = filescan.blocked(path)
         if reason:
             return JSONResponse({"detail": reason}, status_code=403)
+    # Media that isn't on this node's disk is in the R2 bucket (media_store.py)
+    if path.startswith(media_store.PREFIXES):
+        url = media_store.redirect_url(path)
+        if url:
+            return RedirectResponse(url, status_code=302)
     return await call_next(request)
 
 # Include routers
@@ -739,6 +745,11 @@ async def startup_event():
     # notarises them, oldest first). In the background: images and models take a while.
     import threading
     threading.Thread(target=_backfill_fingerprints, daemon=True).start()
+    # Official nodes with R2: move finished media to the bucket, hourly (media_store.py)
+    try:
+        media_store.start_sweeper(DB_PATH)
+    except Exception as e:
+        print(f"[MediaStore] sweeper not started: {e}")
     # Discord: retry role changes that failed and drop links whose account lost its phone verification
     try:
         app_discord.start_reconciler()
