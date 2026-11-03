@@ -69,6 +69,9 @@ MAX_KNOWN_PEERS = 500
 # Tracker sync relay interval (seconds) - how often to upload/download via tracker
 TRACKER_SYNC_INTERVAL = 60
 
+# How often to announce to / read the node directory (seconds); it forgets a node after 30 min
+DIRECTORY_INTERVAL = 300
+
 # Tables and columns for tracker sync (same rules as P2P sync, see sync_ingest.py)
 TRACKER_SYNCABLE_TABLES = SYNCABLE_TABLES
 TRACKER_TABLE_COLUMNS = TABLE_COLUMNS
@@ -100,6 +103,8 @@ class PeerInfo:
     wallet_id: str = ""
     version: str = ""
     last_seen: float = 0.0
+    node_key: str = ""       # from the signed node directory (node_certs.py)
+    official: bool = False   # holds a valid certificate from a federation key
 
     @property
     def key(self) -> str:
@@ -143,6 +148,7 @@ class PeerDiscovery:
             asyncio.create_task(self._cleanup_loop()),
             asyncio.create_task(self._periodic_save_loop()),
             asyncio.create_task(self._tracker_sync_loop()),
+            asyncio.create_task(self._directory_loop()),
         ]
 
     async def stop(self):
@@ -408,6 +414,62 @@ class PeerDiscovery:
             # Re-announce every 5 minutes
             await asyncio.sleep(300)
 
+    # ---------- Tier 1b: the signed node directory (Cloudflare Worker) ----------
+
+    async def _directory_loop(self):
+        """Announce this node to the node directory and add every node listed there."""
+        import config
+        if not config.DIRECTORY_URLS:
+            logger.info("No node directory configured - skipping")
+            return
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("httpx not available - node directory disabled")
+            return
+        await asyncio.sleep(3)
+        while self._running:
+            async with httpx.AsyncClient(timeout=15) as client:
+                for url in config.DIRECTORY_URLS:
+                    await self.directory_round(client, url)
+            try:
+                await asyncio.sleep(DIRECTORY_INTERVAL)
+            except asyncio.CancelledError:
+                break
+
+    async def directory_round(self, client, url: str) -> int:
+        """One announce + fetch against one directory. Returns how many nodes it listed."""
+        import config
+        import node_certs
+        try:
+            if config.ANNOUNCE_TO_DIRECTORY:
+                priv = node_certs.load_or_create_node_key()
+                pub = node_certs.signing.public_key_of(priv)
+                ann = node_certs.make_announcement(priv, self.my_port, config.PUBLIC_API_URL, "3.0.0",
+                                                   node_certs.load_cert(pub))
+                resp = await client.post(f"{url}/announce", json=ann)
+                if resp.status_code != 200:
+                    logger.info(f"Node directory {url} refused our announcement: HTTP {resp.status_code} "
+                                f"{resp.text[:200]}")
+            resp = await client.get(f"{url}/nodes")
+            if resp.status_code != 200:
+                logger.debug(f"Node directory {url}: HTTP {resp.status_code}")
+                return 0
+            entries = node_certs.directory_entries(resp.json())
+        except Exception as e:
+            logger.debug(f"Node directory {url} unreachable: {e}")
+            return 0
+        for e in entries:
+            if self._is_self(e["address"], e["port"]):
+                continue
+            self._add_peer(e["address"], e["port"])
+            peer = self.known_peers.get(f"{e['address']}:{e['port']}")
+            if peer:
+                peer.node_key, peer.official = e["node_key"], e["official"]
+        official = sum(1 for e in entries if e["official"])
+        logger.info(f"Node directory {url}: {len(entries)} nodes ({official} official)")
+        return len(entries)
+
     # ---------- Tier 2: LAN Discovery ----------
 
     async def _lan_listener_loop(self):
@@ -617,11 +679,10 @@ class PeerDiscovery:
         Called by the sync engine when exchanging peer lists with connected peers.
         """
         now = time.time()
-        active = [
-            {"address": p.address, "port": p.port}
-            for p in self.known_peers.values()
-            if now - p.last_seen < PEER_TTL
-        ]
+        live = sorted((p for p in self.known_peers.values() if now - p.last_seen < PEER_TTL),
+                      key=lambda p: (not p.official, -p.last_seen))  # official nodes first
+        active = [{"address": p.address, "port": p.port, **({"official": True} if p.official else {})}
+                  for p in live]
         return active[:max_peers]
 
     def receive_peer_list(self, peers: List[Dict]):
@@ -743,8 +804,13 @@ class PeerDiscovery:
 
     def status(self) -> Dict:
         """Return discovery status for the /p2p/status endpoint."""
+        import node_certs
+        pub = node_certs.signing.public_key_of(node_certs.load_or_create_node_key())
         return {
+            "node_key": pub,
+            "official": bool(node_certs.load_cert(pub)),
             "known_peers": self.peer_count,
+            "official_peers": sum(1 for p in self.known_peers.values() if p.official),
             "connected_peers": len(self.connected_peers),
             "peer_list": self.get_peer_list(20),
         }
