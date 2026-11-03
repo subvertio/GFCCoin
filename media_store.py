@@ -267,7 +267,8 @@ class R2Store:
             raise MediaStoreError(f"R2 PUT {key}: the stored copy's MD5 doesn't match")
 
     def head(self, key: str) -> Optional[Dict]:
-        r = self._request("HEAD", key)
+        # identity: R2 gzips text types otherwise, and then sends no content-length (and a weak ETag)
+        r = self._request("HEAD", key, {"accept-encoding": "identity"})
         if r.status_code == 404:
             return None
         if r.status_code != 200:
