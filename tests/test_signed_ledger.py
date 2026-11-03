@@ -32,6 +32,7 @@ os.environ["GFC_DATA_DIR"] = _TMP
 os.environ["GFC_TREASURY_PUBKEYS"] = TREASURY_PUB
 os.environ["GFC_TREASURY_KEY_FILE"] = str(NO_KEY_FILE)
 os.environ.pop("GFC_FIREBASE_CONFIG", None)  # tests use firebase_stub's project, never a real one
+os.environ["GFC_DIRECTORY_URLS"] = ""  # never announce test nodes to the real node directory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402

@@ -65,7 +65,9 @@ CHECKPOINT_PUBKEYS = tuple(
 # offline by the network operator, separate from the treasury and checkpoint keys. Empty
 # until one exists (`python node_certs.py new-federation-key FILE`).
 # GFC_FEDERATION_PUBKEYS (comma-separated) replaces this, for test networks.
-PINNED_FEDERATION_PUBKEYS = ()
+PINNED_FEDERATION_PUBKEYS = (
+    "9fd2a9a1d74449495d7c92db3f37dbb00586f483af1c2a859aff3c1fb9971670",  # created 2026-11-03, kept offline
+)
 _env_federation = os.environ.get("GFC_FEDERATION_PUBKEYS", "")
 FEDERATION_PUBKEYS = tuple(
     k.strip().lower() for k in _env_federation.split(",") if k.strip()
@@ -73,8 +75,7 @@ FEDERATION_PUBKEYS = tuple(
 
 # The node directory (worker/directory, a Cloudflare Worker): nodes announce themselves there
 # and fetch every other node. GFC_DIRECTORY_URLS (comma-separated) replaces it; empty disables.
-# Filled in once the Worker is deployed (its workers.dev URL).
-DEFAULT_DIRECTORY_URLS = ""
+DEFAULT_DIRECTORY_URLS = "https://gfc-directory.galacticfederation.workers.dev"
 DIRECTORY_URLS = tuple(
     u.strip().rstrip("/") for u in os.environ.get("GFC_DIRECTORY_URLS", DEFAULT_DIRECTORY_URLS).split(",")
     if u.strip())
