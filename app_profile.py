@@ -14,6 +14,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
 import app_follows
 from security import Caller, caller_from_form, caller_from_query
+import media_store
 from config import DB_PATH, AVATAR_DIR
 
 router = APIRouter()
@@ -148,6 +149,8 @@ async def upload_avatar(
 ):
     """Upload or replace the user's avatar: a JPEG, PNG, GIF or WebP image, up to 5 MB."""
     owner = caller.require("post")
+    if media_store.read_only():  # a community node: photos go through an official node
+        raise HTTPException(status_code=403, detail=media_store.READ_ONLY_DETAIL)
 
     # Read file (one byte over the limit is enough to refuse it)
     try:
@@ -187,12 +190,18 @@ async def upload_avatar(
 
     # Update database
     conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT avatar_filename FROM users WHERE LOWER(username) = LOWER(?)", (owner,)).fetchone()
     conn.execute(
         "UPDATE users SET avatar_filename = ? WHERE LOWER(username) = LOWER(?)",
         (avatar_filename, owner)
     )
     conn.commit()
     conn.close()
+
+    # R2 nodes: the new photo goes to the bucket, and the old one (already gone from disk) leaves it
+    media_store.offload_later("avatars", avatar_filename)
+    if row and row[0] and row[0] != avatar_filename:
+        media_store.remove_later("avatars", row[0])
 
     avatar_url = f"/avatars/{avatar_filename}"
     return {"ok": True, "avatar": avatar_url}
