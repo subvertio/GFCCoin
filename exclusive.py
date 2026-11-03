@@ -145,7 +145,8 @@ def make_teaser(seed_id: str, filename: str, runner: Runner = None, seconds: Opt
         if not tmp.is_file() or tmp.stat().st_size == 0:
             raise RuntimeError("no output")
         os.replace(tmp, dest)
-        return True
+        import seed_deletions
+        return not seed_deletions.purge_if_deleted(seed_id, db_path)  # deleted while it was cut
     except Exception as ex:
         print(f"[Exclusive] {seed_id}: teaser failed: {type(ex).__name__}")
         return False

@@ -254,6 +254,11 @@ def release_quarantined(conn: sqlite3.Connection, wallets) -> List[str]:
             seed = dict(zip(QUARANTINE_COLUMNS, row))
             if not seed_is_verified(conn, seed):
                 continue
+            import seed_deletions
+            seed_deletions.init_tables(conn)
+            if seed_deletions.blocks(conn, seed):  # its poster deleted it meanwhile
+                conn.execute("DELETE FROM seed_quarantine WHERE id = ?", (seed["id"],))
+                continue
             conn.execute(
                 f"INSERT OR IGNORE INTO seeds ({', '.join(QUARANTINE_COLUMNS)}) "
                 f"VALUES ({', '.join('?' * len(QUARANTINE_COLUMNS))})", row)

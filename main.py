@@ -54,6 +54,7 @@ import media_store
 import moderation
 import keystore
 import first_post
+import seed_deletions
 import seed_edits
 import verified_wallets
 import exclusive
@@ -96,6 +97,9 @@ async def exclusive_media_gate(request, call_next):
             return JSONResponse({"detail": reason}, status_code=403)
     # Media that isn't on this node's disk is in the R2 bucket (media_store.py)
     if path.startswith(media_store.PREFIXES):
+        parts = media_store.split_path(path)
+        if parts and seed_deletions.is_deleted_media(*parts):  # its poster deleted the post
+            return JSONResponse({"detail": seed_deletions.GONE_DETAIL}, status_code=410)
         url = media_store.redirect_url(path)
         if url:
             return RedirectResponse(url, status_code=302)
@@ -251,6 +255,7 @@ def init_db():
     reposts.init_repost_tables(conn)
     first_post.init_first_post_tables(conn)
     seed_edits.init_seed_edit_tables(conn)
+    seed_deletions.init_tables(conn)
     verified_wallets.init_tables(conn)
     exclusive.init_tables(conn)
     filescan.init_tables(conn)
@@ -770,6 +775,12 @@ async def startup_event():
 
 
 def _backfill_fingerprints():
+    try:
+        cleaned = seed_deletions.retry_purges(DB_PATH)
+        if cleaned:
+            print(f"[Delete] Removed the files of {cleaned} deleted posts")
+    except Exception as e:
+        print(f"[Delete] Retrying deleted posts' files failed: {e}")
     try:
         made = exclusive.backfill(DB_PATH)
         if made:
