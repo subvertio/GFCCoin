@@ -75,6 +75,12 @@ class FakeR2:
             obj = self.objects.get(key)
             if not obj:
                 return httpx.Response(404)
+            if obj[1]["content-type"].startswith("text/") and \
+                    "gzip" in request.headers.get("accept-encoding", ""):
+                # what R2 does: a gzipped answer, with no content-length and a weak ETag
+                return httpx.Response(200, headers={"content-encoding": "gzip",
+                                                    "etag": f'W/"{hashlib.md5(obj[0]).hexdigest()}"',
+                                                    "x-amz-meta-sha256": obj[1]["sha256"]})
             return httpx.Response(200, headers={"content-length": str(len(obj[0])),
                                                 "etag": f'"{hashlib.md5(obj[0]).hexdigest()}"',
                                                 "x-amz-meta-sha256": obj[1]["sha256"]})
@@ -228,6 +234,15 @@ class OfficialNodeTests(MediaStoreTestCase):
         self.assertTrue((SEEDS_THUMB_DIR / name).is_file())
         self.assertNotIn(f"thumbs/{name}", self.stored_keys())
         self.assertEqual(self.client.get(f"/thumbs/{name}", follow_redirects=False).status_code, 200)
+
+    def test_text_posts_move_although_r2_gzips_text(self):
+        self.use()
+        name = f"{uuid.uuid4().hex[:12]}_post.txt"
+        (SEEDS_ORIG_DIR / name).write_text("a text post " * 10)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(media_store.offload("originals", name), media_store.STORED)
+        self.assertFalse((SEEDS_ORIG_DIR / name).exists())
+        self.assertIn(f"originals/{name}", self.stored_keys())
 
     def test_exclusive_clips_stay_on_the_node_behind_signed_links(self):
         self.use()
