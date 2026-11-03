@@ -387,6 +387,9 @@ def _work():
             make_stream(seed_id, filename, runner=run_ffmpeg, content_type=content_type)
             if content_type == "video":
                 make_video_thumbnail(seed_id, runner=run_thumbnail_ffmpeg)
+            import seed_deletions
+            if seed_deletions.purge_if_deleted(seed_id):  # deleted while it was transcoding
+                continue
             media_store.offload_seed_later(seed_id)  # R2 nodes: done here, so to the bucket
         finally:
             _queue.task_done()

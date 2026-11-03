@@ -18,6 +18,7 @@ import config
 import exclusive
 import filescan
 import phone_verify
+import seed_deletions
 import seed_edits
 import signing
 import verified_wallets
@@ -493,12 +494,15 @@ def list_seeds():
 
 @router.get("/seeds/{sid}")
 def get_seed(sid: str):
-    """Return a single seed by id (410 if it was hidden after reports)."""
+    """Return a single seed by id (410 if it was hidden after reports, or deleted by its creator)."""
     conn = sqlite3.connect(DB_PATH)
     try:
         hidden = moderation.is_hidden(conn, sid)
+        deleted = seed_deletions.is_deleted(conn, sid)
     finally:
         conn.close()
+    if deleted:
+        raise HTTPException(status_code=410, detail=seed_deletions.GONE_DETAIL)
     if hidden:
         raise HTTPException(status_code=410, detail="This post was hidden after reports.")
     # Try DB first
@@ -603,6 +607,77 @@ async def edit_seed(
         "edited_at": edit["edited_at"],
         "synced": edit["synced"],
     }
+
+
+def _deleted_response(sid: str, record: Dict[str, Any], files_removed: bool, already: bool) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "id": sid,
+        "deleted": True,
+        "already_deleted": already,
+        "deleted_at": record["deleted_at"],
+        "synced": record["synced"],
+        "files_removed": files_removed,
+        "ledger_unchanged": True,
+        "note": seed_deletions.LEDGER_NOTE,
+    }
+
+
+@router.delete("/seeds/{sid}")
+def delete_seed(sid: str, caller: Caller = Depends(caller_from_query)):
+    """
+    Delete your own post, at any time. Needs a token with the post scope, on the node
+    that holds the post's wallet key, with that key unlocked (log in again if it says so).
+
+    The post, its likes, comments and bookmarks disappear from feeds, and its files are
+    deleted (this node's disk and the R2 bucket: original, thumbnail, streaming copy,
+    teaser). The deletion is signed by the post's reward wallet and synced, so every
+    node removes its copy too. Older unsigned posts are only deleted on this node
+    (`synced: false`).
+
+    Ledger transactions are never removed or reversed: GFC the post already earned or
+    was paid stays in the ledger (`ledger_unchanged: true`).
+
+    Deleting a post that's already deleted returns the same answer (`already_deleted:
+    true`). If some files couldn't be removed yet (R2 unreachable), `files_removed` is
+    false and the node keeps retrying; the post is gone from feeds either way.
+    """
+    owner = caller.require("post")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        seed_deletions.init_tables(conn)
+        row = conn.execute("SELECT owner, signature, reward_wallet FROM seeds WHERE id = ?", (sid,)).fetchone()
+        if row:
+            seed_owner, seed_signature, reward_wallet = row
+            if (seed_owner or "").lower() != owner.lower():
+                raise HTTPException(status_code=403, detail="you can only delete your own posts")
+            private_key = None
+            if seed_signature:
+                if not signing.local_wallet_for(conn, owner, reward_wallet):
+                    raise HTTPException(status_code=403, detail="delete this post from the node you posted it on")
+                data_key = caller.data_key()
+                private_key = signing.get_wallet_private_key(DB_PATH, reward_wallet, data_key)
+                if not private_key and not data_key:
+                    raise HTTPException(status_code=401, detail="log in again to unlock your wallet key")
+                if not private_key:
+                    raise HTTPException(status_code=409, detail=signing.LOCKED_WALLET_MESSAGE)
+            try:
+                seed_deletions.create_deletion(conn, sid, private_key)
+                conn.commit()
+                already = False
+            except LookupError:  # deleted by another request just now
+                already = True
+            except ValueError as ex:
+                raise HTTPException(status_code=409, detail=str(ex))
+        else:
+            already = True
+        record = seed_deletions.deleted_record(conn, sid)
+        if not record or (already and (record["owner"] or "").lower() != owner.lower()):
+            raise HTTPException(status_code=404, detail="seed not found")
+    finally:
+        conn.close()
+    files_removed = record["purged"] or seed_deletions.purge(sid)
+    return _deleted_response(sid, record, files_removed, already)
 
 
 @router.get("/seeds/{sid}/edits")

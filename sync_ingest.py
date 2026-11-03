@@ -17,6 +17,9 @@ Shared by the TCP sync engine (sync_engine.py) and the tracker relay
   seed_quarantine until it arrives (verified_wallets.py).
 - `seed_edits` must be signed by their signer; each node applies a seed's newest
   edit signed by that seed's reward wallet (seed_edits.py).
+- `seed_deletions` must be signed by their signer; a node deletes a seed (rows and
+  files) only for a deletion signed by that seed's reward wallet, and never takes the
+  seed, or likes, comments and bookmarks on it, again (seed_deletions.py).
 - `wallets` rows are accepted as directory entries only. Balances are never taken
   from a peer; they are always computed from validated transactions.
 - `blocks`, `user_grants`, `podt_proofs` and the local repost tables
@@ -31,6 +34,7 @@ from typing import Dict, List
 import blockchain
 import reposts
 import config
+import seed_deletions
 import seed_edits
 import verified_wallets
 import signing
@@ -39,7 +43,7 @@ from security import PUBLIC_USER_COLUMNS, sanitize_incoming_rows
 
 logger = logging.getLogger("gfc.sync")
 
-SYNCABLE_TABLES = ["users", "verified_wallets", "seeds", "seed_edits", "transactions", "likes", "comments", "bookmarks", "wallets",
+SYNCABLE_TABLES = ["users", "verified_wallets", "seeds", "seed_edits", "seed_deletions", "transactions", "likes", "comments", "bookmarks", "wallets",
                    "originality_receipts"]
 
 # Columns for each table (sent to peers, and the only ones accepted from them)
@@ -48,6 +52,7 @@ TABLE_COLUMNS = {
     "seeds": "id, owner, title, description, tags, filename, thumb_filename, content_type, file_size, gfc_earned, likes, comments, views, created_at, reward_wallet, signature, exclusive, teaser_seconds",
     "verified_wallets": "id, username, wallet, verified_at, signer, signature",
     "seed_edits": "id, seed_id, title, description, tags, edited_at, signer, signature",
+    "seed_deletions": "id, seed_id, deleted_at, signer, signature",
     "transactions": "id, sender, recipient, amount, reason, timestamp, amount_cents, tx_hash, tx_type, signature, signer",
     "likes": "id, seed_id, owner, created_at",
     "comments": "id, seed_id, owner, text, created_at",
@@ -62,6 +67,7 @@ TABLE_TIMESTAMP_COL = {
     "seeds": "created_at",
     "verified_wallets": "verified_at",
     "seed_edits": "edited_at",
+    "seed_deletions": "deleted_at",
     "transactions": "timestamp",
     "likes": "created_at",
     "comments": "created_at",
@@ -76,6 +82,8 @@ TABLE_SEND_FILTER = {
     "transactions": "signature != '' AND tx_type != 'PREMINE'",
     # Edits of unsigned seeds can't be verified elsewhere, so they stay local
     "seed_edits": "signature != ''",
+    # Deletions of unsigned seeds can't be verified elsewhere either
+    "seed_deletions": "signature != ''",
 }
 
 
@@ -134,6 +142,22 @@ def ingest_rows(table: str, columns: List[str], rows: list, db_path: str = DB_PA
                       rejected=counts["rejected"], new_ids=counts["new_ids"])
         return result
 
+    if table == "seed_deletions":
+        counts = seed_deletions.ingest_deletions(db_path, columns, rows)
+        result.update(inserted=counts["inserted"], duplicates=counts["duplicates"],
+                      rejected=counts["rejected"], new_ids=counts["new_ids"])
+        return result
+
+    if table in ("likes", "comments", "bookmarks") and "seed_id" in columns:
+        conn = sqlite3.connect(db_path)
+        try:
+            seed_idx = columns.index("seed_id")
+            kept = [r for r in rows if not seed_deletions.is_deleted(conn, r[seed_idx])]
+        finally:
+            conn.close()
+        result["duplicates"] += len(rows) - len(kept)  # already gone with their post
+        rows = kept
+
     if table == "seeds":
         kept = []
         for row in rows:
@@ -148,7 +172,9 @@ def ingest_rows(table: str, columns: List[str], rows: list, db_path: str = DB_PA
             else:
                 kept.append(row)
         result["rejected"] += len(rows) - len(kept)
-        rows = kept
+        # Deleted by their poster: never inserted again
+        rows = seed_deletions.drop_deleted(db_path, columns, kept)
+        result["duplicates"] += len(kept) - len(rows)
 
         # Real network: only posts from phone-verified accounts; the rest wait for proof
         if config.REQUIRE_PHONE_TO_POST and rows:

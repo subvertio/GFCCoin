@@ -18,6 +18,7 @@ import filescan
 import moderation
 import referrals
 import reposts
+import seed_deletions
 import signing
 from security import Caller, caller_from_form, caller_from_query
 from config import DB_PATH
@@ -122,6 +123,17 @@ def user_seeds(username: str, caller: Caller = Depends(caller_from_query)):
 
 # ---------- comments ----------
 
+def _refuse_if_deleted(seed_id: str):
+    """410 for a post its creator deleted (so no likes, comments or bookmarks pile up on it)."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        deleted = seed_deletions.is_deleted(conn, seed_id)
+    finally:
+        conn.close()
+    if deleted:
+        raise HTTPException(status_code=410, detail=seed_deletions.GONE_DETAIL)
+
+
 @router.post("/seeds/{seed_id}/comments")
 async def add_comment(
     seed_id: str,
@@ -132,6 +144,7 @@ async def add_comment(
     owner = caller.require("post")
     if not text.strip():
         raise HTTPException(status_code=400, detail="comment text required")
+    _refuse_if_deleted(seed_id)
 
     comment_id = uuid.uuid4().hex[:12]
     created_at = datetime.datetime.utcnow().isoformat()
@@ -195,6 +208,7 @@ def list_comments(seed_id: str, limit: int = 50, offset: int = 0):
 async def toggle_like(seed_id: str, caller: Caller = Depends(caller_from_form)):
     """Toggle like on a seed. If already liked, unlikes."""
     owner = caller.require("post")
+    _refuse_if_deleted(seed_id)
 
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -237,6 +251,7 @@ async def toggle_like(seed_id: str, caller: Caller = Depends(caller_from_form)):
 async def toggle_bookmark(seed_id: str, caller: Caller = Depends(caller_from_form)):
     """Toggle bookmark on a seed."""
     owner = caller.require("post")
+    _refuse_if_deleted(seed_id)
 
     try:
         conn = sqlite3.connect(DB_PATH)

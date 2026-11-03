@@ -443,6 +443,11 @@ def offload(kind: str, name: str, db_path: str = DB_PATH, keep_local: Optional[b
         return MISSING
     if gated(kind, name, db_path):
         return KEPT
+    import seed_deletions
+    if seed_deletions.is_deleted_media(kind, name, db_path):  # e.g. a transcode that finished after the delete
+        if not dry_run:
+            path.unlink(missing_ok=True)
+        return MISSING
     if not s.writable or dry_run:
         return SKIPPED
     keep = s.keep_local if keep_local is None else keep_local
@@ -605,6 +610,11 @@ def offload_all(db_path: str = DB_PATH, min_age_s: float = SETTLE_S, keep_local:
 
 def _sweeper(db_path: str):
     while True:
+        try:
+            import seed_deletions
+            seed_deletions.retry_purges(db_path)  # deleted posts whose files R2 didn't take back earlier
+        except Exception as ex:
+            print(f"[MediaStore] Deleted posts' files: {type(ex).__name__}")
         try:
             counts = offload_all(db_path)
             if counts.get(STORED) or counts.get(FAILED):

@@ -225,6 +225,34 @@ curl -X POST $NODE/seeds/$ID/edit -H "Authorization: Bearer $T" \
   newest first.
 - `synced: false` in the response means an older unsigned post: the edit shows
   only on this node.
+
+### Deleting a post
+
+```bash
+curl -X DELETE $NODE/seeds/$ID -H "Authorization: Bearer $T"
+```
+
+- Posters can delete their own posts at any time. Ask "Delete this post?" first: it
+  can't be undone.
+- Needs the post scope, on the node that holds the post's wallet key, with the key
+  unlocked: 403 for someone else's post or from another node, 401 "log in again",
+  409 for a locked key, 404 for an unknown post.
+- The post, its likes, comments and bookmarks leave every feed, and its files are
+  deleted (original, thumbnail, streaming copy, teaser), on the node's disk and in
+  the R2 bucket. The node signs the deletion with the post's wallet and syncs it, so
+  every node removes its copy; nobody can delete someone else's post. Afterwards
+  `GET /seeds/{id}` and the media URLs answer 410.
+- **The ledger is never changed:** GFC the post already earned or was paid stays
+  where it is. Transactions are never removed or reversed (`ledger_unchanged: true`,
+  and `note` says so in words you can show).
+- Deleting again returns the same answer with `already_deleted: true`.
+  `files_removed: false` means the bucket couldn't be reached yet: the post is gone
+  from feeds and the node keeps retrying the files.
+- `synced: false` means an older unsigned post: it's deleted on this node only.
+- Cancel an upload that's still sending by aborting the request (there's no post to
+  delete yet). A post whose video is still being transcoded can be deleted right
+  away: the copy is thrown away when it finishes.
+
 - `GET /podt/stats` top earners have `owner`, the account name. Only registered
   accounts are listed: a confirmed name, and on the real network a verified phone.
   Link each one to `GET /users/{owner}/seeds`, which returns that account's posts

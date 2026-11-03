@@ -33,6 +33,7 @@ import config
 import exclusive
 import filescan
 import reposts
+import seed_deletions
 from sync_ingest import SYNCABLE_TABLES, TABLE_COLUMNS, TABLE_TIMESTAMP_COL, ingest_rows, select_rows_since
 from config import DB_PATH, DATA_DIR, SEEDS_ORIG_DIR, SEEDS_THUMB_DIR
 
@@ -739,6 +740,17 @@ class SyncEngine:
         part: Path = pending["part"]
         size = part.stat().st_size if part.exists() else 0
         if not size or not filename:
+            _discard_part(pending)
+            return
+        try:  # deleted by its poster while the file was on its way
+            conn = sqlite3.connect(DB_PATH)
+            try:
+                deleted = seed_deletions.is_deleted(conn, seed_id)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            deleted = False
+        if deleted:
             _discard_part(pending)
             return
 
