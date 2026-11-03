@@ -1,0 +1,13 @@
+name = "gfc-directory"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# KV namespace for node records: `npx wrangler kv namespace create NODES`, then paste its id here
+[[kv_namespaces]]
+binding = "NODES"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+NETWORK = "mainnet"
+# Federation public keys that certify official nodes (comma-separated); same as config.PINNED_FEDERATION_PUBKEYS
+FEDERATION_PUBKEYS = ""

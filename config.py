@@ -60,6 +60,29 @@ CHECKPOINT_PUBKEYS = tuple(
     k.strip().lower() for k in _env_checkpoint.split(",") if k.strip()
 ) if _env_checkpoint.strip() else PINNED_CHECKPOINT_PUBKEYS
 
+# Federation keys (Ed25519, hex): they certify official nodes (node_certs.py). Anyone can
+# run a node; only a node holding a certificate from one of these is "official". Kept
+# offline by the network operator, separate from the treasury and checkpoint keys. Empty
+# until one exists (`python node_certs.py new-federation-key FILE`).
+# GFC_FEDERATION_PUBKEYS (comma-separated) replaces this, for test networks.
+PINNED_FEDERATION_PUBKEYS = ()
+_env_federation = os.environ.get("GFC_FEDERATION_PUBKEYS", "")
+FEDERATION_PUBKEYS = tuple(
+    k.strip().lower() for k in _env_federation.split(",") if k.strip()
+) if _env_federation.strip() else PINNED_FEDERATION_PUBKEYS
+
+# The node directory (worker/directory, a Cloudflare Worker): nodes announce themselves there
+# and fetch every other node. GFC_DIRECTORY_URLS (comma-separated) replaces it; empty disables.
+# Filled in once the Worker is deployed (its workers.dev URL).
+DEFAULT_DIRECTORY_URLS = ""
+DIRECTORY_URLS = tuple(
+    u.strip().rstrip("/") for u in os.environ.get("GFC_DIRECTORY_URLS", DEFAULT_DIRECTORY_URLS).split(",")
+    if u.strip())
+# This node's public HTTPS API, if it has one (announced so apps can find it), and whether
+# to announce at all (a private node can still read the directory)
+PUBLIC_API_URL = os.environ.get("GFC_PUBLIC_API_URL", "").strip()
+ANNOUNCE_TO_DIRECTORY = os.environ.get("GFC_DIRECTORY_ANNOUNCE", "1") != "0"
+
 # Bridge escrow wallets (Ed25519 public keys), one per EVM chain ID: {chain_id: wallet}.
 # Every node enforces the escrow rules in blockchain.bridge_rule_violation() for these
 # wallets, so this is consensus config: change it in a release all nodes take.
