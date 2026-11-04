@@ -117,6 +117,10 @@ BRIDGE_RELAY_FEE_CENTS = int(os.environ.get("GFC_BRIDGE_RELAY_FEE_CENTS", "0"))
 BRIDGE_FAUCET_HOLD_DAYS = float(os.environ.get("GFC_BRIDGE_FAUCET_HOLD_DAYS", "14"))
 
 
+# Whether this node copies posts' media (photos, videos, models) from peers. A node that only
+# serves the bridge or an attester needs the ledger rows, not the files: GFC_SYNC_MEDIA=0.
+SYNC_MEDIA = os.environ.get("GFC_SYNC_MEDIA", "1") != "0"
+
 # Largest post (upload or file synced from a peer). Uploads are streamed to disk, never held in
 # memory, so this is about disk and bandwidth. Caddy's request_body max_size must allow it too.
 MAX_UPLOAD_BYTES = int(float(os.environ.get("GFC_MAX_UPLOAD_MB", "5120")) * 1024 * 1024)
