@@ -510,6 +510,8 @@ class SyncEngine:
 
     async def _request_seed_files(self, peer: SyncPeer, seed_id: str):
         """Request seed files (original + thumbnail) from a peer."""
+        if not config.SYNC_MEDIA:
+            return  # a ledger-only node (bridge, attester) keeps the rows, never the media
         # Check if we already have the file locally
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -844,7 +846,7 @@ class SyncEngine:
 
         Called after every sync cycle to ensure files eventually arrive.
         """
-        if not peer.is_connected:
+        if not peer.is_connected or not config.SYNC_MEDIA:
             return
 
         try:
