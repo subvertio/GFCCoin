@@ -333,6 +333,21 @@ def read_only() -> bool:
     return store().mode == "r2-read-only"
 
 
+def public_origin() -> str:
+    """
+    Where offloaded media is served from ("https://pub-….r2.dev"), or "" when media stays on
+    this node. Pages' Content-Security-Policy must allow it: /thumbs, /teasers, /originals etc.
+    redirect there, and a browser checks the redirect target against img-src / media-src.
+    """
+    s = store()
+    url = s.public_url("x") if s.mode != "local" else None
+    if not url:
+        return ""
+    from urllib.parse import urlsplit
+    p = urlsplit(url)
+    return f"{p.scheme}://{p.netloc}" if p.scheme in ("https", "http") and p.netloc else ""
+
+
 # ---------- what's in the bucket (official nodes) ----------
 
 def init_tables(conn: sqlite3.Connection):

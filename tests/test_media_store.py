@@ -425,6 +425,30 @@ class CommunityNodeTests(MediaStoreTestCase):
         self.assertEqual(self.fake.puts, 0)
 
 
+class PagePolicyTests(MediaStoreTestCase):
+    """Browsers check a redirect's target against the page's CSP: R2's origin must be allowed."""
+
+    @staticmethod
+    def directives(csp):
+        return {d.split()[0]: d.split()[1:] for d in csp.split("; ")}
+
+    def test_web_pages_and_the_web_app_allow_the_bucket(self):
+        for write in (True, False):  # official and community nodes both serve from the bucket
+            self.use(write=write)
+            for path in ("/web", "/app/web/"):
+                csp = self.directives(self.client.get(path, headers={"Accept": "text/html"}).headers["content-security-policy"])
+                for d in ("img-src", "media-src", "connect-src"):
+                    self.assertIn(PUBLIC, csp[d], f"{path} {d}")
+                self.assertNotIn(PUBLIC, csp.get("script-src", []))
+                self.assertNotIn(PUBLIC, csp.get("default-src", []))
+
+    def test_local_nodes_keep_their_policy(self):
+        media_store.configure(media_store.LocalStore())
+        self.assertEqual(media_store.public_origin(), "")
+        csp = self.client.get("/web", headers={"Accept": "text/html"}).headers["content-security-policy"]
+        self.assertIn("media-src 'self';", csp)
+
+
 class LocalNodeTests(MediaStoreTestCase):
     def test_local_mode_is_unchanged(self):
         media_store.configure(media_store.LocalStore())
