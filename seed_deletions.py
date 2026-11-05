@@ -324,6 +324,8 @@ def purge(seed_id: str, db_path: str = DB_PATH) -> bool:
         conn.close()
     if not row:
         return False
+    import wix_publish
+    wix_publish.remove_later(seed_id, db_path)  # off the Wix front page too, if it was there
     ok = all([_remove_file(kind, name, db_path) for kind, name in _media_of(seed_id, *row)])
     if ok:
         conn = sqlite3.connect(db_path)

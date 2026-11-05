@@ -164,7 +164,11 @@ def make_teaser(seed_id: str, filename: str, runner: Runner = None, seconds: Opt
             raise RuntimeError("no output")
         os.replace(tmp, dest)
         import seed_deletions
-        return not seed_deletions.purge_if_deleted(seed_id, db_path)  # deleted while it was cut
+        if seed_deletions.purge_if_deleted(seed_id, db_path):  # deleted while it was cut
+            return False
+        import wix_publish
+        wix_publish.maybe_publish_later(seed_id, db_path)  # the site owner's front page (if set up)
+        return True
     except Exception as ex:
         print(f"[Exclusive] {seed_id}: teaser failed: {type(ex).__name__}")
         return False
