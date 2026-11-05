@@ -1,5 +1,5 @@
 """
-Tests for GFC Exclusives (exclusive.py): videos and text posts only real accounts can see.
+Tests for GFC Exclusives (exclusive.py): videos, audio and text posts only real accounts can see.
 
 Run from the repository root:
     python -m unittest discover -s tests -v
@@ -40,7 +40,7 @@ class ExclusiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(main.app)
-        cls.saved_runner = exclusive.run_teaser_ffmpeg
+        cls.saved_runner = staticmethod(exclusive.run_teaser_ffmpeg)  # the real one, unbound
         exclusive.run_teaser_ffmpeg = fake_teaser
 
     @classmethod
@@ -135,12 +135,68 @@ class ExclusiveTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_only_videos_and_text_posts_can_be_exclusive(self):
+    def test_only_videos_audio_and_text_posts_can_be_exclusive(self):
         _, token = self.account()
         r = self.upload(token, filename="pic.png")
         self.assertEqual(r.status_code, 400)
-        self.assertIn("videos, text posts and downloads", r.json()["detail"])
+        self.assertIn("videos, audio, text posts and downloads", r.json()["detail"])
         self.assertEqual(self.upload(token, filename="note.txt").status_code, 200)
+        self.assertEqual(self.upload(token, filename="song.wav").status_code, 200)
+
+    # ---------- audio ----------
+
+    def test_exclusive_audio_gets_a_preview_and_locks_the_full_track(self):
+        _, token = self.account()
+        r = self.upload(token, filename="track.mp3", title="New single", description="Out now", seconds=10)
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        sid = body["id"]
+        self.assertTrue(body["exclusive"])
+        self.assertEqual(body["teaser"], f"/teasers/{sid}.mp4")
+        self.assertEqual(CUT_SECONDS[sid], 10)
+        self.assertEqual(body["x_post"]["text"],
+                         "New single: 10-second preview. The full track is exclusive to the GFC Network")
+
+        filename = self._filename(sid)
+        self.assertEqual(self.client.get(f"/originals/{filename}").status_code, 403)
+        item = self.feed_item(sid)
+        self.assertEqual((item["full"], item["stream"]), (body["teaser"], body["teaser"]))
+        self.assertEqual(item["description"], "Out now")  # unlike a text post, the description is public
+        links = self.get(f"/seeds/{sid}/play", token).json()
+        self.assertEqual(self.client.get(links["full"]).status_code, 200)
+        self.assertIsNone(links["text"])
+
+        web = self.client.get("/web").text
+        share = self.client.get(f"/p/{sid}", headers=BROWSER).text
+        for page in (web, share):
+            self.assertIn(f'<audio controls', page)
+            self.assertIn(f'data-exclusive="1"', page)
+            self.assertIn(body["teaser"], page)
+            self.assertIn("hear the full track", page)
+            self.assertNotIn(filename, page)
+        self.assertIn("10-second preview", share)
+
+    def test_synced_and_missing_audio_teasers_are_made(self):
+        _, token = self.account()
+        sid = self.upload(token, filename="beat.flac").json()["id"]
+        exclusive.teaser_path(sid).unlink()
+        self.assertGreaterEqual(exclusive.backfill(main.DB_PATH), 1)
+        self.assertIsNotNone(exclusive.teaser_url(sid))
+
+    @unittest.skipUnless(audio_stream.ffmpeg_path(), "ffmpeg not installed")
+    def test_real_audio_teaser_is_cut_to_length(self):
+        import subprocess
+        import tempfile
+        exe = audio_stream.ffmpeg_path()
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dest = Path(tmp) / "song.wav", Path(tmp) / "teaser.mp4"
+            subprocess.run([exe, "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+                            str(src)], check=True)
+            self.saved_runner(src, dest, 5)
+            probe = subprocess.run([exe, "-hide_banner", "-i", str(dest)], capture_output=True, text=True).stderr
+            self.assertIn("Audio: aac", probe)
+            self.assertNotIn("Video:", probe)
+            self.assertRegex(probe, r"Duration: 00:00:0[45]\.")
 
     # ---------- the lock ----------
 

@@ -180,8 +180,8 @@ def download_box(seed: dict, page: str) -> str:
 EXCLUSIVE_BADGE = '<p class="exclusive">&#9733; Exclusive to the GFC Network</p>'
 
 
-def exclusive_note(text_post: bool) -> str:
-    what = "read the whole post" if text_post else "watch the full clip"
+def exclusive_note(ctype: str) -> str:
+    what = {"video": "watch the full clip", "audio": "hear the full track"}.get(ctype, "read the whole post")
     return (f'<p class="exclusive-note">Log in to the <a class="getapp-open" href="/app">GFC app</a> '
             f'with a verified account to {what}.</p>')
 
@@ -218,10 +218,15 @@ def render_card(seed: dict, now: datetime.datetime = None) -> str:
                      f'data-poster="{e(thumb_path)}" aria-label="Play the {seconds}-second preview of {e(title or "video")} (muted)">'
                      f'{poster}<span class="play" aria-hidden="true">&#9654;</span>'
                      f'<span class="tag">{seconds}s preview</span></button>')
+        elif ctype == "audio" and teaser:
+            cover = f'<img src="{e(thumb_path)}" alt="" loading="lazy">' if thumb_path else ""
+            media = (f'<div class="media audio">{cover}'
+                     f'<audio controls preload="none" data-exclusive="1" src="{e(teaser)}" '
+                     f'aria-label="{seconds}-second preview of {e(title or "track")}"></audio>'
+                     + (f'<span class="tag">{seconds}s preview</span>' if cover else "") + '</div>')
         elif thumb_path:
             media = f'<a class="media" href="{e(page)}"><img src="{e(thumb_path)}" alt="{e(title)}" loading="lazy"></a>'
-        text_post = ctype != "video"
-        media += exclusive_note(text_post)
+        media += exclusive_note(ctype)
     elif text_post:
         pass  # text only, no media frame
     elif ctype == "image" and (thumb_path or media_path):
@@ -353,7 +358,7 @@ SCRIPT = """
     try { seen = sessionStorage.getItem('gfc-getapp') === '1'; } catch (e) {}
     if (!seen) setTimeout(showGetApp, 15000);
   }
-  document.querySelectorAll('video[data-exclusive]').forEach(v => v.addEventListener('ended', showGetApp));
+  document.querySelectorAll('video[data-exclusive], audio[data-exclusive]').forEach(v => v.addEventListener('ended', showGetApp));
   function playVideo(btn) {
     const v = document.createElement('video');
     v.className = 'media'; v.controls = true; v.muted = true; v.playsInline = true; v.preload = 'metadata';

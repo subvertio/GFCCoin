@@ -785,7 +785,7 @@ class SyncEngine:
                 conn.close()
                 if row:
                     audio_stream.enqueue(seed_id, filename, row[0], size)
-                    if row[1] and row[0] == "video":  # a GFC Exclusive video: this node makes its own public teaser
+                    if row[1] and row[0] in exclusive.TEASER_KINDS:  # a GFC Exclusive video or track: this node makes its own public teaser
                         exclusive.make_teaser_later(seed_id, filename)
                     if filescan.is_download(filename):  # every node scans downloads itself
                         filescan.enqueue(seed_id)

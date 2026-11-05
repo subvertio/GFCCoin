@@ -250,13 +250,13 @@ async def seeds_upload(
       - a .zip file is a download (games, apps, packs): it's checked and virus-scanned
                         (filescan.py) before anyone can get it; `download.status` in the
                         response is "pending" until then.
-      - exclusive     : optional, videos, text posts (.txt) and downloads. "Exclusive to GFC Network":
-                        the full clip / the post's text is only for real GFC accounts
-                        (GET /seeds/{id}/play). Videos get a 5, 10 or 30-second public teaser
+      - exclusive     : optional, videos, audio, text posts (.txt) and downloads. "Exclusive to GFC Network":
+                        the full clip or track / the post's text is only for real GFC accounts
+                        (GET /seeds/{id}/play). Videos and audio get a 5, 10 or 30-second public teaser
                         (`teaser`); text posts show only their title. `x_post` in the
                         response is a ready-made X post, and `share` has the text,
                         link and X/LinkedIn/Substack links.
-      - teaser_seconds: optional, exclusive videos: 5 (default), 10 or 30.
+      - teaser_seconds: optional, exclusive videos and audio: 5 (default), 10 or 30.
 
     If the file matches content that was notarised earlier (see reposts.py), the
     seed is still shared but becomes a repost: `repost_of` names the original, and
@@ -277,7 +277,7 @@ async def seeds_upload(
         raise HTTPException(status_code=403, detail=media_store.READ_ONLY_DETAIL)
     require_phone_to_post(owner)
     if exclusive_to_gfc and not exclusive.can_be_exclusive(file.filename or "", detect_content_type(file.filename or "")):
-        raise HTTPException(status_code=400, detail="Only videos, text posts and downloads (.zip) can be exclusive to the GFC Network.")
+        raise HTTPException(status_code=400, detail="Only videos, audio, text posts and downloads (.zip) can be exclusive to the GFC Network.")
     if teaser_seconds not in exclusive.TEASER_LENGTHS:
         raise HTTPException(status_code=400, detail="The preview can be 5, 10 or 30 seconds long.")
 
@@ -418,7 +418,7 @@ async def seeds_upload(
         # encoding; if it fails (no ffmpeg) the post stays exclusive and the startup backfill retries.
         text_post = exclusive.is_text_file(orig_safe)
         result["exclusive"] = True
-        result["teaser"] = teaser = (exclusive.teaser_url(sid) if stored and content_type == "video"
+        result["teaser"] = teaser = (exclusive.teaser_url(sid) if stored and content_type in exclusive.TEASER_KINDS
                                      and exclusive.make_teaser(sid, orig_safe, seconds=teaser_seconds) else None)
         result["teaser_seconds"] = teaser_seconds
         result["full"], result["stream_pending"] = teaser, False
@@ -426,10 +426,11 @@ async def seeds_upload(
             result["desc"] = description  # the poster's own copy
         import app_share
         is_download = filescan.is_download(orig_safe)
+        is_audio = content_type == "audio"
         result["x_post"] = exclusive.x_post(final_title, app_share.share_url(sid), text_post=text_post,
-                                            seconds=teaser_seconds, download=is_download)
+                                            seconds=teaser_seconds, download=is_download, audio=is_audio)
         result["share"] = exclusive.share_links(final_title, app_share.share_url(sid), text_post=text_post,
-                                                seconds=teaser_seconds, download=is_download)
+                                                seconds=teaser_seconds, download=is_download, audio=is_audio)
     if bonus:
         result["first_post_bonus"] = bonus["amount"]
         if bonus["pending"]:

@@ -218,7 +218,8 @@ def share_page(seed_id: str, request: Request):
         text_post = exclusive.is_text_file(seed["filename"])
         title = seed["title"] or "GFC Exclusive"
         if text_post or not seed["description"]:
-            what = "the whole post" if text_post else "the full clip"
+            what = ("the whole post" if text_post else "the full track" if seed["content_type"] == "audio"
+                    else "the full clip")
             description = f"Exclusive to the GFC Network: log in to the GFC app to see {what}. By {seed['owner']}."
     og_description = description if len(description) <= DESCRIPTION_LIMIT else description[:DESCRIPTION_LIMIT - 1] + "…"
     thumb_path = f"/thumbs/{quote(seed['thumb_filename'], safe='')}" if seed["thumb_filename"] else ""
@@ -245,12 +246,17 @@ def share_page(seed_id: str, request: Request):
         if ctype == "video" and seed["teaser"]:
             media = (f'<video class="hero" controls playsinline preload="metadata"{poster} data-exclusive="1" '
                      f'src="{e(seed["teaser"])}"></video>')
+        elif ctype == "audio" and seed["teaser"]:
+            cover = f'<img class="hero" src="{e(thumb_path)}" alt="{e(title)}">' if thumb_path else ""
+            media = (f'{cover}<audio controls preload="metadata" data-exclusive="1" '
+                     f'src="{e(seed["teaser"])}"></audio>')
         elif thumb_path:
             media = f'<img class="hero" src="{e(thumb_path)}" alt="{e(title)}">'
         else:
             media = ""
-        what = "read the whole post" if ctype != "video" else "watch the full clip"
-        preview = f" &middot; {seed['teaser_seconds']}-second preview" if ctype == "video" and seed["teaser"] else ""
+        what = {"video": "watch the full clip", "audio": "hear the full track"}.get(ctype, "read the whole post")
+        preview = (f" &middot; {seed['teaser_seconds']}-second preview"
+                   if ctype in exclusive.TEASER_KINDS and seed["teaser"] else "")
         media += (f'<p class="badge exclusive">&#9733; Exclusive to the GFC Network{preview}</p>'
                   f'<p class="exclusive-note">Log in to the <a class="getapp-open" href="/app">GFC app</a> '
                   f'with a verified account to {what}.</p>')
