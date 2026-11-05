@@ -79,8 +79,19 @@ NOT_PUBLISHED = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <a style="color:#7df9ff" href="/app">Get the Windows or Android app</a>.</p></body></html>"""
 
 
+def security_headers() -> dict:
+    """SECURITY_HEADERS, plus offloaded media's origin (R2) for images, video/audio and fetches."""
+    import media_store
+    origin = media_store.public_origin()
+    if not origin:
+        return dict(SECURITY_HEADERS)
+    csp = "; ".join(f"{d} {origin}" if d.split()[0] in ("img-src", "media-src", "connect-src") else d
+                    for d in CSP.split("; "))
+    return {**SECURITY_HEADERS, "Content-Security-Policy": csp}
+
+
 def _headers(path: str) -> dict:
-    h = dict(SECURITY_HEADERS)
+    h = security_headers()
     if path.startswith("assets/"):
         h["Cache-Control"] = "public, max-age=31536000, immutable"  # hashed names
     else:

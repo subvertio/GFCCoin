@@ -33,6 +33,7 @@ from fastapi.responses import HTMLResponse
 import app_release
 import exclusive
 import filescan
+import media_store
 import moderation
 import reposts
 from app_engagement import SEED_SELECT, seed_row_to_dict
@@ -510,11 +511,15 @@ def _security_headers(nonce: str, analytics: bool = False) -> dict:
     # model-viewer fetches models from this node, decodes textures to blob: URLs and loads
     # Draco/KTX2 decoders (wasm in blob: workers) from gstatic when a model needs them.
     # With analytics on, Clarity's script and data hosts are allowed too.
+    # Offloaded media (R2) is served from its public URL: images, video/audio and 3D models
+    # (model-viewer fetches them) redirect there, so it's allowed for all three.
     extra_script = f" {CLARITY_SCRIPT_SRC}" if analytics else ""
     extra_connect = f" {CLARITY_CONNECT_SRC}" if analytics else ""
-    csp = (f"default-src 'none'; img-src 'self' blob: data:{extra_connect}; media-src 'self'; "
+    origin = media_store.public_origin()
+    media = f" {origin}" if origin else ""
+    csp = (f"default-src 'none'; img-src 'self' blob: data:{media}{extra_connect}; media-src 'self'{media}; "
            f"script-src 'nonce-{nonce}' {MODEL_VIEWER_SRC}{extra_script} 'wasm-unsafe-eval'; "
-           f"connect-src 'self' blob: data: https://www.gstatic.com{extra_connect}; worker-src blob:; "
+           f"connect-src 'self' blob: data: https://www.gstatic.com{media}{extra_connect}; worker-src blob:; "
            f"style-src 'nonce-{nonce}' '{MODEL_VIEWER_STYLE_HASH}'; "
            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
     return {
