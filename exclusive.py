@@ -1,8 +1,12 @@
 """
-GFC Exclusives - videos and text posts that are only for real GFC accounts
+GFC Exclusives - videos, audio and text posts that are only for real GFC accounts
 
-A poster can mark a video or a text post "Exclusive to GFC Network" when uploading
-(exclusive=true).
+A poster can mark a video, an audio track, a text post or a download "Exclusive to GFC
+Network" when uploading (exclusive=true).
+
+Audio works like video: the public teaser is the first 5, 10 or 30 seconds (AAC in an
+.mp4, with a 1-second fade out, at the same /teasers/<seed_id>.mp4 path), and the full
+track (/originals/ and its /streams/ copy) is locked the same way.
 
 Text posts (a .txt seed whose description holds the text): only the title is public.
 Feed/seed JSON, the web feed, share pages, X cards and the edit history leave the body
@@ -89,10 +93,18 @@ def is_text_file(filename: str) -> bool:
     return (filename or "").lower().endswith(TEXT_EXTENSION)
 
 
+TEASER_KINDS = ("video", "audio")  # content types that get a public preview
+
+
 def can_be_exclusive(filename: str, content_type: str) -> bool:
-    """Videos, text posts and downloads (zips: only real accounts can download them)."""
+    """Videos, audio, text posts and downloads (zips: only real accounts can download them)."""
     import filescan
-    return content_type == "video" or is_text_file(filename) or filescan.is_download(filename)
+    return content_type in TEASER_KINDS or is_text_file(filename) or filescan.is_download(filename)
+
+
+def _kind_of(filename: str) -> str:
+    from app_seeds import detect_content_type  # app_seeds imports this module
+    return detect_content_type(filename or "")
 
 
 # ---------- teasers ----------
@@ -113,13 +125,19 @@ def teaser_url(seed_id: str) -> Optional[str]:
 
 
 def run_teaser_ffmpeg(src: Path, dest: Path, seconds: int = TEASER_SECONDS) -> None:
-    """The streaming-copy settings (upright, <=720p, H.264/AAC, faststart), first `seconds` only."""
+    """
+    The streaming-copy settings, first `seconds` only: video upright, <=720p, H.264/AAC;
+    audio AAC with a 1-second fade out, so the preview doesn't stop mid-note.
+    """
     exe = audio_stream.ffmpeg_path()
     if not exe:
         raise FileNotFoundError("ffmpeg not installed")
-    args = audio_stream._ffmpeg_args("video", src, dest, exe)
+    kind = "audio" if _kind_of(src.name) == "audio" else "video"
+    args = audio_stream._ffmpeg_args(kind, src, dest, exe)
     out = args.index("-f")  # output options go before the output file
     args[out:out] = ["-t", str(seconds)]
+    if kind == "audio":
+        args[out:out] = ["-af", f"afade=t=out:st={max(0, seconds - 1)}:d=1"]
     import subprocess
     subprocess.run(args, check=True, timeout=TEASER_TIMEOUT_S, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -172,9 +190,7 @@ def backfill(db_path: str = DB_PATH) -> int:
     finally:
         conn.close()
     return sum(1 for sid, fn in rows if teaser_url(sid) is None and fn
-               and audio_stream.needs_stream(fn, 0, "video") and not is_text_file(fn)
-               and fn.lower().endswith((".mp4", ".mov", ".avi", ".webm", ".mkv", ".wmv", ".flv"))
-               and make_teaser(sid, fn))
+               and _kind_of(fn) in TEASER_KINDS and make_teaser(sid, fn))
 
 
 # ---------- signed links ----------
@@ -288,24 +304,27 @@ def apply_to_items(items: Iterable[Dict], db_path: str = DB_PATH) -> List[Dict]:
     return items
 
 
-def share_text(title: str, text_post: bool = False, seconds: int = TEASER_SECONDS, download: bool = False) -> str:
+def share_text(title: str, text_post: bool = False, seconds: int = TEASER_SECONDS, download: bool = False,
+               audio: bool = False) -> str:
     if text_post:
         return f"{title or 'New post'}: the full post is exclusive to the GFC Network"
     if download:
         return f"{title or 'New download'}: exclusive to the GFC Network"
+    if audio:
+        return f"{title or 'New track'}: {seconds}-second preview. The full track is exclusive to the GFC Network"
     return f"{title or 'New video'}: {seconds}-second preview. The full clip is exclusive to the GFC Network"
 
 
 def x_post(title: str, url: str, text_post: bool = False, seconds: int = TEASER_SECONDS,
-           download: bool = False) -> Dict[str, str]:
+           download: bool = False, audio: bool = False) -> Dict[str, str]:
     """A ready-made X post: for a video, attach the teaser and post this text and link."""
-    text = share_text(title, text_post, seconds, download)
+    text = share_text(title, text_post, seconds, download, audio)
     import app_share
     return {"text": text, "url": url, "intent": app_share.x_intent_url(text, url)}
 
 
 def share_links(title: str, url: str, text_post: bool = False, seconds: int = TEASER_SECONDS,
-                download: bool = False) -> Dict[str, str]:
+                download: bool = False, audio: bool = False) -> Dict[str, str]:
     """
     Where a poster can share an exclusive: X (web intent with the text and link), LinkedIn
     (its share page takes only the link; it reads the title and image from the share page),
@@ -313,7 +332,7 @@ def share_links(title: str, url: str, text_post: bool = False, seconds: int = TE
     for the poster to paste into a Note).
     """
     from urllib.parse import quote as q
-    text = share_text(title, text_post, seconds, download)
+    text = share_text(title, text_post, seconds, download, audio)
     import app_share
     return {"text": text, "url": url,
             "x": app_share.x_intent_url(text, url),
