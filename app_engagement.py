@@ -103,7 +103,7 @@ def get_feed_items(owner: str = "anonymous", author: str = "") -> Dict[str, Any]
         app_follows.apply_to_items(conn, items, owner)
 
         # Hidden after reports, or from an account this viewer blocked
-        items = filescan.apply_to_items(exclusive.apply_to_items(moderation.visible_items(conn, items, owner)))
+        items = reposts.apply_to_items(filescan.apply_to_items(exclusive.apply_to_items(moderation.visible_items(conn, items, owner))))
         conn.close()
     except Exception:
         items = []
@@ -305,7 +305,7 @@ def get_bookmarks(caller: Caller = Depends(caller_from_query)):
     except Exception:
         return {"items": []}
 
-    return {"items": filescan.apply_to_items(exclusive.apply_to_items(items))}
+    return {"items": reposts.apply_to_items(filescan.apply_to_items(exclusive.apply_to_items(items)))}
 
 
 # ---------- playback PoDT credits ----------

@@ -93,7 +93,7 @@ def feed_page(page: int, page_size: int = PAGE_SIZE):
             return [], False
         rows = conn.execute(f"{SEED_SELECT} WHERE seeds.id IN ({', '.join('?' * len(ids))})", ids).fetchall()
         by_id = {r[0]: seed_row_to_dict(r) for r in rows}
-        seeds = filescan.apply_to_items(exclusive.apply_to_items([by_id[i] for i in ids if i in by_id]))
+        seeds = reposts.apply_to_items(filescan.apply_to_items(exclusive.apply_to_items([by_id[i] for i in ids if i in by_id])))
         for s in seeds:
             s["repost_of"] = reposts.public_info(reposts.repost_of(conn, s["id"]))
         return seeds, start + page_size < len(order)

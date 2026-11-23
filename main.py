@@ -661,7 +661,7 @@ def search(q: str = "", caller: Caller = Depends(caller_from_query)):
             item["liked"] = item["id"] in liked_set
             item["bookmarked"] = item["id"] in bookmarked_set
 
-    seed_items = filescan.apply_to_items(exclusive.apply_to_items(moderation.visible_items(conn, seed_items, owner)))
+    seed_items = reposts.apply_to_items(filescan.apply_to_items(exclusive.apply_to_items(moderation.visible_items(conn, seed_items, owner))))
     result["seeds"] = seed_items
     result["seed_count"] = len(seed_items)
 

@@ -624,7 +624,7 @@ def my_seeds(caller: Caller = Depends(caller_from_query)):
             "owner_avatar": owner_avatar,
             "repost_of": repost_of.get(r[0]),
         })
-    return {"items": filescan.apply_to_items(exclusive.apply_to_items(items))}
+    return {"items": reposts.apply_to_items(filescan.apply_to_items(exclusive.apply_to_items(items)))}
 
 @router.get("/seeds")
 def list_seeds():

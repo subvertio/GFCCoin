@@ -362,6 +362,12 @@ class RepostTests(unittest.TestCase):
                                                  (mine["id"],)).fetchone()
         conn.close()
         self.assertEqual((desc, tags), ("Made it", "music"))
+        # The feed the apps read carries the label too (profile feed as well)
+        feed = {i["id"]: i for i in self.client.get("/feed").json()["items"]}
+        self.assertEqual(feed[mine["id"]]["repost_of"]["owner"], alice)
+        self.assertIsNone(feed[original["id"]]["repost_of"])
+        profile = self.client.get(f"/users/{bob}/seeds").json()["items"]
+        self.assertEqual([i["repost_of"]["seed_id"] for i in profile], [original["id"]])
         self.assertTrue(sig)  # signed by bob's wallet, so it syncs
         self.assertEqual((SEEDS_ORIG_DIR / filename).read_bytes(), data)
         self.assertTrue(filename.endswith("_track.mp3"))

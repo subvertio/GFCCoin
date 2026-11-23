@@ -392,6 +392,25 @@ def repost_map(conn: sqlite3.Connection) -> Dict[str, dict]:
                                "matched_by": r[4]}) for r in rows}
 
 
+def apply_to_items(items: List[dict], db_path: Optional[str] = None) -> List[dict]:
+    """Add `repost_of` (the "Repost of @original" label) to feed items that don't have it."""
+    if not items:
+        return items
+    from config import DB_PATH
+    try:
+        conn = sqlite3.connect(db_path or DB_PATH)
+        try:
+            labels = repost_map(conn)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return items
+    for item in items:
+        if isinstance(item, dict) and "id" in item and not item.get("repost_of"):
+            item["repost_of"] = labels.get(item["id"])
+    return items
+
+
 def maybe_credit(db_path: str, reposter: str, repost_seed_id: str, original: dict) -> Optional[dict]:
     """
     Pay the original creator REPOST_CREDIT_CENTS for a repost, if the reposter is
