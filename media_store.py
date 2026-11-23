@@ -383,6 +383,39 @@ def exists(kind: str, name: str, db_path: str = DB_PATH) -> bool:
     return False
 
 
+def fetch_copy(kind: str, name: str, dest: Path) -> bool:
+    """
+    Copy a stored file to `dest` (a repost reuses the original's file): from this node's disk
+    when it's here, else downloaded from the bucket's public URL. False if it's in neither.
+    """
+    try:
+        src = local_path(kind, name)
+    except ValueError:
+        return False
+    if src.is_file():
+        import shutil
+        shutil.copyfile(src, dest)
+        return True
+    s = store()
+    if s.mode == "local":
+        return False
+    part = dest.with_name(dest.name + ".part")
+    try:
+        with s.client.stream("GET", s.public_url(key_for(kind, name))) as r:
+            if r.status_code != 200:
+                return False
+            with open(part, "wb") as out:
+                for chunk in r.iter_bytes(1024 * 1024):
+                    out.write(chunk)
+        part.replace(dest)
+        return True
+    except (httpx.HTTPError, OSError) as ex:
+        print(f"[MediaStore] copying {kind}/{name} failed: {type(ex).__name__}")
+        return False
+    finally:
+        part.unlink(missing_ok=True)
+
+
 def redirect_url(path: str) -> Optional[str]:
     """For a media URL whose file isn't on this node: where it is in the bucket (or None)."""
     s = store()

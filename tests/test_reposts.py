@@ -329,6 +329,74 @@ class RepostTests(unittest.TestCase):
         self.assertEqual(stats["gfc_in_circulation_cents"] + stats["treasury_balance_cents"],
                          blockchain.PREMINE_CENTS)
 
+    # --- the Repost button (POST /seeds/{id}/repost) ---
+
+    def repost(self, token, seed_id, status=200):
+        with as_treasury_node():
+            r = self.client.post(f"/seeds/{seed_id}/repost", params={"api_token": token} if token else None)
+        self.assertEqual(r.status_code, status, r.text)
+        return r.json()
+
+    def test_repost_button_copies_the_post_and_credits_the_original(self):
+        alice, alice_token, alice_wallet = self.register()
+        bob, bob_token, bob_wallet = self.register()
+        carol, carol_token, _ = self.register()
+        data = os.urandom(200_000)
+        files = {"file": ("track.mp3", data, "audio/mpeg")}
+        with as_treasury_node():
+            original = self.client.post("/seeds/upload", files=files, data={
+                "api_token": alice_token, "title": "My track", "description": "Made it", "tags": "music"}).json()
+        start, bob_start = self.balance(alice_wallet), self.balance(bob_wallet)
+
+        mine = self.repost(bob_token, original["id"])
+        self.assertEqual(mine["owner"], bob)
+        self.assertEqual(mine["repost_of"]["seed_id"], original["id"])
+        self.assertEqual(mine["repost_of"]["owner"], alice)
+        self.assertEqual(mine["repost_credit_gfc"], 15.0)
+        self.assertEqual(self.balance(alice_wallet) - start, blockchain.REPOST_CREDIT_CENTS)
+        self.assertEqual(self.balance(bob_wallet), bob_start)
+        seed = self.client.get(f"/seeds/{mine['id']}").json()
+        self.assertEqual((seed["title"], seed["owner"], seed["repost_of"]["owner"]), ("My track", bob, alice))
+        conn = sqlite3.connect(main.DB_PATH)
+        filename, desc, tags, sig = conn.execute("SELECT filename, description, tags, signature FROM seeds WHERE id = ?",
+                                                 (mine["id"],)).fetchone()
+        conn.close()
+        self.assertEqual((desc, tags), ("Made it", "music"))
+        self.assertTrue(sig)  # signed by bob's wallet, so it syncs
+        self.assertEqual((SEEDS_ORIG_DIR / filename).read_bytes(), data)
+        self.assertTrue(filename.endswith("_track.mp3"))
+
+        # Once per person; never your own; a repost of a repost reposts the original
+        self.assertIn("already reposted", self.repost(bob_token, original["id"], 409)["detail"])
+        self.assertIn("own post", self.repost(alice_token, original["id"], 400)["detail"])
+        self.assertIn("own post", self.repost(alice_token, mine["id"], 400)["detail"])
+        self.assertIn("own post", self.repost(bob_token, mine["id"], 400)["detail"])
+        theirs = self.repost(carol_token, mine["id"])
+        self.assertEqual(theirs["repost_of"]["seed_id"], original["id"])
+        self.assertEqual(self.balance(alice_wallet) - start, 2 * blockchain.REPOST_CREDIT_CENTS)
+        self.assertEqual(self.repost("", original["id"], 401)["detail"], "Log in to repost.")
+        self.repost(bob_token, "no-such-post", 404)
+
+    def test_repost_keeps_exclusive_and_needs_a_notarised_original(self):
+        _, alice_token, _ = self.register()
+        _, bob_token, _ = self.register()
+        files = {"file": ("secret.mp3", os.urandom(100_000), "audio/mpeg")}
+        with as_treasury_node():
+            original = self.client.post("/seeds/upload", files=files, data={
+                "api_token": alice_token, "exclusive": "true", "teaser_seconds": "30"}).json()
+        mine = self.repost(bob_token, original["id"])
+        conn = sqlite3.connect(main.DB_PATH)
+        self.assertEqual(conn.execute("SELECT exclusive, teaser_seconds FROM seeds WHERE id = ?",
+                                      (mine["id"],)).fetchone(), (1, 30))
+        conn.close()
+        # Not notarised (posted through a node without the treasury key): can't be reposted yet
+        unnotarised = self.upload(alice_token, "new.mp3", os.urandom(50_000), notary=False)
+        self.assertIn("hasn't confirmed", self.repost(bob_token, unnotarised["id"], 409)["detail"])
+        conn = sqlite3.connect(main.DB_PATH)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM seeds WHERE owner = (SELECT owner FROM seeds WHERE id = ?) "
+                                      "AND id != ?", (mine["id"], mine["id"])).fetchone()[0], 0)
+        conn.close()
+
     # --- network rules ---
 
     def receipt(self, prints, seed_id, first_seen_at, key=TREASURY_PRIV, owner="alice", wallet=None):

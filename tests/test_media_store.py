@@ -213,6 +213,20 @@ class OfficialNodeTests(MediaStoreTestCase):
         self.assertEqual(got.status_code, 302)
         self.assertEqual(got.headers["location"], f"{PUBLIC}/{key}")
 
+    def test_fetch_copy_downloads_a_file_that_is_only_in_the_bucket(self):
+        self.use()
+        _, headers = self.account()
+        data = os.urandom(5000)
+        name = self.upload(headers, "pic.png", data).json()["full"].removeprefix("/originals/")
+        self.assertFalse((SEEDS_ORIG_DIR / name).exists())
+        dest = SEEDS_ORIG_DIR / f"{uuid.uuid4().hex[:12]}_copy.png"
+        self.assertTrue(media_store.fetch_copy("originals", name, dest))
+        self.assertEqual(dest.read_bytes(), data)
+        self.assertFalse(media_store.fetch_copy("originals", "nothing_here.png", SEEDS_ORIG_DIR / "x_never.png"))
+        self.assertFalse((SEEDS_ORIG_DIR / "x_never.png").exists())
+        self.assertFalse((SEEDS_ORIG_DIR / "x_never.png.part").exists())
+        dest.unlink()
+
     def test_keep_local_uploads_but_keeps_the_file(self):
         self.use(keep_local=True)
         _, headers = self.account()
