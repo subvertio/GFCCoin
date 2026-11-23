@@ -441,6 +441,148 @@ async def seeds_upload(
         media_store.offload_seed_later(sid)
     return result
 
+def _repost_source(conn: sqlite3.Connection, sid: str, owner: str) -> Dict[str, Any]:
+    """The post to copy for a repost of `sid` by `owner`, and its original. HTTP errors if it can't be reposted."""
+    cols = ("id", "owner", "title", "description", "tags", "filename", "thumb_filename", "content_type",
+            "file_size", "exclusive", "teaser_seconds")
+    row = conn.execute(f"SELECT {', '.join(cols)} FROM seeds WHERE id = ?", (sid,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="seed not found")
+    src = dict(zip(cols, row))
+    if moderation.is_hidden(conn, sid):
+        raise HTTPException(status_code=410, detail="This post was hidden after reports.")
+    reposts.init_repost_tables(conn)
+    of = reposts.repost_of(conn, sid)
+    original_id = of["original_seed_id"] if of else sid
+    original_owner = (of["original_owner"] if of else src["owner"]) or ""
+    if original_owner.lower() == owner.lower() or (src["owner"] or "").lower() == owner.lower():
+        raise HTTPException(status_code=400, detail="That's your own post: you can share it, but not repost it.")
+    if not conn.execute("SELECT 1 FROM originality_receipts WHERE seed_id = ?", (original_id,)).fetchone():
+        raise HTTPException(status_code=409, detail="This post can't be reposted yet: the network hasn't "
+                                                    "confirmed who made it first. Share its link instead.")
+    already = conn.execute(
+        "SELECT 1 FROM seeds JOIN reposts ON reposts.seed_id = seeds.id "
+        "WHERE LOWER(seeds.owner) = LOWER(?) AND reposts.original_seed_id = ?", (owner, original_id)).fetchone()
+    if already:
+        raise HTTPException(status_code=409, detail="You've already reposted this.")
+    if filescan.is_download(src["filename"] or ""):
+        scan = filescan.status_of(conn, sid)
+        if not scan or scan["status"] != filescan.CLEAN:
+            raise HTTPException(status_code=409, detail="This download can't be reposted until its virus check has passed.")
+    src["original_id"], src["original_owner"] = original_id, original_owner
+    return src
+
+
+@router.post("/seeds/{sid}/repost")
+async def repost_seed(sid: str, caller: Caller = Depends(caller_from_query)):
+    """
+    Repost someone else's post to your profile and your followers' feeds, without uploading it
+    again: the node copies the post's file into a new post of yours. It's labelled "Repost of
+    @original" and everything it earns goes to the original creator (reposts.py): view rewards,
+    PoDT credit, and the one-time repost credit when you're phone-verified. Title, description,
+    tags and the "Exclusive to GFC" setting (with its preview length) are the original's.
+
+    A repost of a repost reposts the original. 400 for your own post, 409 if you've already
+    reposted it, if the network hasn't notarised the original yet, or for a download whose
+    virus check hasn't passed. Same login and phone rules as posting.
+    """
+    owner = caller.owner("post")
+    if owner == "anonymous":
+        raise HTTPException(status_code=401, detail="Log in to repost.")
+    if media_store.read_only():
+        raise HTTPException(status_code=403, detail=media_store.READ_ONLY_DETAIL)
+    require_phone_to_post(owner)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        src = _repost_source(conn, sid, owner)
+    finally:
+        conn.close()
+
+    data_key = caller.data_key()
+    reward_wallet, private_key, locked = signing.unlocked_wallet_for(DB_PATH, owner, data_key, "")
+    if locked and not data_key:
+        raise HTTPException(status_code=401, detail="log in again to unlock your wallet key")
+    if locked:
+        raise HTTPException(status_code=409, detail=signing.LOCKED_WALLET_MESSAGE)
+    reward_wallet = reward_wallet or ""
+    if reward_wallet and config.REQUIRE_PHONE_TO_POST:
+        verified_wallets.attest(DB_PATH, owner)
+
+    base = src["filename"].split("_", 1)[1] if "_" in src["filename"] else src["filename"]
+    orig_safe = f"{uuid.uuid4().hex[:12]}_{safe_name(base)}"
+    new_id = signing.seed_id_for(reward_wallet, orig_safe) if reward_wallet else uuid.uuid4().hex[:12]
+    orig_path = ORIG_DIR / orig_safe
+    if not await run_in_threadpool(media_store.fetch_copy, "originals", src["filename"], orig_path):
+        raise HTTPException(status_code=409, detail="The post's file isn't available on this node right now. Try again later.")
+    file_size = orig_path.stat().st_size
+    thumb_filename = ""
+    if src["thumb_filename"]:
+        thumb_filename = f"{new_id}_thumb.jpg"
+        if not await run_in_threadpool(media_store.fetch_copy, "thumbs", src["thumb_filename"], THUMB_DIR / thumb_filename):
+            thumb_filename = ""
+
+    created_at = datetime.datetime.utcnow().isoformat()
+    signature = signing.sign_seed(private_key, {
+        "id": new_id, "owner": owner, "filename": orig_safe, "file_size": file_size,
+        "created_at": created_at, "reward_wallet": reward_wallet}) if reward_wallet else ""
+    is_exclusive = bool(src["exclusive"])
+    teaser_seconds = src["teaser_seconds"] or exclusive.TEASER_SECONDS
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "INSERT INTO seeds (id, owner, title, description, tags, filename, thumb_filename, content_type, "
+            "file_size, gfc_earned, created_at, reward_wallet, signature, exclusive, teaser_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_id, owner, src["title"], src["description"], src["tags"], orig_safe, thumb_filename,
+             src["content_type"], file_size, 0.0, created_at, reward_wallet, signature,
+             1 if is_exclusive else 0, teaser_seconds))
+        conn.commit()
+    finally:
+        conn.close()
+
+    original = reposts.process_seed(DB_PATH, new_id)
+    if not original:
+        # Never let a copy pass as an original: undo it (it can't happen while the receipt exists)
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            conn.execute("DELETE FROM seeds WHERE id = ?", (new_id,))
+            conn.execute("DELETE FROM originality_receipts WHERE seed_id = ?", (new_id,))
+            conn.execute("DELETE FROM seed_fingerprints WHERE seed_id = ?", (new_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        orig_path.unlink(missing_ok=True)
+        if thumb_filename:
+            (THUMB_DIR / thumb_filename).unlink(missing_ok=True)
+        raise HTTPException(status_code=409, detail="This post couldn't be reposted. Share its link instead.")
+    credit = None
+    try:
+        credit = reposts.maybe_credit(DB_PATH, owner, new_id, original)
+    except Exception as ex:
+        print(f"Warning: repost credit failed for seed {new_id}: {ex}")
+
+    stream_pending = False
+    try:
+        stream_pending = audio_stream.enqueue(new_id, orig_safe, src["content_type"], file_size)
+    except Exception as ex:
+        print(f"Warning: media stream queueing failed for seed {new_id}: {ex}")
+    if filescan.is_download(orig_safe):
+        filescan.enqueue(new_id)
+    if is_exclusive and src["content_type"] in exclusive.TEASER_KINDS:
+        try:
+            exclusive.make_teaser(new_id, orig_safe, seconds=teaser_seconds)
+        except Exception as ex:
+            print(f"Warning: teaser failed for repost {new_id}: {ex}")
+    if not stream_pending:
+        media_store.offload_seed_later(new_id)
+    return {
+        "ok": True, "id": new_id, "owner": owner, "title": src["title"],
+        "content_type": src["content_type"], "created_at": created_at,
+        "repost_of": reposts.public_info(original),
+        "repost_credit_gfc": credit["amount"] if credit else 0.0,
+    }
+
+
 @router.get("/seeds/mine")
 def my_seeds(caller: Caller = Depends(caller_from_query)):
     """Return seeds uploaded by the authenticated user."""
@@ -482,7 +624,7 @@ def my_seeds(caller: Caller = Depends(caller_from_query)):
             "owner_avatar": owner_avatar,
             "repost_of": repost_of.get(r[0]),
         })
-    return {"items": filescan.apply_to_items(exclusive.apply_to_items(items))}
+    return {"items": reposts.apply_to_items(filescan.apply_to_items(exclusive.apply_to_items(items)))}
 
 @router.get("/seeds")
 def list_seeds():

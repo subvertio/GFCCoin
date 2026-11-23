@@ -73,6 +73,7 @@ def feed_items_for(seed_ids: List[str], viewer: str) -> List[dict]:
     import app_follows
     import exclusive
     import filescan
+    import reposts
     if not seed_ids:
         return []
     conn = sqlite3.connect(DB_PATH)
@@ -82,4 +83,4 @@ def feed_items_for(seed_ids: List[str], viewer: str) -> List[dict]:
         app_follows.apply_to_items(conn, items, viewer)
     finally:
         conn.close()
-    return filescan.apply_to_items(exclusive.apply_to_items(items))
+    return reposts.apply_to_items(filescan.apply_to_items(exclusive.apply_to_items(items)))
